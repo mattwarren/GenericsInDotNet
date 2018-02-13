@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -157,7 +162,7 @@ public:
     // Methods related to interception of interface calls
     static void GenerateCheckForProxy(CPUSTUBLINKER* psl);
     // Methods related to activation
-    static BOOL         IsRemoteActivationRequired(EEClass *pClass);
+    static BOOL         IsRemoteActivationRequired(TypeHandle ty);
     static OBJECTREF    CreateProxyOrObject(MethodTable *pMT, BOOL fIsCom = FALSE);
     // Methods related to field accessors
     static void FieldAccessor(FieldDesc* pFD, OBJECTREF o, LPVOID pVal, BOOL fIsGetter);
@@ -197,8 +202,8 @@ public:
     inline static MethodTable *GetMarshalByRefClass() { return s_pMarshalByRefObjectClass;}
     static MethodTable *GetProxyAttributeClass();
 
-    static BOOL CheckCast(OBJECTREF orTP, EEClass *pClass);
-    static BOOL CheckCast(OBJECTREF orTP, EEClass* pObjClass, EEClass *pClass);
+    static BOOL CheckCast(OBJECTREF orTP, TypeHandle ty);
+    static BOOL CheckCast(OBJECTREF orTP, TypeHandle objTy, TypeHandle ty);
     static OBJECTREF GetExposedContext();
     static AppDomain *GetServerDomainForProxy(OBJECTREF orTP);
     static Context *GetServerContextForProxy(OBJECTREF orTP);
@@ -218,7 +223,7 @@ public:
         _ASSERTE(s_RemotingCrst.Initialized());
         s_RemotingCrst.Leave();
     }
-    static ManagedActivationType __stdcall RequiresManagedActivation(EEClass *pClass);        
+    static ManagedActivationType __stdcall RequiresManagedActivation(TypeHandle ty);        
 	static BOOL IsRemotingInitialized()
 	{
 		return s_fInitializedRemoting;
@@ -226,11 +231,11 @@ public:
 
 private:
     static BOOL InitializeFields();    
-    static HRESULT GetExecutionLocation(EEClass *pClass, LPCSTR pszLoc); 
+    static HRESULT GetExecutionLocation(TypeHandle ty, LPCSTR pszLoc); 
     static void CopyDestToSrc(LPVOID pDest, LPVOID pSrc, UINT cbSize);
     static void CallFieldAccessor(FieldDesc* pFD, OBJECTREF o, VOID * pVal,
                                   BOOL fIsGetter, BOOL fIsByValue, BOOL fIsGCRef,
-                                  EEClass *pClass, EEClass *fldClass,
+                                  TypeHandle ty, TypeHandle fldTy,
                                   CorElementType fieldType, UINT cbSize);
 
     static void GetTypeAndFieldName(FieldArgs *pArgs, FieldDesc *pFD);
@@ -417,9 +422,9 @@ public:
     static BOOL Initialize();
     static void Cleanup();
     static BOOL InitializeFields();
-    static OBJECTREF CreateTPOfClassForRP(EEClass *pClass, OBJECTREF pRP);
+    static OBJECTREF CreateTPOfClassForRP(TypeHandle ty, OBJECTREF pRP);
     static INT32 IsTPMethodTable(MethodTable *pMT);
-    static EEClass *GetClassBeingProxied(OBJECTREF pTP);    
+    static TypeHandle GetClassBeingProxied(OBJECTREF pTP);    
     
     static Stub* CreateStubForNonVirtualMethod(MethodDesc* pMD, CPUSTUBLINKER *psl, LPVOID pvAddrOfCode, Stub* pInnerStub);
     static LPVOID GetOrCreateNonVirtualThunkForVirtualMethod(MethodDesc* pMD, CPUSTUBLINKER* psl);
@@ -427,8 +432,8 @@ public:
     static OBJECTREF GetRP(OBJECTREF orTP);
     static LPVOID __stdcall CallTarget(const void *pTarget, LPVOID pvFirst, LPVOID pvSecond);
     static LPVOID __stdcall CallTarget(const void *pTarget, LPVOID pvFirst, LPVOID pvSecond, LPVOID pvThird);
-    static BOOL CheckCast(const void* pTarget, OBJECTREF orTP, EEClass *pClass);
-    static BOOL RefineProxy(OBJECTREF orTP, EEClass *pClass);
+    static BOOL CheckCast(const void* pTarget, OBJECTREF orTP, TypeHandle ty);
+    static BOOL RefineProxy(OBJECTREF orTP, TypeHandle ty);
     inline static Stub* GetTPStub() { return s_pTPStub; }
     inline static Stub* GetDelegateStub() { return s_pDelegateStub; }
     inline static DWORD GetOffsetOfMT() { return s_dwMTOffset; }
@@ -515,12 +520,10 @@ extern "C" LPVOID __stdcall CTPMethodTable__CallTargetHelper2(const void *pTarge
 extern "C" LPVOID __stdcall CTPMethodTable__CallTargetHelper3(const void *pTarget, LPVOID pvFirst, LPVOID pvSecond, LPVOID pvThird);
 extern "C" BOOL __stdcall CTPMethodTable__GenericCheckForContextMatch(Object* orTP);
 
-
-
-inline EEClass *CTPMethodTable::GetClassBeingProxied(OBJECTREF pTP)
+inline TypeHandle CTPMethodTable::GetClassBeingProxied(OBJECTREF pTP)
 {
     _ASSERTE(pTP->GetMethodTable()->IsTransparentProxyType());
-    return ((MethodTable *) pTP->GetPtrOffset(s_dwMTOffset))->GetClass();
+    return TypeHandle((MethodTable *) pTP->GetPtrOffset(s_dwMTOffset));
 }
 
 // Returns the one and only transparent proxy stub

@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -275,6 +280,7 @@ void FJit::setup() {
     /* compute arg offsets, note offsets <0 imply enregistered args */
     args_len = methodInfo->args.numArgs;
     if (methodInfo->args.hasThis()) args_len++;     //+1 since we treat <this> as arg 0, if <this> is present
+    if (methodInfo->args.hasTypeArg()) args_len++;
     if (args_len > args_size) {
         if (argsMap) delete [] argsMap;
         args_size = args_len+4; //+4 to cut down on reallocating.
@@ -284,7 +290,6 @@ void FJit::setup() {
     // Get layout information on the arguments
     C_ASSERT(sizeof(stackItems) == sizeof(argInfo));
     argInfo* argsInfo = (argInfo*) argsMap;
-    _ASSERTE(!methodInfo->args.hasTypeArg());
 
     unsigned enregisteredSize = 0;
     argsFrameSize = computeArgInfo(&methodInfo->args, argsInfo, jitInfo->getMethodClass(methodInfo->ftn),
@@ -384,6 +389,101 @@ void FJit::setup() {
     mapInfo.methodJitGeneratedLocalsSize = JitGeneratedLocalsSize;
 
     
+}
+
+/******************************************************************************/
+// Given a type token, generate code that will evaluate to the correct type
+// handle representation of that token. This might require run-time lookup if the
+// enclosing method is shared between instantiations and the token refers to a 
+// type spec that contains type variables.
+//
+// Usage: This emits the handle as argument 1 for a handler call.  
+void FJit::TokenToHandle(unsigned annotatedToken, 
+                             CORINFO_CLASS_HANDLE& tokenType,
+                             bool helperType)
+{
+  void *pEmbedGenHnd;
+
+  CORINFO_GENERICHANDLE_RESULT result = jitInfo->embedGenericHandle(
+                                                   methodInfo->scope, 
+                                                   annotatedToken, 
+                                                   methodInfo->ftn, 
+                                                   &pEmbedGenHnd, 
+                                                   tokenType);
+
+  // It's available at compile-time!
+  if (result.kind == CORINFO_LOOKUP_CONST)
+  {
+    emit_arg( result.handle, 1, helperType ); 
+  }
+  else
+    TokenToHandleHelper(annotatedToken, result, helperType);
+}  
+
+void FJit::TokenToHandleHelper(unsigned annotatedToken,
+                               CORINFO_GENERICHANDLE_RESULT result,
+                               bool helperType)
+{ 
+  _ASSERTE(result.kind != CORINFO_LOOKUP_CONST);
+
+  // For now, always use the run-time helper function
+  // Note that the 3rd and fourth parameters have to be emitted in reverse order.
+    callInfo.reset();  
+
+    // It requires the exact method desc argument
+    if (result.kind == CORINFO_LOOKUP_METHODPARAM)
+    {
+        emit_arg( 0, 4, EXTERNAL_CALL ); // Null slot pointer
+        emit_arg( 0, 3, EXTERNAL_CALL ); // Don't care about vtable pointer
+        emit_arg( annotatedToken, 2, EXTERNAL_CALL ); 
+
+        // Exact method desc passed as the last argument.  This should be the equivalent of
+        // CEE_LDARG with the appropriate offset, then push the result to REG 1.
+        // emit_arg( typeParam, 1, EXTERNAL_CALL ); 
+
+        stackItems* varInfo = &(argsMap[methodInfo->args.numArgs]);
+        emit_LDVAR_I4(varInfo->offset);
+        emit_tos_arg( 1, EXTERNAL_CALL );
+
+        // // For now, pass the representative method desc
+        // emit_arg( methodInfo->ftn, 1, EXTERNAL_CALL ); 
+    }
+
+    // It requires the vtable pointer
+    else
+    {
+      emit_arg( 0, 4, EXTERNAL_CALL ); // Null slot pointer
+
+      if (result.kind == CORINFO_LOOKUP_CLASSPARAM)
+      {
+        // Vtable passed as the last argument.  This should be the equivalent of
+        // CEE_LDARG with the appropriate offset, then push the result to REG 3.
+        stackItems* varInfo = &(argsMap[methodInfo->args.numArgs]);
+        emit_LDVAR_I4(varInfo->offset);  
+        emit_LDIND_PTR();
+        emit_tos_arg( 3, EXTERNAL_CALL );
+        // emit_arg( 0, 3, EXTERNAL_CALL ); 
+      }
+      else
+      {
+        // Vtable pointer of this object
+        // This should be the equivalent of CEE_LDARG_0, with the result
+        // pushed to REG 3.
+        stackItems* varInfo = &(argsMap[0]);
+        emit_LDVAR_I4(varInfo->offset);  
+        emit_LDIND_PTR();
+        emit_tos_arg( 3, EXTERNAL_CALL );
+      }
+
+      emit_arg( annotatedToken, 2, EXTERNAL_CALL ); 
+      emit_arg( methodInfo->ftn, 1, EXTERNAL_CALL ); // (Representative) method desc
+    }
+
+    LABELSTACK((outPtr-outBuff),0);
+    emit_callhelper_I4I4I4I4_I4(FJit_pHlpRuntimeHandle);
+    // emit_callhelper_I4I4I4I4_I4(CORINFO_HELP_RUNTIMEHANDLE);
+    emit_pushresult_Ptr();   
+    emit_tos_arg( 1, helperType ); 
 }
 
 /* get and initialize a compilation context to use for compiling */
@@ -1646,7 +1746,14 @@ FJitResult FJit::verificationFailure(INDEBUG( char * ErrorMessage ) )
     ver_failure_offset = InstStart;
     resetContextState(false);
 
-    return jitCompileVerificationThrow();
+    if (flags & CORJIT_FLG_IMPORT_ONLY) {
+        // The DONT_INLINE flag is overloaded to indicate that verification of
+        // an uninstantiatated generic failed.  
+        jitInfo->setMethodAttribs(methodInfo->ftn, CORINFO_FLG_DONT_INLINE);
+        return FJIT_VERIFICATIONFAILED;
+    }
+    else
+        return jitCompileVerificationThrow();
 }
 
 /*******************************************************************
@@ -1917,10 +2024,14 @@ int FJit::verifyThisPtr
  * This function verifies creation of a delegate
  *******************************************************************/
 int FJit::verifyDelegate
-( CORINFO_SIG_INFO  & sig, CORINFO_METHOD_HANDLE methodHnd, unsigned char* codePtr,
-  unsigned DelStartDelta, int popCount )
+( CORINFO_SIG_INFO  & sig, 
+  CORINFO_CLASS_HANDLE targetClass,
+  unsigned int token,
+  unsigned char* codePtr,
+  unsigned DelStartDelta, 
+  int popCount )
 {
-  // Check if there is an enough arguments on the stack
+  // Check if there are enough arguments on the stack
   if ( opStack_len < (sig.numArgs + popCount)) return FAILED_VALIDATION;
   // Delegate ctor has two arguments object and ftn pointer
   if ( sig.numArgs != 2 ) return FAILED_VALIDATION;
@@ -1932,41 +2043,55 @@ int FJit::verifyDelegate
   OpType ActObject = topOp(1+popCount);    // object (typeRef)
   OpType ActMethod = topOp(popCount);      // ftn pointer (typeMethod)
   // Verify the stack arguments
-  if (!( ActObject.isRef() && ActMethod.isMethod() )) return FAILED_VERIFICATION;
+  if (!( ActObject.isRef() && ActMethod.isMethod() )) 
+      return FAILED_VERIFICATION;
   // Obtain the arguments from the function signature
-  OpType DeclObject = getTypeFromSig(sig, sig.args); DeclObject.toFPNormalizedType();
-  OpType DeclMethod = getTypeFromSig(sig, jitInfo->getArgNext(sig.args)); DeclMethod.toFPNormalizedType();
+  OpType DeclObject = getTypeFromSig(sig, sig.args); 
+  DeclObject.toFPNormalizedType();
+  OpType DeclMethod = getTypeFromSig(sig, jitInfo->getArgNext(sig.args)); 
+  DeclMethod.toFPNormalizedType();
   // Verify the signature arguments
-  if (!( DeclObject.isRef() && DeclMethod.enum_() == typeI )) return FAILED_VERIFICATION;
+  if (!( DeclObject.isRef() && DeclMethod.enum_() == typeI )) 
+      return FAILED_VERIFICATION;
   // Match the object from the stack to the object from the signature
-  if (!( canAssign( jitInfo, ActObject, DeclObject ))) return FAILED_VERIFICATION;
-  // Match the signature of the delegate to the signature of the method
-  if (!( jitInfo->isCompatibleDelegate(
-                  (ActObject.isNull() ? NULL : ActObject.cls()),
-                   ActMethod.getMethod(),
-                   methodHnd))) return FAILED_VERIFICATION;
-  // in the case of protected methods, it is a requirement that the 'this'
-  // pointer be a subclass of the current context.  Perform this check
-  BOOL targetIsStatic = jitInfo->getMethodAttribs( ActMethod.getMethod(), methodInfo->ftn ) & CORINFO_FLG_STATIC;
-  CORINFO_CLASS_HANDLE instanceClassHnd = jitInfo->getMethodClass(methodInfo->ftn);;
-  if (!(ActObject.isNull() || targetIsStatic))
-          instanceClassHnd = ActObject.cls();
-  _ASSERTE( instanceClassHnd != NULL );
-  if (!( jitInfo->canAccessMethod(methodInfo->ftn, ActMethod.getMethod(), instanceClassHnd ) ))
-          return FAILED_VERIFICATION;  
+  if (!( canAssign( jitInfo, ActObject, DeclObject ))) 
+      return FAILED_VERIFICATION;
+
   // There only two legal IL sequences for creation of a delegate
   // 1) ldfnt <token>; newobj delegate;           - length 6 bytes
   // 2) dup; ldvirtfnt <token>; newobj delegate;  - length 7 bytes
   // Check that the delta to the start of the delegate creating sequence is valid
-  if ( DelStartDelta != 6 && DelStartDelta != 7 ) return FAILED_VERIFICATION;
-  codePtr = &codePtr[-((int)DelStartDelta)]; // back up to the start of the sequence
   switch( DelStartDelta ) {
-  case 6: if ( codePtr[0] != CEE_PREFIX1 || codePtr[1] != (CEE_LDFTN & 0xFF) ) return FAILED_VERIFICATION;
-          break;
-  case 7:  if (codePtr[0] != CEE_DUP  || codePtr[1] != CEE_PREFIX1 || codePtr[2] != (CEE_LDVIRTFTN & 0xFF))
-            return TRUE;
-          break;
+  case 6:
+      codePtr -= DelStartDelta; // back up to the start of the sequence
+      if ( codePtr[0] != CEE_PREFIX1 || codePtr[1] != (CEE_LDFTN & 0xFF) )
+          return FAILED_VERIFICATION;
+      break;
+  case 7:
+      codePtr -= DelStartDelta; // back up to the start of the sequence
+      if (codePtr[0] != CEE_DUP  || codePtr[1] != CEE_PREFIX1 || codePtr[2] != (CEE_LDVIRTFTN & 0xFF))
+          return FAILED_VERIFICATION;
+      break;
   }
+  // Match the signature of the delegate to the signature of the method
+  // We must have verified the opcode sequence before using delegateMethodRef
+
+  _ASSERTE(delegateMethodRef != 0);
+  CORINFO_CLASS_HANDLE parentTypeHandle = 
+      jitInfo->findClass(
+          methodInfo->scope,
+          jitInfo->getMemberParent(methodInfo->scope, delegateMethodRef),
+          methodInfo->ftn);
+
+  if (!( jitInfo->isCompatibleDelegate(
+                  (ActObject.isNull() ? NULL : ActObject.cls()),
+                   parentTypeHandle,
+                   ActMethod.getMethod(), 
+                   targetClass,
+                   methodInfo->scope,
+                   delegateMethodRef,
+                   token)))
+      return FAILED_VERIFICATION;
 
   return SUCCESS_VERIFICATION;
 }
@@ -2679,6 +2804,7 @@ FJitResult FJit::jitCompile(
 
     InstStart = 0;
     DelegateStart = 0;
+    delegateMethodRef = 0;
 
 JitAgain:
 
@@ -2712,7 +2838,15 @@ JitAgain:
 #endif
 
     // Check if need to verify the code
-    JitVerify = !(flags & CORJIT_FLG_SKIP_VERIFICATION ) ? true : false;
+    CorInfoInstantiationVerification instVerInfo = 
+       jitInfo->isInstantiationOfVerifiedGeneric(methodHandle);
+
+    //Skip verification where possible including
+    //instantiations of verified generic code
+    JitVerify = 
+        (!(flags & CORJIT_FLG_SKIP_VERIFICATION))
+        && (instVerInfo != INSTVER_GENERIC_PASSED_OR_SKIPPED_VERIFICATION); 
+
 
     // Check if the offset of the vararg token has been computed correctly
     offsetVarArgToken += ( methodInfo->args.hasThis() ? sizeof( void * ) : 0 ) +
@@ -2759,6 +2893,12 @@ JitAgain:
 
     if (methodAttributes & CORINFO_FLG_SYNCH) {
         ENTER_CRIT;
+    }
+
+    // Generate a verification throw if this is an instantiation of
+    // non-verifiable generic code 
+    if (instVerInfo == INSTVER_GENERIC_FAILED_VERIFICATION) {
+        return verificationFailure(INDEBUG("Instantiation of generic that failed verification"));
     }
 
     // Verify the exception handlers' table
@@ -3627,6 +3767,10 @@ DO_CEE_LDC_I4:
             JitResult = compileCEE_UNBOX();
             break;
 
+        case CEE_UNBOX_ANY: 
+            JitResult = compileCEE_UNBOX_ANY();
+            break;
+
         case CEE_ISINST:
             JitResult = compileCEE_ISINST();
             break;
@@ -3677,6 +3821,10 @@ DO_CEE_LDC_I4:
 
         case CEE_LDELEM_REF:
             JitResult = compileCEE_LDELEM_REF();
+            break;
+
+        case CEE_LDELEM:
+            JitResult = compileCEE_LDELEM();
             break;
 
         case CEE_LDELEMA:
@@ -3762,6 +3910,10 @@ DO_CEE_LDC_I4:
             JitResult = compileCEE_STELEM_REF();
             break;
 
+        case CEE_STELEM:
+            JitResult = compileCEE_STELEM();
+            break;
+        
         case CEE_CKFINITE:
             VERIFICATION_CHECK(topOp().enum_() == typeR8);
             emit_CKFINITE_R();
@@ -3800,9 +3952,7 @@ DO_CEE_LDC_I4:
         // Check to see if anything failed
         if (JitResult != FJIT_OK)
         {
-            if (JitResult == FJIT_VERIFICATIONFAILED)
-                return FJIT_OK;
-            else if (JitResult == FJIT_JITAGAIN)
+            if (JitResult == FJIT_JITAGAIN)
                 goto JitAgain;
             else
                 return JitResult;
@@ -4340,14 +4490,15 @@ FJitResult FJit::compileCEE_LDFLD( OPCODE opcode)
     // Get MemberRef token for object field
     GET(token, unsigned int, false);
     VERIFICATION_CHECK(jitInfo->isValidToken(methodInfo->scope, token));
-    VALIDITY_CHECK(targetField = jitInfo->findField (methodInfo->scope, token,methodHandle));
+    VALIDITY_CHECK(targetField = jitInfo->findField (methodInfo->scope, token, methodHandle));
     fieldAttributes = jitInfo->getFieldAttribs(targetField,methodHandle);
-    CORINFO_CLASS_HANDLE valClass;
-    jitType = jitInfo->getFieldType(targetField, &valClass);
+
     fieldIsStatic =  (fieldAttributes & CORINFO_FLG_STATIC) ? true : false;
+    VALIDITY_CHECK(targetClass = jitInfo->findClass(methodInfo->scope, jitInfo->getMemberParent(methodInfo->scope, token), methodHandle));
+    // targetClass is the enclosing class
 
-    VALIDITY_CHECK(targetClass = jitInfo->getFieldClass(targetField)); // targetClass is the enclosing class
-
+    CORINFO_CLASS_HANDLE valClass;
+    jitType = jitInfo->getFieldType(targetField, &valClass, targetClass);    
 
     if (fieldIsStatic)
     {
@@ -4357,6 +4508,8 @@ FJitResult FJit::compileCEE_LDFLD( OPCODE opcode)
     OpType fieldType(jitType, valClass);
     OpType type;
 #if !defined(FJIT_NO_VALIDATION)
+
+
     // Initialize the type correctly getting additional information for managed pointers and objects
     if ( fieldType.enum_() == typeByRef )
     {
@@ -4385,8 +4538,7 @@ FJitResult FJit::compileCEE_LDFLD( OPCODE opcode)
         // Store the object reference for the access check
         instanceClassHnd = type.cls();
         // Check that the object on the stack encloses the field
-        VERIFICATION_CHECK( canAssign( jitInfo, type,
-                OpType( type.enum_(),jitInfo->getEnclosingClass(targetField))));
+        VERIFICATION_CHECK( canAssign( jitInfo, type, OpType( type.enum_(),targetClass)));
         // Remove the instance object of the IL stack
         POP_STACK(1);
         if (fieldIsStatic) {
@@ -4605,15 +4757,13 @@ FJitResult FJit::compileCEE_LDFLDA( OPCODE opcode)
     VERIFICATION_CHECK(jitInfo->isValidToken(methodInfo->scope, token));
     VALIDITY_CHECK(targetField = jitInfo->findField (methodInfo->scope, token,methodInfo->ftn));
     fieldAttributes = jitInfo->getFieldAttribs(targetField,methodInfo->ftn);
-    VALIDITY_CHECK(targetClass = jitInfo->getFieldClass(targetField));
+    VALIDITY_CHECK(targetClass = jitInfo->findClass(methodInfo->scope, jitInfo->getMemberParent(methodInfo->scope, token), methodInfo->ftn));
 
     DWORD classAttribs = jitInfo->getClassAttribs(targetClass,methodInfo->ftn);
     fieldIsStatic = fieldAttributes & CORINFO_FLG_STATIC ? true : false;
 
 
 #if !defined(FJIT_NO_VALIDATION)
-    // Get the enclosing field
-    CORINFO_CLASS_HANDLE enclosingClass = jitInfo->getEnclosingClass(targetField);
     // Verify that the correct type of the instruction is used
     VERIFICATION_CHECK( fieldIsStatic || (opcode == CEE_LDFLDA) );
     // Verify that a not trying to use an RVA
@@ -4624,7 +4774,7 @@ FJitResult FJit::compileCEE_LDFLDA( OPCODE opcode)
     {
         VERIFICATION_CHECK( (methodAttributes & CORINFO_FLG_CONSTRUCTOR) &&
                             (((methodAttributes & CORINFO_FLG_STATIC) != 0) == fieldIsStatic) &&
-                                enclosingClass == jitInfo->getMethodClass(methodInfo->ftn)
+                                targetClass == jitInfo->getMethodClass(methodInfo->ftn)
                             INDEBUG( || !"bad use of initonly field (address taken)") );
     }
     if (opcode == CEE_LDFLDA)
@@ -4636,7 +4786,7 @@ FJitResult FJit::compileCEE_LDFLDA( OPCODE opcode)
         // Verification doesn't allow native int to be used
         VERIFICATION_CHECK( topOpE() != typeI );
         // Check that the object on the stack encloses the field
-        VERIFICATION_CHECK( canAssign( jitInfo, topOp(), OpType( topOpE(), enclosingClass )) );
+        VERIFICATION_CHECK( canAssign( jitInfo, topOp(), OpType( topOpE(), targetClass )) );
         // Verify that the field is accessible
         VERIFICATION_CHECK( jitInfo->canAccessField(methodInfo->ftn, targetField, topOp().cls()) );
         // Remove the instance object from the stack
@@ -4648,7 +4798,7 @@ FJitResult FJit::compileCEE_LDFLDA( OPCODE opcode)
                                                         jitInfo->getMethodClass(methodInfo->ftn)) );
     // Determine the type of the field and verify that it is not a pointer
     CORINFO_CLASS_HANDLE fieldClass;
-    jitType = jitInfo->getFieldType(targetField, &fieldClass);
+    jitType = jitInfo->getFieldType(targetField, &fieldClass, targetClass);
     OpType fieldType(jitType, fieldClass);
 
     // Verify that we are not trying to obtain an address of a managed pointer
@@ -4685,8 +4835,6 @@ FJitResult FJit::compileCEE_LDFLDA( OPCODE opcode)
             VALIDITY_CHECK(address = (unsigned) jitInfo->getFieldAddress(targetField));
             emit_pushconstant_Ptr(address);
 
-            CORINFO_CLASS_HANDLE fieldClass;
-            jitType = jitInfo->getFieldType(targetField, &fieldClass);
             if (jitType == CORINFO_TYPE_VALUECLASS && !(fieldAttributes & CORINFO_FLG_UNMANAGED) &&
                 !(classAttribs & CORINFO_FLG_UNMANAGED)) {
                 emit_LDFLD_REF(true);
@@ -4908,7 +5056,7 @@ FJitResult FJit::compileCEE_LDC_R8()
 
 FJitResult FJit::compileCEE_LDNULL()
 {
-    emit_WIN32(emit_LDC_I4(0)) emit_WIN64(emit_LDC_I8(0));
+    emit_LDNULL();
     pushOp(OpType(typeRef,typeRef));
     return FJIT_OK;
 }
@@ -4967,9 +5115,19 @@ FJitResult FJit::compileCEE_INITOBJ()
     CorInfoType eeType = jitInfo->asCorInfoType(targetClass);
     OpType objType(eeType, targetClass);
     VERIFICATION_CHECK(  topOp().cls() == targetClass || topOp().targetAsEnum() == objType.enum_());
-    SizeOfClass = typeSizeInBytes(jitInfo, targetClass);
-    emit_init_bytes(BYTE_ALIGNED(SizeOfClass));
-    POP_STACK(1);
+
+    //GENERICS: argument can be a reference
+    if (jitInfo->getClassAttribs(targetClass, methodInfo->ftn) & CORINFO_FLG_VALUECLASS) {
+        SizeOfClass = typeSizeInBytes(jitInfo, targetClass);
+        emit_init_bytes(BYTE_ALIGNED(SizeOfClass));
+        POP_STACK(1);
+    }
+    else {
+        emit_LDNULL();
+        pushOp(OpType(typeRef,typeRef));
+        emit_STIND_REF();
+        POP_STACK(2);
+    }
     return FJIT_OK;
 }
 
@@ -4995,7 +5153,15 @@ FJitResult FJit::compileCEE_CPOBJ()
     OpType objType(eeType, targetClass);
     VERIFICATION_CHECK( topOp().cls() == targetClass || topOp().targetAsEnum() == objType.enum_() );
     VERIFICATION_CHECK( topOp(1).cls() == targetClass || topOp(1).targetAsEnum() == objType.enum_() );
-    emit_valClassCopy(targetClass);
+
+    //GENERICS: argument can be a reference
+    if (jitInfo->getClassAttribs(targetClass, methodInfo->ftn) & CORINFO_FLG_VALUECLASS) {
+        emit_valClassCopy(targetClass);
+    }
+    else {
+        emit_LDIND_PTR();
+        emit_STIND_REF();
+    }
     POP_STACK(2);
     return FJIT_OK;
 }
@@ -5007,14 +5173,14 @@ FJitResult FJit::compileCEE_LDOBJ()
 
     CORINFO_METHOD_HANDLE   methodHandle= methodInfo->ftn;
 
-    GET(token, unsigned int, false); VERIFICATION_CHECK(jitInfo->isValidToken(methodInfo->scope, token));
+    GET(token, unsigned int, false); 
+    VERIFICATION_CHECK(jitInfo->isValidToken(methodInfo->scope, token));
     // Verify that the token corresponds to a valid typeRef or typeDef
     VALIDITY_CHECK(targetClass = jitInfo->findClass(methodInfo->scope,token,methodHandle));
     // Verify that there is a value on the stack
     CHECK_STACK(1);
     // Verify that the value is a valid managed pointer or natural int
-    // Removed to match behavior of V1 .NET Framework
-    // VALIDITY_CHECK(topOpE() == typeByRef || topOpE() == typeI );
+    VALIDITY_CHECK(topOpE() == typeByRef || topOpE() == typeI );
     // Natural int can't be used as pointer in verifiable code
     VERIFICATION_CHECK(topOpE() == typeByRef );
     // Construct the stack type for the object
@@ -5042,8 +5208,7 @@ FJitResult FJit::compileCEE_STOBJ()
     // Verify that there are two values on the stack
     CHECK_STACK(2);
     // Verify that the address is either valid managed pointer or natural int
-    // Removed to match behavior of V1 .NET Framework
-    // VALIDITY_CHECK(topOpE(1) == typeByRef || topOpE(1) == typeI );
+    VALIDITY_CHECK(topOpE(1) == typeByRef || topOpE(1) == typeI );
     // Verifiable code doesn't allow native ints as pointers
     VERIFICATION_CHECK(topOpE(1) == typeByRef );
 
@@ -5055,8 +5220,7 @@ FJitResult FJit::compileCEE_STOBJ()
     VERIFICATION_CHECK( topOp(1).matchTarget( TypeOnStack ) );
     TypeOnStack.toFPNormalizedType();
     // Verify that type handle matches the type of the object on the stack
-    VALIDITY_CHECK( targetClass == topOp().cls() && topOpE() == typeValClass
-                    || topOp() ==  TypeOnStack );
+    VALIDITY_CHECK( canAssign(jitInfo, topOp(), topOp(1).getTarget()) );
 
     // Since floats are promoted to F, have to treat them specially
     if (eeType == CORINFO_TYPE_FLOAT)
@@ -5064,9 +5228,15 @@ FJitResult FJit::compileCEE_STOBJ()
     else if (eeType == CORINFO_TYPE_DOUBLE)
         return compileCEE_STIND_R8();
 
-    emit_copyPtrAroundValClass(targetClass);
-    emit_valClassStore(targetClass);
-    emit_POP_PTR();     // also pop off original ptr
+    //GENERICS: argument can be a reference
+    if (jitInfo->getClassAttribs(targetClass, methodInfo->ftn) & CORINFO_FLG_VALUECLASS) {
+        emit_copyPtrAroundValClass(targetClass);
+        emit_valClassStore(targetClass);
+        emit_POP_PTR();     // also pop off original ptr
+    }
+    else {
+        emit_STIND_REF();
+    }
     POP_STACK(2);
     return FJIT_OK;
 }
@@ -5450,6 +5620,61 @@ FJitResult FJit::compileCEE_STELEM_REF()
     return FJIT_OK;
 }
 
+FJitResult FJit::compileCEE_STELEM()
+{
+    unsigned int    token;
+    CORINFO_METHOD_HANDLE   methodHandle= methodInfo->ftn;
+    CORINFO_CLASS_HANDLE    targetClass = NULL;
+
+    // Get token for class/interface
+    GET(token, unsigned int, false); 
+    VERIFICATION_CHECK(jitInfo->isValidToken(methodInfo->scope, token));
+    VALIDITY_CHECK(targetClass = jitInfo->findClass(methodInfo->scope, token,methodHandle));
+    // Obtain a type from a type handle
+    CorInfoType eeType = jitInfo->asCorInfoType(targetClass);
+    OpType TokenType(eeType, targetClass);
+
+    // Validate the store
+    OpType ElemType;
+    int resultAccess = verifyArrayStore( TokenType.enum_(), ElemType ); 
+    VALIDITY_CHECK( resultAccess  != FAILED_VALIDATION );          
+    VERIFICATION_CHECK( resultAccess != FAILED_VERIFICATION );    
+
+     // Since floats are promoted to F, have to treat them specially 
+    if (eeType == CORINFO_TYPE_FLOAT) {
+        emit_STELEM_R4();
+    }
+    else if (eeType == CORINFO_TYPE_DOUBLE) {
+        emit_STELEM_R8();
+    }
+    else if (jitInfo->getClassAttribs(targetClass,methodHandle) & CORINFO_FLG_VALUECLASS) {
+        // begin by emitting code that takes a stack (..., ptr, int, valclass)
+        // and produces (..., ptr, int, valclass, ptr, int).
+#ifdef _X86_
+        unsigned delta = (typeSizeInSlots(jitInfo, targetClass) + 1) * sizeof(void*);
+        emit_getSP(delta);
+        emit_LDIND_PTR();
+        emit_getSP(delta);
+        emit_LDIND_PTR();
+#else // _X86_
+        _ASSERTE(!"NYI - compileCEE_STELEM (fjit.cpp)"); // <ROTORTODO> [bb] Fix this for non-x86</ROTORTODO>
+#endif // _X86_
+
+        unsigned size = jitInfo->getClassSize(targetClass);
+        emit_LDELEMA_0(size);    // zero means type field before array elements
+        emit_valClassStore(targetClass);
+
+        // now remove the original ptr and index.
+        emit_POP_PTR();
+        emit_POP_PTR();
+    }
+    else {
+        emit_STELEM_REF();
+    }
+    POP_STACK(3);
+    return FJIT_OK;
+}
+
 FJitResult FJit::compileCEE_LDELEM_U1()
 {
     OpType ResultType;
@@ -5614,17 +5839,55 @@ FJitResult FJit::compileCEE_LDELEMA()
     unsigned size = sizeof(void*);
     if (jitInfo->getClassAttribs(targetClass,methodHandle) & CORINFO_FLG_VALUECLASS) {
         size = jitInfo->getClassSize(targetClass);
-        targetClass = 0;        // zero means type field before array elements
+        emit_LDELEMA_0(size);        // zero means type field before array elements
     }
-    emit_LDELEMA(size, targetClass);
+    else {
+        emit_LDELEMA(size, targetClass, token, (methodAttributes & CORINFO_FLG_SHAREDINST));
+    }
     POP_STACK(2);
 
     // Construct the managed pointer type for the stack
     OpType ResultType(typeByRef);
     if ( resultAccess != FAILED_VERIFICATION ) {
         VERIFICATION_CHECK( !ElemType.isByRef() && (!ElemType.isRef() || ElemType.cls() != NULL ));
-        ResultType.setTarget( ElemType.enum_(), ElemType.cls() ); }
-        pushOp(ResultType);
+        ResultType.setTarget( ElemType.enum_(), ElemType.cls() ); 
+    }
+    pushOp(ResultType);
+    return FJIT_OK;
+}
+
+FJitResult FJit::compileCEE_LDELEM()
+{
+    unsigned int    token;
+    CORINFO_METHOD_HANDLE   methodHandle= methodInfo->ftn;
+    CORINFO_CLASS_HANDLE    targetClass = NULL;
+
+    // Get token for class/interface
+    GET(token, unsigned int, false); 
+    VERIFICATION_CHECK(jitInfo->isValidToken(methodInfo->scope, token));
+    VALIDITY_CHECK(targetClass = jitInfo->findClass(methodInfo->scope, token,methodHandle));
+
+    // Obtain a type from a type handle
+    CorInfoType eeType = jitInfo->asCorInfoType(targetClass);
+    OpType TokenType(eeType, targetClass);
+
+    // Validate the access
+    OpType ElemType;
+    int resultAccess = verifyArrayLoad( TokenType.enum_(), ElemType ); 
+    VALIDITY_CHECK( resultAccess  != FAILED_VALIDATION );          
+    VERIFICATION_CHECK( resultAccess != FAILED_VERIFICATION );    
+    
+    if (jitInfo->getClassAttribs(targetClass,methodHandle) & CORINFO_FLG_VALUECLASS) {
+        unsigned size = jitInfo->getClassSize(targetClass);
+        emit_LDELEMA_0(size);    // zero means type field before array elements
+        TYPE_SWITCH_PRECISE(ElemType, emit_LDIND, ());
+    }
+    else {
+        emit_LDELEM_REF();
+    }
+    POP_STACK(2);
+    ElemType.toFPNormalizedType();
+    pushOp(ElemType);
     return FJIT_OK;
 }
 
@@ -5648,14 +5911,15 @@ FJitResult FJit::compileCEE_STFLD( OPCODE opcode)
     VALIDITY_CHECK(targetField = jitInfo->findField (methodInfo->scope, token, methodHandle));
 
     fieldAttributes = jitInfo->getFieldAttribs(targetField,methodHandle);
+
+    // Get the enclosing class
+    CORINFO_CLASS_HANDLE enclosingClass = jitInfo->findClass(methodInfo->scope, jitInfo->getMemberParent(methodInfo->scope, token), methodHandle);
     CORINFO_CLASS_HANDLE valClass;
-    jitType = jitInfo->getFieldType(targetField, &valClass);
+    jitType = jitInfo->getFieldType(targetField, &valClass, enclosingClass);
     fieldIsStatic = fieldAttributes & CORINFO_FLG_STATIC ? true : false;
     misMatchedOpcode = fieldIsStatic && (opcode == CEE_STFLD);
 
 #if !defined(FJIT_NO_VALIDATION)
-    // Get the enclosing field
-    CORINFO_CLASS_HANDLE enclosingClass = jitInfo->getEnclosingClass(targetField);
     // Verify that the correct type of the instruction is used
     VALIDITY_CHECK( fieldIsStatic || (opcode == CEE_STFLD) );
     // Verify that a not trying to use an RVA
@@ -5779,13 +6043,11 @@ FJitResult FJit::compileCEE_STFLD( OPCODE opcode)
             address = jitInfo->getFieldOffset(targetField);
         }
 
-        CORINFO_CLASS_HANDLE fieldClass;
-        CorInfoType fieldType = jitInfo->getFieldType(targetField, &fieldClass);
-        if (fieldType == CORINFO_TYPE_FLOAT)
+        if (jitType == CORINFO_TYPE_FLOAT)
         {
             emit_conv_RtoR4();
         }
-        else if (fieldType == CORINFO_TYPE_DOUBLE)
+        else if (jitType == CORINFO_TYPE_DOUBLE)
         {
             emit_conv_RtoR8();
         }
@@ -5798,7 +6060,7 @@ FJitResult FJit::compileCEE_STFLD( OPCODE opcode)
         if (opcode == CEE_STFLD && !misMatchedOpcode)
             CHECK_POP_STACK(1);         // pop object pointer
 
-        switch (fieldType) {
+        switch (jitType) {
         case CORINFO_TYPE_UBYTE:
         case CORINFO_TYPE_BYTE:
         case CORINFO_TYPE_BOOL:
@@ -6005,15 +6267,15 @@ FJitResult FJit::compileCEE_CASTCLASS()
     VALIDITY_CHECK((targetClass = jitInfo->findClass(methodInfo->scope, token,methodHandle)));
     // There must be an object on the stack
     CHECK_STACK(1);
-    // That object must be either a object ref or a null
-    VERIFICATION_CHECK( topOp().isRef() || topOp().isNull() );
+    // That object must be an object ref
+    VERIFICATION_CHECK( topOp().isRef() );
     // Get a helper function for the cast
     helper_ftn = jitInfo->getHelperFtn(jitInfo->getChkCastHelper(targetClass));
     _ASSERTE(helper_ftn);
     POP_STACK(1);           // Note that this pop /push can not be optimized because there is a
                             // call to an EE helper, and the stack tracking has to be accurate
                             // at that point
-    emit_CASTCLASS(targetClass, helper_ftn);
+    emit_CASTCLASS(targetClass, helper_ftn, token, (methodAttributes & CORINFO_FLG_SHAREDINST));
     // The check are made in EE and exception is thrown from there during jitting.
     pushOp(OpType(typeRef,targetClass));
 
@@ -6270,10 +6532,9 @@ FJitResult FJit::compileCEE_LDTOKEN()
     // Get token for class/interface
     GET(token, unsigned int, false);
     VERIFICATION_CHECK(jitInfo->isValidToken(methodInfo->scope, token));
-    CORINFO_GENERIC_HANDLE hnd;
     CORINFO_CLASS_HANDLE tokenType;
-    VALIDITY_CHECK(hnd = jitInfo->findToken(methodInfo->scope, token, methodInfo->ftn, tokenType));
-    emit_WIN32(emit_LDC_I4(hnd)) emit_WIN64(emit_LDC_I8(hnd));
+    TokenToHandle(token, tokenType, INTERNAL_CALL);
+    //TokenToHandle emits call arg.
     pushOp(OpType(tokenType));
     return FJIT_OK;
 }
@@ -6292,24 +6553,34 @@ FJitResult FJit::compileCEE_BOX()
     CorInfoType eeType = jitInfo->asCorInfoType(targetClass);
     OpType targetType( eeType, targetClass );
     targetType.toFPNormalizedType();
-    // Verify that the token refers to a value type
-    VERIFICATION_CHECK(jitInfo->getClassAttribs(targetClass, methodInfo->ftn) & CORINFO_FLG_VALUECLASS);
     // Verify that we are not attempting to box pointers to local stack
     VERIFICATION_CHECK(!verIsByRefLike(targetType ) );
     // Check that there is an object on the stack
     CHECK_STACK(1);
-    // Verify that the token matches the of the item on the stack
-    VERIFICATION_CHECK( targetType.enum_() == topOpE() && topOpE() != typeValClass ||
-                        topOpE() == typeValClass && topOp().cls() == targetClass);
-    // Floats were promoted, put them back before continuing.
-    if (eeType == CORINFO_TYPE_FLOAT) {
-        emit_conv_RtoR4();
+
+    // Check whether the token refers to a value type
+    DWORD attribs = jitInfo->getClassAttribs(targetClass, methodInfo->ftn);
+    if (attribs & CORINFO_FLG_VALUECLASS) {
+        // Verify that the token matches the of the item on the stack
+        VERIFICATION_CHECK( targetType.enum_() == topOpE() && topOpE() != typeValClass ||
+                            topOpE() == typeValClass && topOp().cls() == targetClass);
+        // Floats were promoted, put them back before continuing.
+        if (eeType == CORINFO_TYPE_FLOAT) {
+            emit_conv_RtoR4();
+        }
+        else if (eeType == CORINFO_TYPE_DOUBLE) {
+            emit_conv_RtoR8();
+        }
+        unsigned vcSize = typeSizeInBytes(jitInfo, targetClass);
+        emit_BOXVAL(targetClass, vcSize, token, (methodAttributes & CORINFO_FLG_SHAREDINST));
     }
-    else if (eeType == CORINFO_TYPE_DOUBLE) {
-        emit_conv_RtoR8();
+    else {
+        // BOX can be used on things that are not value classes, in which 
+        // case we get a NOP.  However the verifier's view of the type on the
+        // stack changes (in generic code a 'T' becomes a 'boxed T')
+        VERIFICATION_CHECK( topOp().isRef() && topOp().cls() == targetClass);  
+        emit_il_nop();
     }
-    unsigned vcSize = typeSizeInBytes(jitInfo, targetClass);
-    emit_BOXVAL(targetClass, vcSize );
     // Remove the value from the stack
     POP_STACK(1);
     // Create the object type for the stack
@@ -6342,12 +6613,57 @@ FJitResult FJit::compileCEE_UNBOX()
     // ldloc.1 isinst Int32; brfalse.s L; ldloc.1 unbox Int32; where local.1 is declared as an
     // object.
     POP_STACK(1);
-    emit_UNBOX(targetClass);
+    emit_UNBOX(targetClass, token, (methodAttributes & CORINFO_FLG_SHAREDINST));
     OpType PtrType(typeByRef);
     PtrType.setTarget( eeType, targetClass );
     pushOp(PtrType);
     return FJIT_OK;
 }
+
+FJitResult FJit::compileCEE_UNBOX_ANY()
+{
+    unsigned int            token;
+    CORINFO_CLASS_HANDLE    targetClass = NULL;
+    CORINFO_METHOD_HANDLE   methodHandle= methodInfo->ftn;
+
+    // Get token for class/interface
+    GET(token, unsigned int, false);
+    VERIFICATION_CHECK(jitInfo->isValidToken(methodInfo->scope, token));
+    // Verify that the token is valid
+    VALIDITY_CHECK(targetClass = jitInfo->findClass(methodInfo->scope, token, methodHandle));
+
+    // Check that there is an object on the stack
+    CHECK_STACK(1);
+    // Verify that the value on the stack is an object ref or a null
+    CorInfoType eeType = jitInfo->asCorInfoType(targetClass); 
+    VERIFICATION_CHECK( topOp().isRef() );
+    // The check for targetClass == topOp().cls() is not made at verification time
+    // because Jit_Unbox check for validity of the cast and throws InvalidCastException
+    // if unbox is unsuccessful. This is necessary in order to verify a sequence of IL
+    // opcodes such as ldloc.1 isinst Int32; brfalse.s L; ldloc.1 unbox Int32;
+    // where local.1 is declared as an object.
+
+    if (jitInfo->getClassAttribs(targetClass, methodInfo->ftn) & CORINFO_FLG_VALUECLASS) {
+        OpType retType(eeType, targetClass); 
+        POP_STACK(1);
+        emit_UNBOX(targetClass, token, (methodAttributes & CORINFO_FLG_SHAREDINST));
+        TYPE_SWITCH_PRECISE(retType, emit_LDIND, ());
+        retType.toFPNormalizedType();
+        pushOp(retType);
+    }
+    else {
+        // Get a helper function for the cast
+        void *helper_ftn = jitInfo->getHelperFtn(jitInfo->getChkCastHelper(targetClass));
+        _ASSERTE(helper_ftn);
+        POP_STACK(1);          
+        // Note that this pop /push can not be optimized because there is a 
+        // call to an EE helper, and the stack tracking has to be accurate
+        // at that point
+        emit_CASTCLASS(targetClass, helper_ftn, token, false); //(methodAttributes & CORINFO_FLG_SHAREDINST));
+        pushOp(OpType(typeRef,targetClass));
+    }
+    return FJIT_OK;
+} 
 
 FJitResult FJit::compileCEE_ISINST()
 {
@@ -6363,12 +6679,12 @@ FJitResult FJit::compileCEE_ISINST()
     // There must be an object on the top of the stack
     CHECK_STACK(1);
     // Check if the object is null - do nothing in this case
-    VERIFICATION_CHECK( topOp().isNull() || topOp().isRef() );
+    VERIFICATION_CHECK( topOp().isRef() );
     // Otherwise get to a helper function to check if the object is an instance of targetClass
     helper_ftn = jitInfo->getHelperFtn(jitInfo->getIsInstanceOfHelper(targetClass));
     _ASSERTE(helper_ftn);
     POP_STACK(1);
-    emit_ISINST(targetClass, helper_ftn);
+    emit_ISINST(targetClass, helper_ftn, token, (methodAttributes & CORINFO_FLG_SHAREDINST));
     pushOp(OpType(typeRef,targetClass));
     return FJIT_OK;
 }
@@ -6444,10 +6760,9 @@ FJitResult FJit::compileCEE_LDVIRTFTN()
     VALIDITY_CHECK(targetMethod = jitInfo->findMethod(methodInfo->scope, token, methodHandle));
     VALIDITY_CHECK(targetClass = jitInfo->getMethodClass (targetMethod));
 
-#if _DEBUG
     CORINFO_SIG_INFO        targetSigInfo;
-    _ASSERTE((jitInfo->getMethodSig(targetMethod, &targetSigInfo), !targetSigInfo.hasTypeArg()));
-#endif
+    jitInfo->getMethodSig(targetMethod, &targetSigInfo);
+    _ASSERTE(!targetSigInfo.hasTypeArg());
     DWORD methodAttribs;
     methodAttribs = jitInfo->getMethodAttribs(targetMethod,methodHandle);
     DWORD classAttribs;
@@ -6459,6 +6774,7 @@ FJitResult FJit::compileCEE_LDVIRTFTN()
     CHECK_STACK(1);
     // Verify that the item is an object
     VERIFICATION_CHECK( topOp().isRef() );
+    delegateMethodRef = token; // For delegate verification
 
     if ((methodAttribs & CORINFO_FLG_FINAL) || !(methodAttribs & CORINFO_FLG_VIRTUAL))
     {
@@ -6470,6 +6786,11 @@ FJitResult FJit::compileCEE_LDVIRTFTN()
     if (methodAttribs & CORINFO_FLG_EnC && !(classAttribs & CORINFO_FLG_INTERFACE))
     {
         _ASSERTE(!"LDVIRTFTN for EnC NYI");
+    }
+    else if (targetSigInfo.methodInst != NULL && 
+        (methodAttribs & CORINFO_FLG_VIRTUAL)) 
+    {
+      emit_ldgenericvirtftn(token);
     }
     else
     {
@@ -6532,7 +6853,8 @@ FJitResult FJit::compileCEE_LDFTN()
     GET(token, unsigned int, false);
     VERIFICATION_CHECK(jitInfo->isValidToken(methodInfo->scope, token));
     VALIDITY_CHECK(targetMethod = jitInfo->findMethod(methodInfo->scope, token, methodHandle));
-    DelegateStart = InstStart;      // Possible start point for dup; ldvirtftn <token>; sequence
+    DelegateStart = InstStart;      // Possible start point for ldvirtftn <token>; sequence
+    delegateMethodRef = token;      // For delegate verification
     return compileDO_LDFTN(targetMethod);
 }
 
@@ -6549,7 +6871,7 @@ FJitResult FJit::compileCEE_NEWARR()
     CORINFO_CLASS_HANDLE elementClass = targetClass;
     // convert to the array class for this element type
     targetClass = jitInfo->getSDArrayForClass(targetClass);
-    // Check if a sigle dimensional array of target is valid
+    // Check if a single dimensional array of target is valid
     VALIDITY_CHECK( targetClass );
     // Verify that the element is not byref like object
     VERIFICATION_CHECK(
@@ -6560,71 +6882,71 @@ FJitResult FJit::compileCEE_NEWARR()
     VERIFICATION_CHECK( topOpE() == typeI );
     // Remove the number of elements from the stack
     POP_STACK(1);
-    emit_NEWOARR(targetClass);
+    emit_NEWOARR(targetClass, token, (methodAttributes & CORINFO_FLG_SHAREDINST));
     pushOp(OpType(typeRef, targetClass));
     return FJIT_OK;
 }
 
 FJitResult FJit::compileCEE_NEWOBJ()
 {
-    unsigned int            token;
+
+    unsigned int            token, parentToken;
     unsigned int            argBytes;
     unsigned                address = 0;
     CORINFO_METHOD_HANDLE   methodHandle= methodInfo->ftn;
     CORINFO_CLASS_HANDLE    targetClass;
-    CORINFO_METHOD_HANDLE   targetMethod;
+    CORINFO_METHOD_HANDLE   targetInstMethod, targetReprMethod;
     void*                   helper_ftn;
-    CORINFO_SIG_INFO        targetSigInfo;
+    CORINFO_SIG_INFO        targetInstSigInfo, targetReprSigInfo;
 
     unsigned int targetMethodAttributes;
     unsigned int targetClassAttributes;
     unsigned int targetCallStackSize;
-    unsigned int stackPadorRetBase = 0;
+    unsigned int stackPad = 0;
 
     // MemberRef token for constructor
     GET(token, unsigned int, false);
     VERIFICATION_CHECK(jitInfo->isValidToken(methodInfo->scope, token));
-    VALIDITY_CHECK(targetMethod = jitInfo->findMethod(methodInfo->scope, token, methodHandle));
-    VALIDITY_CHECK(targetClass = jitInfo->getMethodClass(targetMethod));
+    parentToken = jitInfo->getMemberParent(methodInfo->scope, token);
+    VALIDITY_CHECK(targetInstMethod = jitInfo->findMethod(methodInfo->scope, token, methodHandle));
+    VALIDITY_CHECK(targetReprMethod = jitInfo->findMethod(methodInfo->scope, token | CORINFO_ANNOT_ALLOWINSTPARAM, methodHandle));
+    VALIDITY_CHECK(targetClass = jitInfo->findClass( methodInfo->scope, parentToken, methodHandle ));
     targetClassAttributes = jitInfo->getClassAttribs(targetClass,methodHandle);
 
-    jitInfo->getMethodSig(targetMethod, &targetSigInfo);
-    VALIDITY_CHECK(!targetSigInfo.hasTypeArg());
-    targetMethodAttributes = jitInfo->getMethodAttribs(targetMethod,methodHandle);
+    jitInfo->getMethodSig(targetInstMethod, &targetInstSigInfo);
+    jitInfo->getMethodSig(targetReprMethod, &targetReprSigInfo);
+   // VALIDITY_CHECK(!targetSigInfo.hasTypeArg());
+    targetMethodAttributes = jitInfo->getMethodAttribs(targetInstMethod,methodHandle);
     VERIFICATION_CHECK((targetMethodAttributes & CORINFO_FLG_CONSTRUCTOR ));
     VERIFICATION_CHECK((targetMethodAttributes & (CORINFO_FLG_STATIC|CORINFO_FLG_ABSTRACT)) == 0 );
     if (targetClassAttributes & CORINFO_FLG_ARRAY) {
 #if !defined(FJIT_NO_VALIDATION)
-        // Method on arrays, don't know their precise type
-        // (like Foo[]), but only some approximation (like Object[]).  We have to
-        // go back to the meta data token to look up the fully precise type
-        targetClass = jitInfo->findMethodClass( methodInfo->scope, token);
         CORINFO_CLASS_HANDLE elemTypeHnd;
         // Get the element type of the array
         CorInfoType corType = jitInfo->getChildType(targetClass, &elemTypeHnd);
         // Verify that it is valid
         VALIDITY_CHECK(!(elemTypeHnd == 0 && corType == CORINFO_TYPE_VALUECLASS));
         // Verify that the array created is not made of byref like objects
-        VERIFICATION_CHECK(elemTypeHnd == 0 ||
+        VERIFICATION_CHECK(elemTypeHnd == 0 || 
                 !(jitInfo->getClassAttribs(elemTypeHnd,methodHandle) & CORINFO_FLG_CONTAINS_STACK_PTR));
-        VALIDITY_CHECK(targetClassAttributes & CORINFO_FLG_VAROBJSIZE);
+        VALIDITY_CHECK(targetClassAttributes & CORINFO_FLG_VAROBJSIZE);  
         // Verify that the arguments on the stack match the method signature
-        int result_arg_ver = (JitVerify ? verifyArguments( targetSigInfo, 0,false) : SUCCESS_VERIFICATION);
-        VALIDITY_CHECK( result_arg_ver != FAILED_VALIDATION );
-        VERIFICATION_CHECK( result_arg_ver != FAILED_VERIFICATION INDEBUG(|| !"Array ctor"));
+        int result_arg_ver = (JitVerify ? verifyArguments( targetInstSigInfo, 0,false) : SUCCESS_VERIFICATION);
+        VALIDITY_CHECK( result_arg_ver != FAILED_VALIDATION );       
+        VERIFICATION_CHECK( result_arg_ver != FAILED_VERIFICATION INDEBUG(|| !"Array ctor")); 
 #endif
         // allocate md array
-        targetSigInfo.callConv = CORINFO_CALLCONV_VARARG;
-        argInfo* tempMap = new argInfo[targetSigInfo.numArgs];
+        targetReprSigInfo.callConv = CORINFO_CALLCONV_VARARG;
+        argInfo* tempMap = new argInfo[targetReprSigInfo.numArgs];
         if(tempMap == NULL)
             FJIT_FAIL(FJIT_OUTOFMEM);
         unsigned enregSize = 0;
-        targetCallStackSize = computeArgInfo(&targetSigInfo, tempMap, 0, enregSize);
+        targetCallStackSize = computeArgInfo(&targetReprSigInfo, tempMap, 0, enregSize);
         // get the total size of the argument, undo the vararg cookie
         targetCallStackSize += enregSize - (PARAMETER_SPACE?sizeof(void*):0);
         delete tempMap;
-        POP_STACK(targetSigInfo.numArgs);
-        emit_NEWOBJ_array(methodInfo->scope, token, targetCallStackSize);
+        POP_STACK(targetReprSigInfo.numArgs);
+        emit_NEWOBJ_array(targetClass, targetReprMethod, targetCallStackSize);
         pushOp(OpType(typeRef,targetClass));
 
     }
@@ -6634,102 +6956,103 @@ FJitResult FJit::compileCEE_NEWOBJ()
         emit_WIN32(emit_LDC_I4(0)) emit_WIN64(emit_LDC_I8(0));
         pushOp(typeI4);
         InfoAccessType accessType = IAT_PVALUE;
-        address = (unsigned) jitInfo->getFunctionEntryPoint(targetMethod, &accessType);
+        address = (unsigned) jitInfo->getFunctionEntryPoint(targetReprMethod, &accessType);
         _ASSERTE(accessType == IAT_PVALUE);
-        jitInfo->getMethodSig(targetMethod, &targetSigInfo);
-        targetSigInfo.retType      = CORINFO_TYPE_CLASS;
-        targetSigInfo.retTypeClass = targetClass;
+        targetReprSigInfo.retType      = CORINFO_TYPE_CLASS;
+        targetReprSigInfo.retTypeClass = targetClass;
+        targetInstSigInfo.retType      = CORINFO_TYPE_CLASS;
+        targetInstSigInfo.retTypeClass = targetClass;
         // Verify that the arguments on the stack match the method signature
-        int result_arg_ver = (JitVerify ? verifyArguments(targetSigInfo, 1, false) : SUCCESS_VERIFICATION);
-        VALIDITY_CHECK( result_arg_ver != FAILED_VALIDATION );
+        int result_arg_ver = (JitVerify ? verifyArguments(targetInstSigInfo, 1, false) : SUCCESS_VERIFICATION);
+        VALIDITY_CHECK( result_arg_ver != FAILED_VALIDATION );       
         VERIFICATION_CHECK( result_arg_ver != FAILED_VERIFICATION INDEBUG(|| !"VarObj ctor" ));
-        argBytes = buildCall(&targetSigInfo, CALL_THIS_LAST, stackPadorRetBase);
+        argBytes = buildCall(&targetReprSigInfo, CALL_THIS_LAST, stackPad);
         emit_callnonvirt(address, 0);
-        return compileDO_PUSH_CALL_RESULT(argBytes, stackPadorRetBase, token, targetSigInfo, NULL);
+        return compileDO_PUSH_CALL_RESULT(argBytes, stackPad, token, targetInstSigInfo, NULL);
     }
     else if (targetClassAttributes & CORINFO_FLG_VALUECLASS) {
-            // This acts just like a static method that returns a value class
-        targetSigInfo.retTypeClass = targetClass;
-        targetSigInfo.retType = CORINFO_TYPE_VALUECLASS;
-        if ( EnregReturnBuffer )
-          targetSigInfo.callConv = CorInfoCallConv(targetSigInfo.callConv & ~CORINFO_CALLCONV_HASTHIS);
-        else // Fake entry for the this pointer
-          { pushOp(OpType(typeRef,targetClass)); deregisterTOS; emit_grow( SIZE_STACK_SLOT ); }  
+        // This acts just like a static method that returns a value class
+        targetReprSigInfo.retTypeClass = targetClass;
+        targetReprSigInfo.retType = CORINFO_TYPE_VALUECLASS;
+        targetReprSigInfo.callConv = CorInfoCallConv(targetReprSigInfo.callConv & ~CORINFO_CALLCONV_HASTHIS);
+        targetInstSigInfo.retTypeClass = targetClass;
+        targetInstSigInfo.retType = CORINFO_TYPE_VALUECLASS;
+        targetInstSigInfo.callConv = CorInfoCallConv(targetInstSigInfo.callConv & ~CORINFO_CALLCONV_HASTHIS);
         // Verify that the arguments on the stack match the method signature
-        int result_arg_ver = (JitVerify ? verifyArguments(targetSigInfo, (EnregReturnBuffer ? 0 : 1), false) : 
-                                          SUCCESS_VERIFICATION);
-        VALIDITY_CHECK( result_arg_ver != FAILED_VALIDATION );
+        int result_arg_ver = (JitVerify ? verifyArguments(targetInstSigInfo, 0, false) : SUCCESS_VERIFICATION);
+        VALIDITY_CHECK( result_arg_ver != FAILED_VALIDATION );       
         VERIFICATION_CHECK( result_arg_ver != FAILED_VERIFICATION INDEBUG(|| !"Valueclass ctor") );
-        argBytes = buildCall(&targetSigInfo, (EnregReturnBuffer ? CALL_NONE : CALL_THIS_LAST), stackPadorRetBase);
+        argBytes = buildCall(&targetReprSigInfo, CALL_NONE, stackPad);
 
         InfoAccessType accessType = IAT_PVALUE;
-        address = (unsigned) jitInfo->getFunctionEntryPoint(targetMethod, &accessType);
+        address = (unsigned) jitInfo->getFunctionEntryPoint(targetReprMethod, &accessType);
         _ASSERTE(accessType == IAT_PVALUE);
-
-        // If the ret. buffer pointer was emitted to the stack we need to move it into a register to act as a this pointer
-        if ( !EnregReturnBuffer ) 
-          emit_set_arg_pointer(false, RETURN_BUFF_OFFSET, false );
-
         emit_callnonvirt(address, 0);
 
-        if ( PASS_VALUETYPE_BYREF && targetSigInfo.hasRetBuffArg() )
-        {
-           _ASSERTE( CALLER_CLEANS_STACK );
-           emit_copy_VC( (STACK_BUFFER + argBytes), stackPadorRetBase, targetSigInfo.retTypeClass);
-        }
-
-        if (targetSigInfo.isVarArg())
-          { emit_drop(argBytes); }
+        if (targetReprSigInfo.isVarArg())
+	    { emit_drop(argBytes); }
         else
-        {
+	    {
           if (CALLER_CLEANS_STACK)     // If __cdecl convention it is necessary for
             {emit_drop(argBytes);}        // the caller to clear the arguments of the stack
           else
-            emit_drop(stackPadorRetBase)
-        }
+            emit_drop(stackPad)
+	}
     }
     else {
         //allocate normal object
         helper_ftn = jitInfo->getHelperFtn(jitInfo->getNewHelper(targetClass, methodHandle));
         _ASSERTE(helper_ftn);
         //pushOp(typeRef); we don't do this and compensate for it in the popOp down below
-        emit_NEWOBJ(targetClass, helper_ftn);
+        emit_NEWOBJ(targetClass, helper_ftn, parentToken, (methodAttributes & CORINFO_FLG_SHAREDINST));
         pushOp(OpType(typeRef,targetClass));
 
         emit_save_TOS();        //squirrel the newly created object away; will be reported in FJit_EETwain
         //note: the newobj is still on TOS
-
+        
         if (targetClassAttributes & CORINFO_FLG_DELEGATE)
         {
             // Rules for verifying delegates are unique
-            int result_del_ver =  verifyDelegate( targetSigInfo, targetMethod,
-                                                    &inBuff[InstStart], InstStart-DelegateStart, 1);
-            VALIDITY_CHECK( result_del_ver != FAILED_VALIDATION );
+            int result_del_ver =  verifyDelegate( targetInstSigInfo, targetClass, 
+                                                  token, &inBuff[InstStart],
+                                                  InstStart-DelegateStart, 1); 
+            VALIDITY_CHECK( result_del_ver != FAILED_VALIDATION );       
             VERIFICATION_CHECK( result_del_ver != FAILED_VERIFICATION );
         }
         else
         {
             // Verify that the arguments on the stack match the method signature
-            int result_arg_ver =(JitVerify ? verifyArguments(targetSigInfo,1,false) : SUCCESS_VERIFICATION);
-            VALIDITY_CHECK( result_arg_ver != FAILED_VALIDATION );
+            int result_arg_ver =(JitVerify ? verifyArguments(targetInstSigInfo,1,false) : SUCCESS_VERIFICATION);
+            VALIDITY_CHECK( result_arg_ver != FAILED_VALIDATION );       
             VERIFICATION_CHECK( result_arg_ver != FAILED_VERIFICATION INDEBUG(|| !"Normal ctor") );
             // We don't need to verify the this pointer because we have created it
         }
-        argBytes = buildCall(&targetSigInfo, CALL_THIS_LAST, stackPadorRetBase);
+        if (targetReprSigInfo.hasTypeArg())  
+        { 
+            CORINFO_CLASS_HANDLE tokenType;
+            // Instantiated generic method
+            if (TypeFromToken(token) == mdtMethodSpec)
+                TokenToHandle(token, tokenType, INTERNAL_CALL);
+            // otherwise must be an instance method in a generic struct, a static method in a generic type, or a runtime-generated array method
+            else
+                TokenToHandle(parentToken, tokenType, INTERNAL_CALL);
+        }
+
+        argBytes = buildCall(&targetReprSigInfo, CALL_THIS_LAST, stackPad);
         InfoAccessType accessType = IAT_PVALUE;
-        address = (unsigned) jitInfo->getFunctionEntryPoint(targetMethod, &accessType);
+        address = (unsigned) jitInfo->getFunctionEntryPoint(targetReprMethod, &accessType);
         _ASSERTE(accessType == IAT_PVALUE);
         emit_callnonvirt(address, 0);
 
-        if (targetSigInfo.isVarArg())
-          {emit_drop(argBytes);}
+        if (targetReprSigInfo.isVarArg())
+	    {emit_drop(argBytes);}
         else
-        {
+	    {
           if (CALLER_CLEANS_STACK)     // If __cdecl convention it is necessary for
             {emit_drop(argBytes);}        // the caller to clear the arguments of the stack
           else
-            emit_drop(stackPadorRetBase)
-        }
+            emit_drop(stackPad)
+	}
 
         emit_restore_TOS(); //push the new obj back on TOS
         pushOp(OpType(typeRef,targetClass));
@@ -6767,7 +7090,7 @@ FJitResult FJit::compileDO_PUSH_CALL_RESULT(
     if (targetSigInfo.retType != CORINFO_TYPE_VOID) {
         if (targetClass != 0 && (jitInfo->getClassAttribs(targetClass, methodHandle) & CORINFO_FLG_ARRAY ))
         {
-            jitInfo->findCallSiteSig(methodInfo->scope,token,&targetSigInfo);
+            jitInfo->findCallSiteSig(methodInfo->scope,token,methodHandle,&targetSigInfo);
         }
         OpType type(targetSigInfo.retType, targetSigInfo.retTypeClass);
         TYPE_SWITCH_PRECISE(type,emit_pushresult,());
@@ -7294,7 +7617,7 @@ FJitResult FJit::compileCEE_CALLI()
 
     VERIFICATION_CHECK(false INDEBUG( || !"CALLI is not verifiable") );
     GET(token, unsigned int, false);   // token for sig of function
-    jitInfo->findSig(methodInfo->scope, token, &targetSigInfo);
+    jitInfo->findSig(methodInfo->scope, token, methodInfo->ftn, &targetSigInfo);
     emit_save_TOS();        // squirel away the target ftn address
     emit_POP_PTR();         // and remove from stack
     CHECK_POP_STACK(1);
@@ -7323,20 +7646,23 @@ FJitResult FJit::compileCEE_CALLI()
 FJitResult FJit::compileCEE_CALL()
 {
     unsigned int            argBytes, stackPadorRetBase = 0;
-    unsigned int            token;
-    CORINFO_METHOD_HANDLE   targetMethod;
+    unsigned int            token, parentToken;
+    CORINFO_METHOD_HANDLE   targetInstMethod, targetReprMethod;
     CORINFO_CLASS_HANDLE    targetClass;
-    CORINFO_SIG_INFO        targetSigInfo;
+    CORINFO_SIG_INFO        targetInstSigInfo, targetReprSigInfo;
     CORINFO_METHOD_HANDLE   methodHandle= methodInfo->ftn;
 
     GET(token, unsigned int, false);
     VERIFICATION_CHECK(jitInfo->isValidToken(methodInfo->scope, token));
-    VALIDITY_CHECK((targetMethod = jitInfo->findMethod(methodInfo->scope, token, methodHandle)));
+    VALIDITY_CHECK(targetReprMethod = jitInfo->findMethod(methodInfo->scope, token | CORINFO_ANNOT_ALLOWINSTPARAM, methodHandle));
+    VALIDITY_CHECK(targetInstMethod = jitInfo->findMethod(methodInfo->scope, token, methodHandle));
     // Get attributes for the method being called
     DWORD methodAttribs;
-    methodAttribs = jitInfo->getMethodAttribs(targetMethod,methodHandle);
+    methodAttribs = jitInfo->getMethodAttribs(targetInstMethod,methodHandle);
     // Get the class of the method being called
-    targetClass = jitInfo->getMethodClass (targetMethod);
+    parentToken = jitInfo->getMemberParent(methodInfo->scope, token);
+    targetClass = jitInfo->findClass (methodInfo->scope, parentToken, methodHandle);
+   
     // Get the attributes of the class of the method being called
     DWORD classAttribs;
     classAttribs = jitInfo->getClassAttribs(targetClass, methodHandle);
@@ -7359,7 +7685,7 @@ FJitResult FJit::compileCEE_CALL()
         UINT_PTR from = (UINT_PTR) jitInfo->GetProfilingHandle(methodHandle, &bHookFunction);
         if (bHookFunction)
         {
-            UINT_PTR to = (UINT_PTR) jitInfo->GetProfilingHandle(targetMethod, &bHookFunction);
+            UINT_PTR to = (UINT_PTR) jitInfo->GetProfilingHandle(targetInstMethod, &bHookFunction);
             if (bHookFunction) // check that the flag has not been over-ridden
             {
                 deregisterTOS;
@@ -7369,12 +7695,14 @@ FJitResult FJit::compileCEE_CALL()
         }
     }
 
-    jitInfo->getMethodSig(targetMethod, &targetSigInfo);
-    if (targetSigInfo.isVarArg())
-        jitInfo->findCallSiteSig(methodInfo->scope,token,&targetSigInfo);
+    jitInfo->getMethodSig(targetReprMethod, &targetReprSigInfo, targetClass);
+    jitInfo->getMethodSig(targetInstMethod, &targetInstSigInfo, targetClass);
+    if (targetInstSigInfo.isVarArg())
+        //<REVIEW>Inst or Repr?</REVIEW>
+        jitInfo->findCallSiteSig(methodInfo->scope,token,methodHandle,&targetInstSigInfo);
 
     // Verify that the arguments on the stack match the method signature
-    int result_arg_ver = ( JitVerify ? verifyArguments( targetSigInfo, 0, false) : SUCCESS_VERIFICATION );
+    int result_arg_ver = ( JitVerify ? verifyArguments( targetInstSigInfo, 0, false) : SUCCESS_VERIFICATION );
     VALIDITY_CHECK( result_arg_ver != FAILED_VALIDATION );
     VERIFICATION_CHECK( result_arg_ver != FAILED_VERIFICATION );
     // Verify the this argument for non-static methods( it is not part of the method signature )
@@ -7383,52 +7711,57 @@ FJitResult FJit::compileCEE_CALL()
     {
         // For arrays we don't have the correct class handle
         if ( classAttribs & CORINFO_FLG_ARRAY)
-            targetClass = jitInfo->findMethodClass( methodInfo->scope, token );
+            targetClass = jitInfo->findMethodClass( methodInfo->scope, token, methodHandle );
         int result_this_ver = ( JitVerify
-                                    ? verifyThisPtr(instanceClassHnd, targetClass, targetSigInfo.numArgs, false )
+                                    ? verifyThisPtr(instanceClassHnd, targetClass, targetInstSigInfo.numArgs, false )
                                     : SUCCESS_VERIFICATION );
         VERIFICATION_CHECK( result_this_ver != FAILED_VERIFICATION );
     }
     // Verify that the method is accessible from the call site
-    VERIFICATION_CHECK(jitInfo->canAccessMethod(methodHandle, targetMethod, instanceClassHnd ));
+    VERIFICATION_CHECK(jitInfo->canAccessMethod(methodHandle, targetInstMethod, instanceClassHnd ));
 
-    if (targetSigInfo.hasTypeArg())
+    if (targetReprSigInfo.hasTypeArg())
     {
-        void* typeParam = jitInfo->getInstantiationParam (methodInfo->scope, token, 0);
-        _ASSERTE(typeParam);
-        emit_LDC_I(typeParam);
+        CORINFO_CLASS_HANDLE tokenType;
+        // Instantiated generic method
+        if (TypeFromToken(token) == mdtMethodSpec)
+            TokenToHandle(token, tokenType, INTERNAL_CALL);
+        // otherwise must be an instance method in a generic struct, a static method in a generic type, or a runtime-generated array method
+        else
+            TokenToHandle(parentToken, tokenType, INTERNAL_CALL);
     }
 
-    argBytes = buildCall(&targetSigInfo, CALL_NONE, stackPadorRetBase );
+    argBytes = buildCall(&targetReprSigInfo, CALL_NONE, stackPadorRetBase );
 
     unsigned        address;
     InfoAccessType accessType = IAT_PVALUE;
-    address = (unsigned) jitInfo->getFunctionEntryPoint(targetMethod, &accessType);
+    address = (unsigned) jitInfo->getFunctionEntryPoint(targetReprMethod, &accessType);
     _ASSERTE(accessType == IAT_PVALUE);
     emit_callnonvirt(address, (targetSigInfo.hasRetBuffArg() ? typeSizeInBytes(jitInfo, targetSigInfo.retTypeClass) : 0));
 
-    return compileDO_PUSH_CALL_RESULT(argBytes, stackPadorRetBase, token, targetSigInfo, targetClass);
+    return compileDO_PUSH_CALL_RESULT(argBytes, stackPadorRetBase, token, targetInstSigInfo, targetClass);
 }
 
 FJitResult FJit::compileCEE_CALLVIRT()
 {
     unsigned                offset;
     unsigned                address;
-    unsigned int            argBytes, stackPadorRetBase = 0;
-    unsigned int            token;
+    unsigned int            argBytes, stackPad = 0;
+    unsigned int            token, parentToken;
     unsigned                sizeRetBuff;
-    CORINFO_METHOD_HANDLE   targetMethod;
+    CORINFO_METHOD_HANDLE   targetInstMethod, targetReprMethod;
     CORINFO_CLASS_HANDLE    targetClass;
-    CORINFO_SIG_INFO        targetSigInfo;
+    CORINFO_SIG_INFO        targetInstSigInfo, targetReprSigInfo;
     CORINFO_METHOD_HANDLE   methodHandle= methodInfo->ftn;
     CORINFO_MODULE_HANDLE   scope = methodInfo->scope;
 
     GET(token, unsigned int, false);
     VERIFICATION_CHECK(jitInfo->isValidToken(scope, token));
-    VALIDITY_CHECK(targetMethod = jitInfo->findMethod(scope, token, methodHandle));
-
+    VALIDITY_CHECK(targetInstMethod = jitInfo->findMethod(scope, token, methodHandle));
+    VALIDITY_CHECK(targetReprMethod = jitInfo->findMethod(scope, token | CORINFO_ANNOT_ALLOWINSTPARAM, methodHandle));
+    
     DWORD methodAttribs;
-    methodAttribs = jitInfo->getMethodAttribs(targetMethod, methodHandle);
+    methodAttribs = jitInfo->getMethodAttribs(targetInstMethod, methodHandle);
     if (methodAttribs & CORINFO_FLG_SECURITYCHECK)
     {
         TailCallForbidden = true;
@@ -7441,7 +7774,8 @@ FJitResult FJit::compileCEE_CALLVIRT()
         }
     }
 
-    VALIDITY_CHECK(targetClass = jitInfo->getMethodClass (targetMethod));
+    parentToken = jitInfo->getMemberParent(scope, token);
+    VALIDITY_CHECK(targetClass = jitInfo->findClass (scope, parentToken, methodHandle));
     DWORD classAttribs;
     classAttribs = jitInfo->getClassAttribs(targetClass,methodHandle);
 
@@ -7451,63 +7785,83 @@ FJitResult FJit::compileCEE_CALLVIRT()
         UINT_PTR from = (UINT_PTR) jitInfo->GetProfilingHandle(methodHandle, &bHookFunction);
         if (bHookFunction)
         {
-            UINT_PTR to = (UINT_PTR) jitInfo->GetProfilingHandle(targetMethod, &bHookFunction);
+            UINT_PTR to = (UINT_PTR) jitInfo->GetProfilingHandle(targetReprMethod, &bHookFunction);
             if (bHookFunction) // check that the flag has not been over-ridden
             {
                 deregisterTOS;
-                ULONG func = (ULONG) jitInfo->getHelperFtn(CORINFO_HELP_PROF_FCN_CALL);
+                ULONG func = (ULONG)jitInfo->getHelperFtn(CORINFO_HELP_PROF_FCN_CALL);
                 emit_callhelper_prof2(func, CORINFO_HELP_PROF_FCN_CALL, to, from);
             }
         }
     }
 
-    jitInfo->getMethodSig(targetMethod, &targetSigInfo);
-    if (targetSigInfo.isVarArg())
-        jitInfo->findCallSiteSig(scope,token,&targetSigInfo);
+    jitInfo->getMethodSig(targetReprMethod, &targetReprSigInfo, targetClass);
+    jitInfo->getMethodSig(targetInstMethod, &targetInstSigInfo, targetClass);
+    if (targetInstSigInfo.isVarArg())
+        //<REVIEW>Inst or Repr?</REVIEW>
+        jitInfo->findCallSiteSig(scope,token,methodHandle,&targetInstSigInfo);
 
     // Can't use callvirt on a value class
     VERIFICATION_CHECK(!(classAttribs & CORINFO_FLG_VALUECLASS));
     // Can't use callvirt on a static method
-    VERIFICATION_CHECK(targetSigInfo.hasThis());
+    VERIFICATION_CHECK(targetReprSigInfo.hasThis());
+
     // Verify that the arguments on the stack match the method signature
-    int result_arg_ver = ( JitVerify ? verifyArguments( targetSigInfo, 0, false) : SUCCESS_VERIFICATION );
-    VALIDITY_CHECK( result_arg_ver != FAILED_VALIDATION );
-    VERIFICATION_CHECK( result_arg_ver != FAILED_VERIFICATION );
+    int result_arg_ver = ( JitVerify ? verifyArguments( targetInstSigInfo, 0, false) : SUCCESS_VERIFICATION );
+    VALIDITY_CHECK( result_arg_ver != FAILED_VALIDATION );       
+    VERIFICATION_CHECK( result_arg_ver != FAILED_VERIFICATION INDEBUG(|| !"CEE_CALLVIRT")); 
     CORINFO_CLASS_HANDLE instanceClassHnd = jitInfo->getMethodClass(methodInfo->ftn);
     // Verify the this argument for non-static methods( it is not part of the method signature )
     if (!( methodAttribs& CORINFO_FLG_STATIC) )
     {
         // For arrays we don't have the correct class handle
         if ( classAttribs & CORINFO_FLG_ARRAY)
-            targetClass = jitInfo->findMethodClass( scope, token );
-        int result_this_ver = ( JitVerify
-                                    ? verifyThisPtr(instanceClassHnd, targetClass, targetSigInfo.numArgs, false)
-                                    : SUCCESS_VERIFICATION );
-        VERIFICATION_CHECK( result_this_ver != FAILED_VERIFICATION );
-    }
+            targetClass = jitInfo->findMethodClass( scope, token, methodHandle );
+        int result_this_ver = ( JitVerify 
+                                    ? verifyThisPtr(instanceClassHnd, targetClass, targetInstSigInfo.numArgs, false)
+                                    : SUCCESS_VERIFICATION );    
+        VERIFICATION_CHECK( result_this_ver != FAILED_VERIFICATION ); 
+    }   
     // Verify that the method is accessible from the call site
-    VERIFICATION_CHECK(jitInfo->canAccessMethod(methodHandle, targetMethod, instanceClassHnd ));
+    VERIFICATION_CHECK(jitInfo->canAccessMethod(methodHandle, targetReprMethod, instanceClassHnd ));
 
-    if (targetSigInfo.hasTypeArg())
-    {
-        void* typeParam = jitInfo->getInstantiationParam (scope, token, 0);
-        _ASSERTE(typeParam);
-        emit_LDC_I(typeParam);
+    if (targetReprSigInfo.hasTypeArg())  
+    {   
+        CORINFO_CLASS_HANDLE tokenType;
+        // Instantiated generic method
+        if (TypeFromToken(token) == mdtMethodSpec)
+            TokenToHandle(token, tokenType, INTERNAL_CALL);
+        // otherwise must be an instance method in a generic struct, a static method in a generic type, or a runtime-generated array method
+        else
+            TokenToHandle(parentToken, tokenType, INTERNAL_CALL);
+    }           
+
+    argBytes = buildCall(&targetReprSigInfo, CALL_NONE, stackPad);
+
+    sizeRetBuff = targetInstSigInfo.hasRetBuffArg() ? typeSizeInBytes(jitInfo, targetInstSigInfo.retTypeClass) : 0;
+    
+    if (targetInstSigInfo.methodInst != NULL && 
+        (methodAttribs & CORINFO_FLG_VIRTUAL)) 
+    { 
+        // GENERICS: Use the code for LDVIRTFN.  This expects a copy of the
+        // object pointer on TOS.  Since this is the topmost of the arguments,
+        // we just duplicate TOS.
+        emit_DUP_PTR();
+        emit_ldgenericvirtftn(token) 
+
+        // Now we can use the sequence for CALLI.
+        emit_calli(targetSigInfo.hasRetBuffArg() ? typeSizeInBytes(jitInfo, targetSigInfo.retTypeClass) : 0;);
     }
-
-    argBytes = buildCall(&targetSigInfo, CALL_NONE, stackPadorRetBase);
-
-    sizeRetBuff = targetSigInfo.hasRetBuffArg() ? typeSizeInBytes(jitInfo, targetSigInfo.retTypeClass) : 0;
-
-    if (jitInfo->getClassAttribs(targetClass,methodHandle) & CORINFO_FLG_INTERFACE)
+    else if (jitInfo->getClassAttribs(targetClass,methodHandle) & CORINFO_FLG_INTERFACE) 
     {
-        offset = jitInfo->getMethodVTableOffset(targetMethod);
+        offset = jitInfo->getMethodVTableOffset(targetReprMethod);
         _ASSERTE(!(methodAttribs & CORINFO_FLG_EnC));
         unsigned InterfaceTableOffset;
         InterfaceTableOffset = jitInfo->getInterfaceTableOffset(targetClass);
         emit_callinterface_new(OFFSET_OF_INTERFACE_TABLE,
-                                InterfaceTableOffset*4,
-                                offset, sizeRetBuff );
+                                InterfaceTableOffset*4, 
+                                offset,
+                                sizeRetBuff);
     }
     else
     {
@@ -7515,23 +7869,31 @@ FJitResult FJit::compileCEE_CALLVIRT()
             emit_check_null_reference(false);
 
             InfoAccessType accessType = IAT_PVALUE;
-            address = (unsigned) jitInfo->getFunctionEntryPoint(targetMethod, &accessType);
+            address = (unsigned) jitInfo->getFunctionEntryPoint(targetReprMethod, &accessType);
             _ASSERTE(accessType == IAT_PVALUE);
-            emit_callnonvirt(address, sizeRetBuff);
+            if (methodAttribs & CORINFO_FLG_DELEGATE_INVOKE) {
+                    CORINFO_EE_INFO info;
+                    jitInfo->getEEInfo(&info);
+                    emit_invoke_delegate(info.offsetOfDelegateInstance, 
+                                            info.offsetOfDelegateFirstTarget);
+            }
+            else {
+                emit_callnonvirt(address, sizeRetBuff);
+            }
         }
         else
         {
-            offset = jitInfo->getMethodVTableOffset(targetMethod);
+            offset = jitInfo->getMethodVTableOffset(targetReprMethod);
             _ASSERTE(!(methodAttribs & CORINFO_FLG_DELEGATE_INVOKE));
             emit_callvirt(offset, sizeRetBuff);
         }
     }
-    return compileDO_PUSH_CALL_RESULT(argBytes, stackPadorRetBase, token, targetSigInfo, targetClass);
+    return compileDO_PUSH_CALL_RESULT(argBytes, stackPad, token, targetInstSigInfo, targetClass);
 }
 
 FJitResult FJit::compileCEE_TAILCALL()
 {
-    unsigned int            token;
+    unsigned int            token, parentToken;
     unsigned                sizeRetBuff;
     OPCODE                  opcode;
     unsigned char           opcode_val;
@@ -7567,13 +7929,16 @@ FJitResult FJit::compileCEE_TAILCALL()
     // Get the token for the function
     GET(token, unsigned int, false);
     VERIFICATION_CHECK(jitInfo->isValidToken(scope, token));
+    //<REVIEW>Do we need to pass CORINFO_ANNOT_ALLOWINSTPARAM for CALL and CALLVIRT here?</REVIEW>
     VALIDITY_CHECK(targetMethod = jitInfo->findMethod(scope, token, methodHandle));
+    parentToken = jitInfo->getMemberParent(scope, token);
+    VALIDITY_CHECK( targetClass = jitInfo->findClass( scope, parentToken, methodHandle ));
 
     // Obtain the function signature
     if (opcode == CEE_CALLI)
-            jitInfo->findSig(methodInfo->scope, token, &targetSigInfo);
+            jitInfo->findSig(methodInfo->scope, token, methodHandle, &targetSigInfo);
     else
-            jitInfo->getMethodSig(targetMethod, &targetSigInfo);
+            jitInfo->getMethodSig(targetMethod, &targetSigInfo, targetClass);
 
     // Obtain argument sizes
     int sizeCaller, sizeTarget, Flags;
@@ -7642,11 +8007,8 @@ FJitResult FJit::compileCEE_TAILCALL()
     // to local stack
     CORINFO_CLASS_HANDLE instanceClassHnd = jitInfo->getMethodClass(methodInfo->ftn);
     DWORD methodAttribs = jitInfo->getMethodAttribs(targetMethod, methodHandle);
-    VALIDITY_CHECK(targetClass = jitInfo->getMethodClass(targetMethod));
     DWORD classAttribs = jitInfo->getClassAttribs(targetClass,methodHandle);
-    // For arrays we don't have the correct class handle
-    if ( classAttribs & CORINFO_FLG_ARRAY)
-        targetClass = jitInfo->findMethodClass( scope, token );
+
     if (!( methodAttribs & CORINFO_FLG_STATIC) )
     {
         int result_this_ver = ( JitVerify
@@ -7666,7 +8028,7 @@ FJitResult FJit::compileCEE_TAILCALL()
     switch (opcode)
     {
     case CEE_CALLI:
-        emit_save_TOS();        //squirel away the target ftn address
+        emit_save_TOS();        //squirrel away the target ftn address
         emit_POP_PTR();         //and remove from stack
         VALIDITY_CHECK(!targetSigInfo.hasTypeArg());
         argBytes = buildCall(&targetSigInfo, CALL_NONE, stackPadorRetBase);
@@ -7766,20 +8128,45 @@ FJitResult FJit::compileCEE_TAILCALL()
 
         if (targetSigInfo.hasTypeArg())
         {
-            emit_LDC_I(targetClass);
+            CORINFO_CLASS_HANDLE tokenType;
+            // Instantiated generic method
+            if (TypeFromToken(token) == mdtMethodSpec)
+                TokenToHandle(token, tokenType, INTERNAL_CALL);
+            // otherwise must be an instance method in a generic struct, a static method in a generic type, or a runtime-generated array method
+            else
+                TokenToHandle(parentToken, tokenType, INTERNAL_CALL);
+            // emit_LDC_I(targetClass);                
         }
 
         argBytes = buildCall(&targetSigInfo, CALL_NONE, stackPadorRetBase);
 
-        if ( classAttribs & CORINFO_FLG_INTERFACE) {
+        if (targetSigInfo.methodInst != NULL && 
+            (methodAttribs & CORINFO_FLG_VIRTUAL)) 
+        {
+            // GENERICS: Use the code for LDVIRTFN.  This expects a copy of the
+            // object pointer on TOS.  Since this is the topmost of the
+            // arguments, we just duplicate TOS.
+            emit_DUP_PTR();
+            emit_ldgenericvirtftn(token);
+
+            // Now push the tail call arguments, and call the tail call helper
+            emit_save_TOS();
+            emit_POP_PTR();
+            emit_tail_call(sizeCaller, sizeTarget, Flags);
+            emit_restore_TOS();
+            emit_callhelper_il(FJit_pHlpTailCall);
+        }
+        else if ( classAttribs & CORINFO_FLG_INTERFACE) {
             offset = jitInfo->getMethodVTableOffset(targetMethod);
             emit_tail_call(sizeCaller, sizeTarget, Flags);
             unsigned InterfaceTableOffset;
             InterfaceTableOffset = jitInfo->getInterfaceTableOffset(targetClass);
             emit_compute_interface_new(OFFSET_OF_INTERFACE_TABLE,
-                                    InterfaceTableOffset*4,
+                                    InterfaceTableOffset*4, 
                                     offset,
                                     sizeRetBuff);
+            emit_callhelper_il(FJit_pHlpTailCall);
+            
         }
         else {
             if ((methodAttribs & CORINFO_FLG_FINAL) || !(methodAttribs & CORINFO_FLG_VIRTUAL)) {
@@ -7957,7 +8344,7 @@ FJitResult FJit::compileCEE_REFANYVAL()
     POP_STACK(1);     // pop off the refany
     // The helper will throw InvalidCast or TypeLoad at runtime if typedref doesn't point to targetClass
     // so for verification purposes refanyval is always successful
-    emit_REFANYVAL( targetClass );
+    emit_REFANYVAL( targetClass, token, (methodAttributes & CORINFO_FLG_SHAREDINST) );
     
     OpType val = OpType( typeByRef );
   

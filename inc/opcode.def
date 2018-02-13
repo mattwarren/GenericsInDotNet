@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -208,9 +213,9 @@ OPDEF(CEE_STELEM_I8,                  "stelem.i8",        PopRef+PopI+PopI8,  Pu
 OPDEF(CEE_STELEM_R4,                  "stelem.r4",        PopRef+PopI+PopR4,  Push0,       InlineNone,         IObjModel,   1,  0xFF,    0xA0,    NEXT)
 OPDEF(CEE_STELEM_R8,                  "stelem.r8",        PopRef+PopI+PopR8,  Push0,       InlineNone,         IObjModel,   1,  0xFF,    0xA1,    NEXT)
 OPDEF(CEE_STELEM_REF,                 "stelem.ref",       PopRef+PopI+PopRef, Push0,       InlineNone,         IObjModel,   1,  0xFF,    0xA2,    NEXT)
-OPDEF(CEE_UNUSED2,                    "unused",           Pop0,               Push0,       InlineNone,         IPrimitive,  1,  0xFF,    0xA3,    NEXT)
-OPDEF(CEE_UNUSED3,                    "unused",           Pop0,               Push0,       InlineNone,         IPrimitive,  1,  0xFF,    0xA4,    NEXT)
-OPDEF(CEE_UNUSED4,                    "unused",           Pop0,               Push0,       InlineNone,         IPrimitive,  1,  0xFF,    0xA5,    NEXT)
+OPDEF(CEE_LDELEM,                 "ldelem",       PopRef+PopI,        Push1,       InlineType,         IObjModel,   1,  0xFF,    0xA3,    NEXT)
+OPDEF(CEE_STELEM,                 "stelem",       PopRef+PopI+Pop1,   Push0,       InlineType,         IObjModel,   1,  0xFF,    0xA4,    NEXT)
+OPDEF(CEE_UNBOX_ANY,                  "unbox.any",        PopRef,             Push1,       InlineType,         IObjModel,   1,  0xFF,    0xA5,    NEXT)
 OPDEF(CEE_UNUSED5,                    "unused",           Pop0,               Push0,       InlineNone,         IPrimitive,  1,  0xFF,    0xA6,    NEXT)
 OPDEF(CEE_UNUSED6,                    "unused",           Pop0,               Push0,       InlineNone,         IPrimitive,  1,  0xFF,    0xA7,    NEXT)
 OPDEF(CEE_UNUSED7,                    "unused",           Pop0,               Push0,       InlineNone,         IPrimitive,  1,  0xFF,    0xA8,    NEXT)

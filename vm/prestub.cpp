@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -100,6 +105,7 @@ OBJECTREF GetActiveObject(PrestubMethodFrame *pPFrame)
 static void DoBackpatch(MethodDesc *pMD, Stub *pstub, MethodTable *pDispatchingMT)
 {
     _ASSERTE(!pMD->IsAbstract());
+    _ASSERTE(!pMD->IsGenericMethodDefinition());
 
     // don't backpatch COMDelegate::DelegateConstruct FCall
     if (pMD->IsECall() && pMD->GetClass()->IsAnyDelegateClass())
@@ -112,6 +118,7 @@ static void DoBackpatch(MethodDesc *pMD, Stub *pstub, MethodTable *pDispatchingM
     if (pMD->IsVtableMethod() &&
         !pMD->GetClass()->IsValueClass() &&
         !pMD->GetModule()->IsEditAndContinue() && 
+        !pMD->HasMethodInstantiation() &&
         pDispatchingMT)
     {
         // Try patching up and down the hierarchy.  If this fails (e.g.
@@ -126,7 +133,11 @@ static void DoBackpatch(MethodDesc *pMD, Stub *pstub, MethodTable *pDispatchingM
 
     // Always patch the entry of the class identified by the method desc.
     // This may have already happened, but it's not worth checking.
-    (pMD->GetClass()->GetMethodTable()->GetVtable())[pMD->GetSlot()] = (SLOT)pstub;
+    //@GENERICS: 
+    // Instantiated methods aren't really in the vtable -- they're chained off a generic method desc
+    // So don't backpatch them!
+    if (!pMD->HasMethodInstantiation())
+      (pMD->GetClass()->GetMethodTable()->GetVtable())[pMD->GetSlot()] = (SLOT)pstub;
 }
 
 // Helper function to avoid two COMPLUS_TRY/COMPLUS_CATCH blocks in one function
@@ -317,7 +328,16 @@ Stub *MakeJitWorker(MethodDesc *pMD, COR_ILMETHOD_DECODER* ILHeader, BOOL fInter
                     }
 
 
-                    pMD->SetAddrofCode((BYTE*)pstub);
+		    if (pMD->HasMethodInstantiation() && pMD->HasInstParam())
+		      ((InstantiatedMethodDesc*) pMD)->AllocateMethodDicts();
+
+		    //<REVIEW>GENERICS: check this</REVIEW>
+		    // At this point someone can enter the code for the method (not the prestub), so generic method dictionaries had better be allocated
+		    // This is ensured because 
+		    // (a) we've just grown dictionaries that we know about from this thread 
+		    // (b) anyone blocked on the JIT lock will grow dictionaries as soon as the lock is released (see above)
+		    // (c) anyone creating an instantiated method descriptor after this point will see the dictionary layout
+                    pMD->SetAddrofCode((BYTE*)pstub);		    
 
                     pEntry->m_hrResultCode = S_OK;
 
@@ -500,7 +520,7 @@ void InterLockedReplacePrestub(MethodDesc* pMD, Stub* pStub)
 
 // CTS: BIG hole if pMD is a method impl that has implemented more then one method
 // on this value class!!!
-Stub *MakeUnboxStubWorker(MethodDesc *pMD, CPUSTUBLINKER *psl, OBJECTREF *pThrowable)
+Stub *MakeSpecialStubWorker(MethodDesc *pMD, CPUSTUBLINKER *psl, OBJECTREF *pThrowable)
 {
     // Note: this should be kept idempotent ... in the sense that
     // if multiple threads get in here for the same pMD 
@@ -510,11 +530,29 @@ Stub *MakeUnboxStubWorker(MethodDesc *pMD, CPUSTUBLINKER *psl, OBJECTREF *pThrow
 
     COMPLUS_TRY
     {
-        MethodDesc *pUnboxedMD = pMD->GetClass()->GetMethodDescForUnboxingValueClassMethod(pMD);
+        if (pMD->GetMethodTable()->IsValueClass())
+	{
+          MethodDesc *pUnboxedMD = pMD->GetClass()->GetMethodDescForUnboxingValueClassMethod(pMD);
 
-        _ASSERTE(pUnboxedMD != 0 && pUnboxedMD != pMD);
+          _ASSERTE(pUnboxedMD != 0 && pUnboxedMD != pMD);
+          psl->EmitUnboxMethodStub(pUnboxedMD);
+	}
+	else
+	{
+          // Create a method descriptor for the shared code associated with this instantiation
+	      _ASSERTE(pMD->GetMethodInstantiation() != NULL);
+          InstantiatedMethodDesc *pStubMD = (InstantiatedMethodDesc*) pMD;
+          InstantiatedMethodDesc *pSharedMD =
+              InstantiatedMethodDesc::CreateGenericInstantiation(
+                                                  pStubMD->GetMethodTable(),
+                                                  pStubMD->StripMethodInstantiation(),
+                                                  pStubMD->GetMethodInstantiation(),
+                                                  TRUE);
 
-        psl->EmitUnboxMethodStub(pUnboxedMD);
+          _ASSERTE(pSharedMD != 0 && pSharedMD != pStubMD);
+
+          psl->EmitInstantiatingMethodStub(pSharedMD, pStubMD);
+	}
         pstub = psl->Link(pMD->GetClass()->GetClassLoader()->GetStubHeap());
     }
     COMPLUS_CATCH
@@ -692,10 +730,10 @@ const BYTE * MethodDesc::DoPrestub(MethodTable *pDispatchingMT)
         COMPlusThrow(throwable);
     
     /**************************   CODE CREATION  *************************/
-    if (IsUnboxingStub()) 
+    if (IsSpecialStub()) 
     {
         CPUSTUBLINKER sl;
-        pStub = MakeUnboxStubWorker(this, &sl, &throwable);
+        pStub = MakeSpecialStubWorker(this, &sl, &throwable);
         bBashCall = TRUE;
     }
     else if (IsIL()) 
@@ -790,10 +828,19 @@ const BYTE * MethodDesc::DoPrestub(MethodTable *pDispatchingMT)
             // We have no backup plan, if jitting fails, we are toast
         }
     }
-    else    //!IsUnBoxingStub() && !IsIL() case
+    else    //!IsSpecialStub() && !IsIL() case
     {
-        if (IsECall()) 
-            pStub = (Stub*) FindImplForMethod(this);         // See if it is an FCALL
+        if (IsECall())
+        {
+            // See if it is an FCALL and already "jitted", which for fcall 
+            // means that its m_CodeOrIL is not already set. We explicitly
+            // check for the mcECall bit since IsECall is really
+	    // IsRuntimeGenerated and so includes array also
+            if (IsJitted() && (mcECall == GetClassification()))
+                pStub = (Stub*) GetAddrofJittedCode();
+            else
+                pStub = (Stub*) FindImplForMethod(this); 
+        } 
        
 
         if (pStub != 0)
@@ -910,7 +957,7 @@ const BYTE * MethodDesc::DoPrestub(MethodTable *pDispatchingMT)
     {
         BYTE* codeAddr = 0;
 
-        if (IsUnboxingStub())
+        if (IsSpecialStub())
         {
             codeAddr = (BYTE*)pStub->GetEntryPoint();
         }
@@ -1057,7 +1104,7 @@ void CallDefaultConstructor(OBJECTREF ref)
     {
         // Allocate a metasig to use for all default constructors.
         void *tempSpace = SystemDomain::Loader()->GetHighFrequencyHeap()->AllocMem(sizeof(MetaSig));
-        sig = new (tempSpace) MetaSig(gsig_IM_RetVoid.GetBinarySig(), SystemDomain::SystemModule());
+        sig = new (tempSpace) MetaSig(gsig_IM_RetVoid.GetBinarySig(), SystemDomain::SystemModule(), NULL, NULL);
     }
 
     ARG_SLOT arg = ObjToArgSlot(ref);

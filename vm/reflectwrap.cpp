@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -20,6 +25,7 @@
 
 #include "comreflectioncommon.h"
 #include "field.h"
+#include "generics.h"
 
 // These are basically Empty elements that can be allocated one time and then returned
 static ReflectTypeList* EmptyTypeList = 0;
@@ -147,12 +153,14 @@ TypeHandle ReflectClass::FindTypeHandleForMethod(MethodDesc* method) {
     MethodTable* pMT = method->GetMethodTable();
 
 
-    if (!pMT->IsArray()) {          // Does the method belong to a normal class (ie System.Object)?
+    if (!pMT->IsArray() && !pMT->GetClass()->HasInstantiation()) {          // Does the method belong to a normal class (ie System.Object)?
         _ASSERTE(!pMT->HasSharedMethodTable());  // currently assume that only arrays have shared method tables
         return(TypeHandle(pMT));
     }
 
     TypeHandle ret = GetTypeHandle();
+    if (pMT->HasInstantiation()) 
+      return Generics::GetMethodDeclaringType(ret, method, NULL);
     do {
         if (pMT == ret.GetMethodTable())
             return(ret);
@@ -167,9 +175,34 @@ TypeHandle ReflectClass::FindTypeHandleForMethod(MethodDesc* method) {
 void ReflectBaseClass::GetName(LPCUTF8* szcName, LPCUTF8* szcNameSpace) 
 {
     _ASSERTE(szcName);
+    if (GetClass()->HasInstantiation())
+      {
+        CQuickBytes qb;
+        LPSTR nameBuff = (LPSTR) qb.Alloc(MAX_CLASSNAME_LENGTH * sizeof(CHAR));
+        unsigned len = m_TH.GetName(nameBuff, MAX_CLASSNAME_LENGTH);
+        LPUTF8 m_szcName, m_szcNameSpace = (LPUTF8) GetDomain()->GetReflectionHeap()->AllocMem(len+1);
+        strcpy(m_szcNameSpace, nameBuff);
+	LPUTF8 szcInst = strchr(m_szcNameSpace, '[');
+	_ASSERTE(szcInst != NULL);
+	len = szcInst - m_szcNameSpace;
+        while (m_szcNameSpace[len] != '.' && len > 0) len--;
+        if (len != 0) {
+            m_szcNameSpace[len] = 0;
+            m_szcName = &m_szcNameSpace[len+1];
+        }
+        else {
+            m_szcName = m_szcNameSpace;
+            m_szcNameSpace = 0;
+        }
+        if (szcNameSpace) 
+           *szcNameSpace = m_szcNameSpace;
+        *szcName = m_szcName;
+      }
+    else
+      {
     LPCUTF8 pNamespace = NULL;
-    IMDInternalImport *pImport = m_pEEC->GetMDImport();
-    mdTypeDef mdClass = m_pEEC->GetCl();
+    IMDInternalImport *pImport = GetClass()->GetMDImport();
+    mdTypeDef mdClass = GetClass()->GetCl();
     pImport->GetNameOfTypeDef(mdClass, szcName, &pNamespace);
     if (szcNameSpace) {
         if (IsNested()) {
@@ -180,6 +213,7 @@ void ReflectBaseClass::GetName(LPCUTF8* szcName, LPCUTF8* szcNameSpace)
         } 
         else
             *szcNameSpace = pNamespace;
+      }
     }
 }
 
@@ -187,7 +221,7 @@ void ReflectBaseClass::GetName(LPCUTF8* szcName, LPCUTF8* szcNameSpace)
 // This will return the methods associated with a Base object
 void ReflectBaseClass::InternalGetMethods() 
 {
-    ReflectMethodList *pMeths = ReflectMethods::GetMethods(this, 0);
+    ReflectMethodList *pMeths = ReflectMethods::GetMethods(this);
     FastInterlockCompareExchangePointer((void**)&m_pMeths, *(void**)&pMeths, NULL);
 }
 
@@ -195,7 +229,7 @@ void ReflectBaseClass::InternalGetMethods()
 // This will return the properties associated with a Base object
 void ReflectBaseClass::InternalGetProperties()
 {
-    ReflectPropertyList* pProps = ReflectProperties::GetProperties(this, m_pEEC);
+    ReflectPropertyList* pProps = ReflectProperties::GetProperties(this, GetTypeHandle());
     if (!pProps) {
         pProps = GetEmptyPropertyList();
     }
@@ -204,7 +238,7 @@ void ReflectBaseClass::InternalGetProperties()
 
 void ReflectBaseClass::InternalGetEvents()
 {
-    ReflectEventList *pEvents = ReflectEvents::GetEvents(this, m_pEEC);
+    ReflectEventList *pEvents = ReflectEvents::GetEvents(this, GetTypeHandle());
     if (!pEvents) {
         pEvents = GetEmptyEventList();
     }
@@ -240,7 +274,7 @@ ReflectFieldList* ReflectBaseClass::GetFields()
 {
     if (!m_pFlds) {
         // Get all the fields
-        ReflectFieldList *pFlds = ReflectFields::GetFields(m_pEEC);
+        ReflectFieldList *pFlds = ReflectFields::GetFields(GetTypeHandle());
         if (!pFlds) {
             pFlds = GetEmptyFieldList();
         }
@@ -255,12 +289,10 @@ ReflectFieldList* ReflectBaseClass::GetFields()
 //  from the base init.
 void ReflectArrayClass::Init(ArrayTypeDesc* arrayType)
 {
-    // Save off the EEClass
     m_pMeths = 0;
     m_pCons = 0;
     m_pFlds = 0;
-    m_pEEC = arrayType->GetMethodTable()->GetClass();
-    m_pArrayType = arrayType;
+    m_TH = TypeHandle(arrayType);
 
     // Initalize the Class Object
     GetDomain()->AllocateObjRefPtrsInLargeTable(1, &m_ExposedClassObject);
@@ -273,7 +305,7 @@ void ReflectArrayClass::GetName(LPCUTF8* szcName,LPCUTF8* szcNameSpace)
         LPSTR nameBuff = (LPSTR) qb.Alloc(MAX_CLASSNAME_LENGTH * sizeof(CHAR));
         if (nameBuff == NULL)
             FatalOutOfMemoryError();
-        unsigned len = m_pArrayType->GetName(nameBuff, MAX_CLASSNAME_LENGTH);
+        unsigned len = m_TH.GetName(nameBuff, MAX_CLASSNAME_LENGTH);
         LPUTF8 szcName = (LPUTF8) GetDomain()->GetReflectionHeap()->AllocMem(len+1);
         if (szcName == NULL)
             FatalOutOfMemoryError();
@@ -324,17 +356,13 @@ ReflectFieldList* ReflectArrayClass::GetFields()
 
 void ReflectArrayClass::InternalGetMethods()
 {
-    ReflectMethodList *pMeths = ReflectMethods::GetMethods(this, 1);
-    for (DWORD i = 0; i < pMeths->dwTotal; i++) {
-        if (pMeths->methods[i].typeHnd.IsNull()) 
-            pMeths->methods[i].typeHnd = FindTypeHandleForMethod(pMeths->methods[i].pMethod);
-    }
+    ReflectMethodList *pMeths = ReflectMethods::GetMethods(this);
     FastInterlockCompareExchangePointer((void**)&m_pMeths, *(void**)&pMeths, NULL);
 }
 
 void ReflectArrayClass::InternalGetProperties()
 {
-    ReflectPropertyList *pProps = ReflectProperties::GetProperties(this, GetClass());
+    ReflectPropertyList *pProps = ReflectProperties::GetProperties(this, GetTypeHandle());
     FastInterlockCompareExchangePointer((void**)&m_pProps, *(void**)&pProps, NULL);
 }
 
@@ -356,14 +384,14 @@ ReflectMethodList* ReflectArrayClass::GetConstructors()
         MethodDesc**    rgpMD;
 
         DWORD vtableSlots = 0;
-        DWORD totalSlots = m_pEEC->GetNumMethodSlots();
+        DWORD totalSlots = GetClass()->GetNumMethodSlots();
         rgpMD = (MethodDesc**) _alloca(sizeof(MethodDesc*) * (totalSlots - vtableSlots));
 
         DWORD dwCurIndex = 0;
         DWORD i;
         for (i = vtableSlots; i < totalSlots; i++)
         {
-            MethodDesc* pCurMethod = m_pEEC->GetUnknownMethodDescForSlot(i);
+            MethodDesc* pCurMethod = GetClass()->GetUnknownMethodDescForSlot(i);
             if (pCurMethod == NULL)
                 continue;
 
@@ -388,7 +416,7 @@ ReflectMethodList* ReflectArrayClass::GetConstructors()
                 pCons->methods[i].dwNameCnt = (DWORD)strlen(pCons->methods[i].szName);
                 pCons->methods[i].pSignature = 0;
                 GetDomain()->AllocateObjRefPtrsInLargeTable(1, &(pCons->methods[i].pMethodObj));
-                pCons->methods[i].typeHnd = FindTypeHandleForMethod(rgpMD[i]);
+                pCons->methods[i].declType = FindTypeHandleForMethod(rgpMD[i]);
                 pCons->methods[i].attrs = pCons->methods[i].pMethod->GetAttrs();
                 if (i > 0) 
                     pCons->methods[i - 1].pNext = &pCons->methods[i]; // link the ctors together so we can access them either way (array or list)
@@ -484,6 +512,10 @@ ReflectMethod* ReflectMethodList::FindMethod(mdMethodDef mb)
 
 ReflectMethod* ReflectMethodList::FindMethod(MethodDesc* pMeth)
 {
+    //@GENERICS:
+    // If it's an instantiated method then we won't find it in the list
+    _ASSERTE(!pMeth->HasMethodInstantiation());
+
     for (DWORD i=0;i<dwTotal;i++) {
         if (methods[i].pMethod == pMeth)
             return &methods[i];
@@ -518,8 +550,8 @@ ReflectMethod* ReflectMethodList::FindMethod(MethodDesc* pMeth)
 
                     // if the signatures match, this this must be our
                     //  real method.
-                    if (MetaSig::CompareMethodSigs(pP1Sig,cP1Sig,pMeth->GetModule(),
-                            pP2Sig,cP2Sig,pCurMethod->GetModule())) {
+                    if (MetaSig::CompareMethodSigs(pP1Sig,cP1Sig,pMeth->GetModule(),NULL,
+                            pP2Sig,cP2Sig,pCurMethod->GetModule(),NULL)) {
                         // search for the method again...
                         for (DWORD i=0;i<dwMethods;i++) {
                             if (methods[i].pMethod == pCurMethod)
@@ -585,10 +617,10 @@ ReflectMethod*  ReflectMethodHash::GetIgnore(LPCUTF8 szName)
     return _ignBuckets[dwHash];
 }
 
-void ReflectTypeDescClass::Init(ParamTypeDesc *td)
+void ReflectTypeDescClass::Init(TypeHandle th)
 {
     // Store the TypeHandle
-    m_pTypeDesc = td;
+    m_TH = th;
 
     // The name is lazy allocated.
     m_szcName = 0;
@@ -622,7 +654,7 @@ void ReflectTypeDescClass::GetName(LPCUTF8* szcName,LPCUTF8* szcNameSpace)
     if (m_szcName == 0) {
         CQuickBytes qb;
         LPSTR nameBuff = (LPSTR) qb.Alloc(MAX_CLASSNAME_LENGTH * sizeof(CHAR));
-        unsigned len = m_pTypeDesc->GetName(nameBuff, MAX_CLASSNAME_LENGTH);
+        unsigned len = m_TH.GetName(nameBuff, MAX_CLASSNAME_LENGTH);
         LPUTF8 szcName, szcNameSpace = (LPUTF8) GetDomain()->GetReflectionHeap()->AllocMem(len+1);
         if (szcNameSpace == NULL)
             FatalOutOfMemoryError();
@@ -701,6 +733,6 @@ void ReflectTypeDescClass::InternalGetNestedTypes()
 
 Module* ReflectTypeDescClass::GetModule()
 {
-    return m_pTypeDesc->GetModule();
+    return m_TH.GetModule();
 }
 

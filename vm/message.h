@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -29,7 +34,7 @@
     
     #include "fcall.h"
     
-    void GetObjectFromStack(OBJECTREF* ppDest, PVOID val, const CorElementType eType, EEClass *pCls, BOOL fIsByRef = FALSE);
+    void GetObjectFromStack(OBJECTREF* ppDest, PVOID val, const CorElementType eType, TypeHandle ty, BOOL fIsByRef = FALSE);
     
     
     //+----------------------------------------------------------
@@ -132,13 +137,6 @@
        //};
        static FCDECL1(Object*, GetReturnValue, MessageObject* pMessageUNSAFE);
 
-       //struct GetMethodNameArgs
-       //{
-       //    DECLARE_ECALL_OBJECTREF_ARG(STRINGREF*, pTypeNAssemblyName);
-       //    DECLARE_ECALL_OBJECTREF_ARG(REFLECTBASEREF, pMethodBase);
-       //};
-       static FCDECL2(Object*, GetMethodName, ReflectBaseObject* pMethodBaseUNSAFE, STRINGREF* pTypeNAssemblyName);
-
        //struct GetMethodBaseArgs
        //{
        //    DECLARE_ECALL_OBJECTREF_ARG(MESSAGEREF, pMessage);
@@ -198,7 +196,8 @@
 
        // private helpers
     private:
-       static REFLECTBASEREF __stdcall GetExposedObjectFromMethodDesc(MethodDesc *pMD);
+       static REFLECTBASEREF __stdcall GetExposedObjectFromMethodDesc(TypeHandle owner, MethodDesc *pMD);
+
        static PVOID GetStackPtr(INT32 ndx, FramedMethodFrame *pFrame, MetaSig *pSig);       
        static MetaSig* __stdcall GetMetaSig(MessageObject *pMsg);
        static INT64 __stdcall CallMethod(const void *pTarget,
@@ -206,7 +205,7 @@
                                          FramedMethodFrame *pFrame,
                                          OBJECTREF pObj);
        static INT64 CopyOBJECTREFToStack(PVOID pvDest, OBJECTREF pSrc,
-                     CorElementType typ, EEClass *pClass, MetaSig *pSig,
+                     CorElementType typ, TypeHandle ty, MetaSig *pSig,
                      BOOL fCopyClassContents);
        static LPVOID GetLastArgument(MessageObject *pMsg);
     };

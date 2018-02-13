@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -356,13 +361,12 @@ namespace System {
                 st = new StackTrace(e,true);
             String newLine = Environment.NewLine;
             StringBuilder sb = new StringBuilder(255);
-    
             for (int i = 0; i < st.FrameCount; i++)
             {
                 StackFrame sf = st.GetFrame(i);
  
                 sb.Append("   at ");
-            
+
                 MethodBase method = sf.GetMethod();
                 Type t = method.DeclaringType;
                 if (t != null)
@@ -379,8 +383,24 @@ namespace System {
                     sb.Append(".");
                 }
                 sb.Append(method.Name);
+                if (method is MethodInfo && ((MethodInfo)method).HasGenericArguments)
+                {
+                    Type[] typars = ((MethodInfo)method).GetGenericArguments();
+                    sb.Append ("[");
+                    int k=0;
+                    bool fFirstTyParam = true;
+                    while (k < typars.Length)
+                    {
+                        if (fFirstTyParam == false)
+                            sb.Append (",");
+                        else
+                            fFirstTyParam = false;
+                        sb.Append (typars[k].Name);             
+                        k++;
+                    }   
+                    sb.Append ("]");    
+                }
                 sb.Append("(");
-
                 ParameterInfo[] arrParams = method.GetParameters();
 
                 for (int j = 0; j < arrParams.Length; j++) 
@@ -388,6 +408,7 @@ namespace System {
                     String typeName = "<UnknownType>";
                     if (arrParams[j].ParameterType != null)
                         typeName = arrParams[j].ParameterType.Name;
+
 
                     sb.Append((j != 0 ? ", " : "") + typeName + " " + arrParams[j].Name);
                 }
@@ -403,7 +424,6 @@ namespace System {
                     if (fileName != null)
                         sb.Append(" in " + fileName + ":line " + sf.GetFileLineNumber());
                 }
-            
                 if (i != st.FrameCount - 1)                 
                     sb.Append(newLine);
             }

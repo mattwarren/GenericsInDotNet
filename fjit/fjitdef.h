@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -629,6 +634,24 @@ void HELPER_CALL check_stack(int frameSize, BYTE* fp, BYTE* sp) {
 }
 #endif // !emit_check_this_null_reference
 
+// GENERICS: Use a helper function to find the method to call 
+// The first argument to the helper function is the run-time type.
+// We get this by dereferencing the object pointer.
+// The second argument is the method descriptor for the static type 
+// (i.e.possibly a superclass).  This is the argument to the macro.
+#ifndef emit_ldgenericvirtftn
+#define emit_ldgenericvirtftn(memberRef) \
+{\
+        emit_LDIND_PTR();\
+        emit_tos_arg(2, EXTERNAL_CALL);              \
+        CORINFO_CLASS_HANDLE tokenType;\
+        TokenToHandle(memberRef, tokenType, EXTERNAL_CALL);\
+        emit_callhelper_I4I4(FJit_pHlpGenericVirtual);\
+        emit_pushresult_I4();\
+}
+#endif emit_ldgenericvirtftn
+
+
 #ifndef emit_calli
 #define emit_calli(sizeRetBuff)    \
 {                                  \
@@ -732,6 +755,33 @@ void HELPER_CALL check_stack(int frameSize, BYTE* fp, BYTE* sp) {
      mark_retbuff_callsite(sizeRetBuff)          \
 }
 #endif // !emit_callnonvirt
+
+#ifndef  emit_compute_invoke_delegate
+#define emit_compute_invoke_delegate(obj,ftnptr)\
+{ \
+printf("bad %d\n", __LINE__); \
+   mov_register(TOS_REG_1,ARG_1); \
+   add_constant(TOS_REG_1,ftnptr); \
+   mov_register_indirect_to(TOS_REG_1,TOS_REG_1); \
+   add_constant(ARG_1,obj); \
+   mov_register_indirect_to(ARG_1,ARG_1); \
+   push_register(TOS_REG_1); \
+}
+
+#endif // !emit_compute_invoke_delegate
+
+#ifndef  emit_invoke_delegate
+#define emit_invoke_delegate(obj,ftnptr)\
+{ \
+printf("bad %d\n", __LINE__); \
+   mov_register(TOS_REG_1,ARG_1); \
+   add_constant(TOS_REG_1,ftnptr); \
+   mov_register_indirect_to(TOS_REG_1,TOS_REG_1); \
+   add_constant(ARG_1,obj); \
+   mov_register_indirect_to(ARG_1,ARG_1); \
+   call_register(TOS_REG_1); \
+}
+#endif // !emit_invoke_delegate
 
 #ifndef emit_tail_call
 #define emit_tail_call(sizeCaller, sizeTarget, Flags ) {                   \
@@ -931,6 +981,13 @@ void HELPER_CALL CopyBytes_helper(const unsigned char* gcLayout, unsigned __int3
 }
 #endif // DECLARE_HELPERS
 
+#ifndef emit_DUP_PTR
+#define emit_DUP_PTR()\
+{ \
+   emit_WIN32(emit_DUP_I4()); \
+   emit_WIN64(emit_DUP_I8()); \
+}
+#endif emit_DUP_PTR
 
 
 #ifndef emit_CPBLK
@@ -1625,6 +1682,10 @@ int HELPER_CALL CONV_TOI4_I2_helper(__int16 val) {
    inRegTOS = true;                                               \
 }
 #endif // !emit_LDVARA
+
+#define emit_LDNULL()          \
+    emit_WIN32(emit_LDC_I4(0)) \
+    emit_WIN64(emit_LDC_I8(0))
 
 #ifndef emit_VARARG_LDARGA
 #define emit_VARARG_LDARGA(offset, offset_vararg_token) {                  \
@@ -5675,16 +5736,37 @@ unsigned __int64 HELPER_CALL CONV_TOU8_R8_helper(__int64 val_i) {
 
 /************* LDELEMA ********************/
 #ifndef emit_LDELEMA
-#define emit_LDELEMA(elemSize, clshnd)           \
+#define emit_LDELEMA_0(elemSize)                 \
 {                                                \
     LABELSTACK((outPtr-outBuff),2);              \
     callInfo.reset();                            \
     emit_tos_arg( 3, INTERNAL_CALL );            \
     emit_tos_arg( 4, INTERNAL_CALL );            \
     emit_arg(elemSize, 2, INTERNAL_CALL);        \
-    emit_arg(clshnd, 1, INTERNAL_CALL);          \
+    emit_arg(0, 1, INTERNAL_CALL);               \
     emit_callhelper_I4I4I4I4_I4(LDELEMA_helper); \
     emit_pushresult_Ptr();                       \
+}
+#define emit_LDELEMA(elemSize, clshnd, token, isShared)           \
+{                                                 \
+    LABELSTACK((outPtr-outBuff),2);		          \
+    callInfo.reset();                             \
+    emit_tos_arg( 3, INTERNAL_CALL );             \
+    emit_tos_arg( 4, INTERNAL_CALL );             \
+    emit_arg(elemSize, 2, INTERNAL_CALL);         \
+    if (isShared) {                               \
+printf("bad %d\n", __LINE__); \
+        CORINFO_CLASS_HANDLE tokenType;           \
+        TokenToHandle(token, tokenType, EXTERNAL_CALL); \
+        LABELSTACK((outPtr-outBuff), 0);          \
+        callInfo.reset();                         \
+    }                                             \
+    else {                                        \
+        /* emit_arg( targetClass, 1, EXTERNAL_CALL)                                                                                    */;\
+    }                                             \
+    emit_arg(clshnd, 1, INTERNAL_CALL);           \
+    emit_callhelper_I4I4I4I4_I4(LDELEMA_helper);  \
+    emit_pushresult_Ptr();                        \
 }
 #ifdef DECLARE_HELPERS
 void* HELPER_CALL LDELEMA_helper(void* clshnd, unsigned int elemSize, unsigned int index, CORINFO_Array* or_arr) {
@@ -6776,30 +6858,48 @@ unsigned int HELPER_CALL LDLEN_helper(CORINFO_Array* or_obj) {
 #endif
 
 #ifndef emit_NEWOARR
-#define emit_NEWOARR(comType)                      \
+#define emit_NEWOARR(comType, token, isShared)     \
 {                                                  \
      LABELSTACK((outPtr-outBuff), 0);              \
      callInfo.reset();                             \
      emit_tos_arg( 2, EXTERNAL_CALL );             \
-     emit_arg( comType, 1, EXTERNAL_CALL );        \
+     if (isShared) {                               \
+printf("bad %d\n", __LINE__); \
+         CORINFO_CLASS_HANDLE tokenType;           \
+         TokenToHandle(token | CORINFO_ANNOT_ARRAY, tokenType, EXTERNAL_CALL); \
+         LABELSTACK((outPtr-outBuff), 0);          \
+         callInfo.reset();                         \
+     }                                             \
+     else {                                        \
+         emit_arg( comType, 1, EXTERNAL_CALL );    \
+     }                                             \
      emit_callhelper_I4I4_I4(FJit_pHlpNewArr_1_Direct);\
      emit_pushresult_Ptr();                        \
 }
 #endif
 
 #ifndef emit_NEWOBJ
-#define emit_NEWOBJ(targetClass,jit_helper)        \
+#define emit_NEWOBJ(targetClass,jit_helper,parentToken,isShared)        \
 {                                                  \
-     LABELSTACK((outPtr-outBuff), 0);              \
-     callInfo.reset();                             \
-     emit_arg( targetClass, 1, EXTERNAL_CALL );    \
+     if (isShared) {                               \
+printf("bad %d\n", __LINE__); \
+         CORINFO_CLASS_HANDLE tokenType;           \
+         TokenToHandle(parentToken, tokenType, EXTERNAL_CALL); \
+         LABELSTACK((outPtr-outBuff), 0);          \
+         callInfo.reset();                         \
+     }                                             \
+     else {                                        \
+         LABELSTACK((outPtr-outBuff), 0);          \
+         callInfo.reset();                         \
+         emit_arg( targetClass, 1, EXTERNAL_CALL );\
+     }                                             \
      emit_callhelper_I4(jit_helper);               \
      emit_pushresult_Ptr();                        \
 }
 #endif
 
 #ifndef emit_NEWOBJ_array
-#define emit_NEWOBJ_array(scope, token, constructorArgBytes)        \
+#define emit_NEWOBJ_array(targetClass, constrMethod, constructorArgBytes) \
     LABELSTACK((outPtr-outBuff),0);                                 \
     if (PARAMETER_SPACE)                                            \
     {                                                               \
@@ -6823,8 +6923,8 @@ unsigned int HELPER_CALL LDLEN_helper(CORINFO_Array* or_obj) {
                 sizeof(void*) ); }                                  \
         callInfo.reset();                                           \
         mov_constant(CALLREG, FJit_pHlpNewObj);                     \
-        emit_arg( token, 2, EXTERNAL_CALL);                         \
-        emit_arg( scope, 1, EXTERNAL_CALL);                         \
+        emit_arg( constrMethod, 2, EXTERNAL_CALL);                  \
+        emit_arg( targetClass, 1, EXTERNAL_CALL);                   \
         call_register(CALLREG);                                     \
         if ( CALLER_CLEANS_STACK && callFrameSize )                 \
            { add_constant(SP, callFrameSize); }                     \
@@ -6832,8 +6932,8 @@ unsigned int HELPER_CALL LDLEN_helper(CORINFO_Array* or_obj) {
     else                                                            \
     {                                                               \
         callInfo.reset();                                           \
-        emit_arg( token, 2, EXTERNAL_CALL ON_X86_ONLY(&&false));    \
-        emit_arg( scope, 1, EXTERNAL_CALL ON_X86_ONLY(&&false));    \
+        emit_arg( constrMethod, 2, EXTERNAL_CALL ON_X86_ONLY(&&false));    \
+        emit_arg( targetClass, 1, EXTERNAL_CALL ON_X86_ONLY(&&false));     \
         emit_callhelper_I4I4_I4(FJit_pHlpNewObj);                   \
     }                                                               \
     emit_drop((constructorArgBytes/sizeof(void*)) * SIZE_STACK_SLOT); \
@@ -6841,15 +6941,15 @@ unsigned int HELPER_CALL LDLEN_helper(CORINFO_Array* or_obj) {
 #endif
 
 #ifndef emit_MKREFANY
-#define emit_MKREFANY(token)            \
+#define emit_MKREFANY(targetClass)      \
     emit_save_TOS();                    \
     inRegTOS = false;                   \
-    emit_pushconstant_4(token);         \
+    emit_pushconstant_4(targetClass);   \
     emit_restore_TOS();
 #endif
 
 #ifndef emit_REFANYVAL
-#define emit_REFANYVAL(targetClass)                              \
+#define emit_REFANYVAL(targetClass, token, isShared)             \
 {                                                                \
     callInfo.reset();                                            \
     int NumRegUsed = 0;                                          \
@@ -6860,7 +6960,14 @@ unsigned int HELPER_CALL LDLEN_helper(CORINFO_Array* or_obj) {
        emit_getSP(STACK_BUFFER);                                 \
        emit_tos_arg( 2, EXTERNAL_CALL );                         \
     }                                                            \
-    emit_arg( targetClass, 1, EXTERNAL_CALL );                   \
+    if (isShared) {                                              \
+printf("bad %d\n", __LINE__); \
+        CORINFO_CLASS_HANDLE tokenType;                          \
+        TokenToHandle(token, tokenType, EXTERNAL_CALL);          \
+        callInfo.reset();                                        \
+    } else {                                                     \
+        emit_arg( targetClass, 1, EXTERNAL_CALL );               \
+    }                                                            \
     LABELSTACK((outPtr-outBuff),0);                              \
     if ( !PASS_VALUETYPE_BYREF)                                  \
        emit_callhelper_I4I8_I4(FJit_pHlpGetRefAny)               \
@@ -6941,11 +7048,18 @@ unsigned int HELPER_CALL LDLEN_helper(CORINFO_Array* or_obj) {
 #endif
 
 #ifndef emit_CASTCLASS
-#define emit_CASTCLASS(targetClass, jit_helper) \
+#define emit_CASTCLASS(targetClass, jit_helper, token, isShared) \
 {                                                  \
      callInfo.reset();                             \
      emit_tos_arg( 2, EXTERNAL_CALL );             \
-     emit_arg( targetClass, 1, EXTERNAL_CALL );    \
+     if (isShared) {                               \
+printf("bad %d\n", __LINE__); \
+        CORINFO_CLASS_HANDLE tokenType;            \
+        TokenToHandle(token, tokenType, EXTERNAL_CALL); \
+        callInfo.reset();                          \
+     } else {                                      \
+         emit_arg( targetClass, 1, EXTERNAL_CALL );    \
+     }                                             \
      LABELSTACK((outPtr-outBuff),0);               \
      emit_callhelper_I4I4(jit_helper);             \
      emit_pushresult_Ptr();                        \
@@ -6953,11 +7067,19 @@ unsigned int HELPER_CALL LDLEN_helper(CORINFO_Array* or_obj) {
 #endif
 
 #ifndef emit_ISINST
-#define emit_ISINST(targetClass, jit_helper)\
+#define emit_ISINST(targetClass, jit_helper, token, isShared)\
 {                                                  \
      callInfo.reset();                             \
      emit_tos_arg( 2, EXTERNAL_CALL );             \
-     emit_arg( targetClass, 1, EXTERNAL_CALL );    \
+     if (isShared) {                               \
+printf("bad %d\n", __LINE__); \
+        CORINFO_CLASS_HANDLE tokenType;            \
+        TokenToHandle(token, tokenType, EXTERNAL_CALL); \
+        callInfo.reset();                          \
+     }                                             \
+     else {                                        \
+        emit_arg( targetClass, 1, EXTERNAL_CALL ); \
+     }                                             \
      LABELSTACK((outPtr-outBuff),0);               \
      emit_callhelper_I4I4(jit_helper);             \
      emit_pushresult_I4();                         \
@@ -6965,10 +7087,10 @@ unsigned int HELPER_CALL LDLEN_helper(CORINFO_Array* or_obj) {
 #endif
 
 #ifndef emit_BOXVAL
-#define emit_BOXVAL(cls, clsSize)                  \
+#define emit_BOXVAL(cls, clsSize, token, isShared) \
 {                                                  \
    deregisterTOS;                                  \
-   callInfo.reset();                               \
+   callInfo.reset();                           \
    if (!STACK_BUFFER)                              \
       { emit_reg_to_arg(2, SP, true); }            \
    else                                            \
@@ -6981,7 +7103,15 @@ unsigned int HELPER_CALL LDLEN_helper(CORINFO_Array* or_obj) {
    {                                               \
       add_constant(ARG_2, bigEndianOffset(clsSize));\
    }                                               \
-   emit_arg( cls, 1, EXTERNAL_CALL );              \
+   if (isShared) {                                 \
+printf("bad %d\n", __LINE__); \
+       CORINFO_CLASS_HANDLE tokenType;             \
+       TokenToHandle(token, tokenType, EXTERNAL_CALL); \
+       callInfo.reset();                           \
+   }                                               \
+   else {                                          \
+       emit_arg( cls, 1, EXTERNAL_CALL );          \
+   }                                               \
    LABELSTACK((outPtr-outBuff),0);                 \
    emit_callhelper_I4I4_I4(FJit_pHlpBox);          \
    emit_drop(BYTE_ALIGNED(clsSize));               \
@@ -6990,11 +7120,19 @@ unsigned int HELPER_CALL LDLEN_helper(CORINFO_Array* or_obj) {
 #endif
 
 #ifndef emit_UNBOX
-#define emit_UNBOX(cls)                            \
+#define emit_UNBOX(cls, token, isShared)           \
 {                                                  \
      callInfo.reset();                             \
      emit_tos_arg( 2, EXTERNAL_CALL );             \
-     emit_arg( cls, 1, EXTERNAL_CALL );            \
+     if (isShared) {                               \
+printf("bad %d\n", __LINE__); \
+        CORINFO_CLASS_HANDLE tokenType;            \
+        TokenToHandle(token, tokenType, EXTERNAL_CALL); \
+        callInfo.reset();                          \
+     }                                             \
+     else {                                        \
+        emit_arg( targetClass, 1, EXTERNAL_CALL ); \
+     }                                             \
      LABELSTACK((outPtr-outBuff),0);               \
      emit_callhelper_I4I4_I4(FJit_pHlpUnbox);      \
      emit_pushresult_Ptr();                        \

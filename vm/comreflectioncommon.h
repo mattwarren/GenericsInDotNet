@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -116,9 +121,9 @@ public:
     **
     ** The maximum number of MethodDescs that might be returned by GetCtors
     **
-    ** pVMC - the EEClass to calculate the count for
+    ** th - the type to calculate the count for
     **/
-    static DWORD GetMaxCount(EEClass* pVMC);
+    static DWORD GetMaxCount(TypeHandle th);
 
     // GetCtors
     // This method will return the list of all constructors associated 
@@ -151,7 +156,7 @@ private:
 
     // InternalHash
     // This will add a field value to the hash table
-    static bool InternalHash(EEClass* pEEC,MethodDesc* pCurField,HashElem** rgpTable,
+    static bool InternalHash(MethodDesc* pCurField,HashElem** rgpTable,
         HashElem** pHashElem);
 
     // Add an element to the hash table.  
@@ -160,14 +165,14 @@ private:
 
     // GetMaxCount
     // Get the total possible methods that we may support.
-    static DWORD GetMaxCount(EEClass* pVMC);
+    static DWORD GetMaxCount(TypeHandle th);
 
 public:
 
     // GetMethods
     // This method will return the list of all methods associated with
     //  the class
-    static ReflectMethodList* GetMethods(ReflectClass* pRC,int array);
+    static ReflectMethodList* GetMethods(ReflectClass* pRC);
 
 };
 
@@ -180,16 +185,16 @@ public:
     // This method will return a ReflectPropertyList for all of the properties
     //   that exist for a class.
     //  NULL is returned if the class has not properties.
-    static ReflectPropertyList* GetProperties(ReflectClass* pRC,EEClass* pEEC);
+    static ReflectPropertyList* GetProperties(ReflectClass* pRC,TypeHandle th);
 
 private:
     // GetMaxCount
     // This method will calculate the maximum possible properties for a class
-    static DWORD GetMaxCount(EEClass* pEEC);
+    static DWORD GetMaxCount(TypeHandle th);
 
     // SetAccessors
     // This method will set the accessor methods for this property.
-    static void SetAccessors(ReflectProperty* pProp,EEClass* baseClass,EEClass* targetClass);
+    static void SetAccessors(ReflectProperty* pProp,TypeHandle baseClass,TypeHandle targetClass);
 };
 
 // ReflectEvents
@@ -201,16 +206,16 @@ public:
     // This method will return a ReflectPropertyList for all of the properties
     //   that exist for a class.
     //  NULL is returned if the class has not properties.
-    static ReflectEventList* GetEvents(ReflectClass* pRC,EEClass* pEEC);
+    static ReflectEventList* GetEvents(ReflectClass* pRC,TypeHandle th);
 
 private:
     // GetMaxCount
     // This method will calculate the maximum possible properties for a class
-    static DWORD GetMaxCount(EEClass* pEEC);
+    static DWORD GetMaxCount(TypeHandle th);
 
     // SetAccessors
     // This method will set the accessor methods for this event.
-    static void SetAccessors(ReflectEvent* pEvent,EEClass* baseClass,EEClass* targetClass);
+    static void SetAccessors(ReflectEvent* pEvent,TypeHandle baseClass,TypeHandle targetClass);
 };
 
 // ReflectFields
@@ -243,15 +248,15 @@ private:
 
     // This method will walk the parent hiearchy and calculate
     //  the maximum number of fields possible
-    static DWORD GetMaxCount(EEClass* pVMC);
+    static DWORD GetMaxCount(TypeHandle th);
 
 public:
     // GetFields
     // This method will return all of the methods defined for a Type.
-    //  It basically walks the EEClas looking at the fields and then walks
+    //  It basically walks the EEClass looking at the fields and then walks
     //  up the parent chain for the protected and publics.  We hide fields
     //  based upon Name/Type.
-    static ReflectFieldList* GetFields(EEClass* pVMC);
+    static ReflectFieldList* GetFields(TypeHandle th);
 };
 
 /*=============================================================================
@@ -266,12 +271,12 @@ public:
     /*=============================================================================
     ** GetMaxCount
     **
-    ** The maximum number of EEClass pointers returned by GetInterfaces
+    ** The maximum number of type handles returned by GetInterfaces
     **
-    ** pVMC - the EEClass to calculate the count for
+    ** th - the type to calculate the count for
     ** bImplementedOnly - only return those interfaces that are implemented by pVMC
     **/
-    static DWORD GetMaxCount(EEClass* pVMC, bool bImplementedOnly);
+    static DWORD GetMaxCount(TypeHandle th, bool bImplementedOnly);
 
     /*=============================================================================
     ** GetMethods
@@ -279,11 +284,11 @@ public:
     ** This will compile a table that includes all of the interfaces
     ** supported by the class.
     **
-    ** pVMC - the EEClass to get the methods for
-    ** rgpMD - where to write the table
+    ** th - the type to get the methods for
+    ** table - where to write the table
     ** bImplementedOnly - only return those interfaces that are implemented by pVMC
     **/
-    static DWORD GetInterfaces(EEClass* pVMC, EEClass** rgpVMC, bool bImplementedOnly);
+    static DWORD GetInterfaces(TypeHandle th, TypeHandle* table, bool bImplementedOnly);
 };
 
 // This class is a helper class that will build
@@ -299,11 +304,11 @@ public :
 private:
     // This method calculate the maximum number of
     //  nested classes that may be found.
-    static ULONG MaxNests(EEClass* pEEC);
+    static ULONG MaxNests(TypeHandle th);
 
     // This method will find all of the visiable nested classes
     //  for a class.
-    static void PopulateNests(EEClass* pEEC,EEClass** typeArray,ULONG* pos);
+    static void PopulateNests(TypeHandle th,TypeHandle* typeArray,ULONG* pos);
 };
 
 class ReflectModuleGlobals

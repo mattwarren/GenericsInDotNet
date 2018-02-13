@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -33,14 +38,14 @@ class ExpandSig // public MetaSig
 friend class MetaSig;
 
 private:
-    ExpandSig(PCCOR_SIGNATURE sig, Module* pModule);
+    ExpandSig(PCCOR_SIGNATURE sig, Module* pModule, TypeHandle *classInst, TypeHandle *methodInst);
 
 public:
 
     void operator delete(void *p) { if (((ExpandSig*)p)->m_flags & HEAP_ALLOCATED) ::delete [] (BYTE*)p; }
 
-    static ExpandSig* GetReflectSig(PCCOR_SIGNATURE sig, Module* pModule);
-    static ExpandSig* GetSig(PCCOR_SIGNATURE sig, Module* pModule);
+    static ExpandSig* GetReflectSig(PCCOR_SIGNATURE sig, Module* pModule,TypeHandle *classInst, TypeHandle *methodInst);
+    static ExpandSig* GetSig(PCCOR_SIGNATURE sig, Module* pModule,TypeHandle *classInst, TypeHandle *methodInst);
 
     BOOL IsEquivalent(ExpandSig *pOther);
 

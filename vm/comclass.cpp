@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -35,6 +40,8 @@
 #include "comcodeaccesssecurityengine.h"
 #include "security.h"
 #include "customattribute.h"
+#include "typestring.h"
+#include "typeparse.h"
 
 
 /*======================================================================================
@@ -298,14 +305,14 @@ FCIMPL1(Object*, COMClass::GetNestedDeclaringType, ReflectClassBaseObject* refTh
     OBJECTREF o;
     HELPER_METHOD_FRAME_BEGIN_RET_0();
     pEEC = pEEC->GetEnclosingClass();
-    o = pEEC->GetExposedClassObject();
+    o = pEEC->GetMethodTable()->GetExposedClassObject();
     HELPER_METHOD_FRAME_END();
 
     return OBJECTREFToObject(o);
 }
 FCIMPLEND
 
-void COMClass::CreateClassObjFromEEClass(EEClass* pVMCClass, REFLECTCLASSBASEREF* pRefClass)
+void COMClass::CreateClassObjFromTypeHandle(TypeHandle ty, REFLECTCLASSBASEREF* pRefClass)
 {
     // This only throws the possible exception raised by the <cinit> on the class
     THROWSCOMPLUSEXCEPTION();
@@ -319,38 +326,33 @@ void COMClass::CreateClassObjFromEEClass(EEClass* pVMCClass, REFLECTCLASSBASEREF
     // There was an expectation that we would never come here for e.g. Arrays.  But there
     // are far too many clients who were unaware of that expectation.  The most expedient
     // thing to do for V1 is to simply handle that case here:
-    if (pVMCClass->IsArrayClass())
+    if (ty.IsArray())
     {
-        ArrayClass      *pArrayClass = (ArrayClass *) pVMCClass;
-        TypeHandle       th = pArrayClass->GetClassLoader()->FindArrayForElem(
-                                pArrayClass->GetElementTypeHandle(),
-                                pArrayClass->GetMethodTable()->GetNormCorElementType(),
-                                pArrayClass->GetRank());
 
-        *pRefClass = (REFLECTCLASSBASEREF) th.CreateClassObj();
+        *pRefClass = (REFLECTCLASSBASEREF) ty.CreateClassObj();
 
         _ASSERTE(*pRefClass != NULL);
     }
     else
     {
-    // Check to make sure this has a member.  If not it must be
-    //  special
-    _ASSERTE(pVMCClass->GetCl() != mdTypeDefNil);
+        // Check to make sure this has a member.  If not it must be
+        //  special
+        _ASSERTE(ty.GetClass()->GetCl() != mdTypeDefNil);
 
-    // Create a COM+ Class object
-    *pRefClass = (REFLECTCLASSBASEREF) AllocateObject(g_pRefUtil->GetClass(RC_Class));
+        // Create a COM+ Class object
+        *pRefClass = (REFLECTCLASSBASEREF) AllocateObject(g_pRefUtil->GetClass(RC_Class));
 
-    // Set the data in the COM+ object
-    ReflectClass* p = new (pVMCClass->GetDomain()) ReflectBaseClass();
-    if (!p)
-        COMPlusThrowOM();
-    REFLECTCLASSBASEREF tmp = *pRefClass;
-    GCPROTECT_BEGIN(tmp);
-    p->Init(pVMCClass);
-    *pRefClass = tmp;
-    GCPROTECT_END();
-    (*pRefClass)->SetData(p);
-}
+        // Set the data in the COM+ object
+        ReflectClass* p = new (ty.GetClass()->GetDomain()) ReflectBaseClass();
+        if (!p)
+            COMPlusThrowOM();
+        REFLECTCLASSBASEREF tmp = *pRefClass;
+        GCPROTECT_BEGIN(tmp);
+        p->Init(ty);
+        *pRefClass = tmp;
+        GCPROTECT_END();
+        (*pRefClass)->SetData(p);
+    }
 }
 
 // GetMemberMethods
@@ -506,7 +508,7 @@ FCIMPL4(Object*, COMClass::GetMemberField, ReflectClassBaseObject* refThisUNSAFE
     int* matchFlds = (int*) _alloca(sizeof(int) * pFields->dwTotal);
     memset(matchFlds,0,sizeof(int) * pFields->dwTotal);
 
-    MethodTable *pParentMT = pRC->GetClass()->GetMethodTable();
+    MethodTable *pParentMT = pRC->GetMethodTable();
 
     DWORD propToLookup = (invokeAttr & BINDER_FlattenHierarchy) ? pFields->dwTotal : pFields->dwFields;
     for(i=0; i<propToLookup; i++) {
@@ -561,7 +563,7 @@ FCIMPL5(Object*, COMClass::GetMemberProperties, ReflectClassBaseObject* refThisU
     ReflectClass* pRC = (ReflectClass*) refThis->GetData();
     _ASSERTE(pRC);
 
-    EEClass* pEEC = pRC->GetClass();
+    TypeHandle th = pRC->GetTypeHandle();
 
     loose = (invokeAttr & BINDER_OptionalParamBinding) ? true : false;
 
@@ -598,7 +600,7 @@ FCIMPL5(Object*, COMClass::GetMemberProperties, ReflectClassBaseObject* refThisU
 
     searchSpace = ((invokeAttr & BINDER_FlattenHierarchy) != 0) ? pProps->dwTotal : pProps->dwProps;
 
-    pParentMT = pEEC->GetMethodTable();
+    pParentMT = pRC->GetMethodTable();
 
     matchProps = (int*) _alloca(sizeof(int) * searchSpace);
     memset(matchProps,0,sizeof(int) * searchSpace);
@@ -633,7 +635,7 @@ FCIMPL5(Object*, COMClass::GetMemberProperties, ReflectClassBaseObject* refThisU
 
         // Checked the declared methods.
         if (declaredOnly) {
-            if (pProps->props[i].pDeclCls != pEEC)
+            if (pProps->props[i].declType != th)
                  continue;
         }
 
@@ -795,7 +797,7 @@ FCIMPL6(Object*, COMClass::GetMatchingProperties, ReflectClassBaseObject* refThi
     CQuickBytes bytes;
 
 
-    EEClass* pEEC = pRC->GetClass();
+    TypeHandle th = pRC->GetTypeHandle();
 
     // The Search modifiers
     bool ignoreCase = ((invokeAttr & BINDER_IgnoreCase)  != 0);
@@ -831,7 +833,7 @@ FCIMPL6(Object*, COMClass::GetMatchingProperties, ReflectClassBaseObject* refThi
 
     searchSpace = ((invokeAttr & BINDER_FlattenHierarchy) != 0) ? pProps->dwTotal : pProps->dwProps;
 
-    pParentMT = pEEC->GetMethodTable();
+    pParentMT = pRC->GetMethodTable();
 
     matchProps = (int*) _alloca(sizeof(int) * searchSpace);
     memset(matchProps,0,sizeof(int) * searchSpace);
@@ -870,7 +872,7 @@ FCIMPL6(Object*, COMClass::GetMatchingProperties, ReflectClassBaseObject* refThi
 
         // Checked the declared methods.
         if (declaredOnly) {
-            if (pProps->props[i].pDeclCls != pEEC)
+            if (pProps->props[i].declType != th)
                  continue;
         }
 
@@ -990,7 +992,7 @@ FCIMPL3(Object*, COMClass::GetField, ReflectClassBaseObject* refThisUNSAFE, Stri
     for (i=0; i < maxCnt; i++) 
     {
         if (MatchField(pFields->fields[i].pField,cFieldName,szFieldName, pRC, fBindAttr) &&
-            InvokeUtil::CheckAccess(&sCtx, pFields->fields[i].pField->GetFieldProtection(), pRC->GetClass()->GetMethodTable(), 0)) 
+            InvokeUtil::CheckAccess(&sCtx, pFields->fields[i].pField->GetFieldProtection(), pRC->GetMethodTable(), 0)) 
         {
             // Found the first field that matches, so return it
             refField = pFields->fields[i].GetFieldInfo(pRC);
@@ -1104,7 +1106,7 @@ FCIMPL3(Object*, COMClass::GetEvent, ReflectClassBaseObject* refThisUNSAFE, Stri
     ReflectClass* pRC = (ReflectClass*) refThis->GetData();
     _ASSERTE(pRC);
 
-    EEClass* pEEC = pRC->GetClass();
+    TypeHandle th = pRC->GetTypeHandle();
 
     bool ignoreCase = false;
 	bool declaredOnly = false;
@@ -1139,7 +1141,7 @@ FCIMPL3(Object*, COMClass::GetEvent, ReflectClassBaseObject* refThisUNSAFE, Stri
     addPriv = ((bindingAttr & BINDER_NonPublic) != 0);
     addPub = ((bindingAttr & BINDER_Public) != 0);
 
-    pParentMT = pEEC->GetMethodTable();
+    pParentMT = pRC->GetMethodTable();
 
     // check the events to see if we find one that matches...
     ev = 0;
@@ -1157,7 +1159,7 @@ FCIMPL3(Object*, COMClass::GetEvent, ReflectClassBaseObject* refThisUNSAFE, Stri
         }
 
         if (declaredOnly) {
-            if (pEvents->events[i].pDeclCls != pEEC)
+            if (pEvents->events[i].declType != th)
                  continue;
         }
 
@@ -1220,7 +1222,7 @@ FCIMPL2(Object*, COMClass::GetEvents, ReflectClassBaseObject* refThisUNSAFE, DWO
     ReflectClass* pRC = (ReflectClass*) refThis->GetData();
     _ASSERTE(pRC);
 
-    EEClass* pEEC = pRC->GetClass();
+    TypeHandle th = pRC->GetTypeHandle();
 
     bool ignoreCase = false;
 	bool declaredOnly = false;
@@ -1255,7 +1257,7 @@ FCIMPL2(Object*, COMClass::GetEvents, ReflectClassBaseObject* refThisUNSAFE, DWO
     pRet = (PTRARRAYREF) AllocateObjectArray(searchSpace, g_pRefUtil->GetTrueType(RC_Event));
     GCPROTECT_BEGIN(pRet);
 
-    pParentMT = pEEC->GetMethodTable();
+    pParentMT = pRC->GetMethodTable();
 
     // Loop through all of the Events and see how many match
     //  the binding flags.
@@ -1272,7 +1274,7 @@ FCIMPL2(Object*, COMClass::GetEvents, ReflectClassBaseObject* refThisUNSAFE, DWO
         }
 
         if (declaredOnly) {
-            if (pEvents->events[i].pDeclCls != pEEC)
+            if (pEvents->events[i].declType != th)
                  continue;
         }
 
@@ -1325,7 +1327,7 @@ FCIMPL2(Object*, COMClass::GetProperties, ReflectClassBaseObject* refThisUNSAFE,
     ReflectClass* pRC = (ReflectClass*) refThis->GetData();
     _ASSERTE(pRC);
 
-    EEClass* pEEC = pRC->GetClass();
+    TypeHandle th = pRC->GetTypeHandle();
 
     bool ignoreCase = false;
 	bool declaredOnly = false;
@@ -1360,7 +1362,7 @@ FCIMPL2(Object*, COMClass::GetProperties, ReflectClassBaseObject* refThisUNSAFE,
     pRet = (PTRARRAYREF) AllocateObjectArray(searchSpace, g_pRefUtil->GetTrueType(RC_Prop));
     GCPROTECT_BEGIN(pRet);
 
-    pParentMT = pEEC->GetMethodTable();
+    pParentMT = pRC->GetMethodTable();
 
     ULONG i;
 	ULONG pos;
@@ -1375,7 +1377,7 @@ FCIMPL2(Object*, COMClass::GetProperties, ReflectClassBaseObject* refThisUNSAFE,
         }
 
         if (declaredOnly) {
-            if (pProps->props[i].pDeclCls != pEEC)
+            if (pProps->props[i].declType != th)
                  continue;
         }
         // Check for static instance 
@@ -1407,136 +1409,22 @@ lExit: ;
 }
 FCIMPLEND
 
-void COMClass::GetNameInternal(ReflectClass *pRC, int nameType, CQuickBytes *qb)
-{
-    LPCUTF8           szToName;
-    bool              fNameSpace = (nameType & TYPE_NAMESPACE) ? true : false;
-    bool              fAssembly = (nameType & TYPE_ASSEMBLY) ? true : false;
-    mdTypeDef         mdEncl;
-    IMDInternalImport *pImport;
-    bool              fSetName = false;
-
-    THROWSCOMPLUSEXCEPTION();
-
-    szToName = _GetName(pRC, fNameSpace && !pRC->IsNested(), qb);
-
-    pImport = pRC->GetModule()->GetMDImport();
-
-    // Get original element for parameterized type
-    EEClass *pTypeClass = pRC->GetTypeHandle().GetClassOrTypeParam();
-    _ASSERTE(pTypeClass);
-    mdEncl = pTypeClass->GetCl();
-
-    // Only look for nesting chain if this is a nested type.
-    DWORD dwAttr;
-    pTypeClass->GetMDImport()->GetTypeDefProps(mdEncl, &dwAttr, NULL);
-    if (fNameSpace && (IsTdNested(dwAttr)))
-    {   // Build the nesting chain.
-        while (SUCCEEDED(pImport->GetNestedClassProps(mdEncl, &mdEncl))) {
-            CQuickBytes qb2;
-            CQuickBytes qb3;
-            LPCUTF8 szEnclName;
-            LPCUTF8 szEnclNameSpace;
-            pImport->GetNameOfTypeDef(mdEncl,
-                                      &szEnclName,
-                                      &szEnclNameSpace);
-
-            ns::MakePath(qb2, szEnclNameSpace, szEnclName);
-            ns::MakeNestedTypeName(qb3, (LPCUTF8) qb2.Ptr(), szToName);
-            
-            int iLen = (int)strlen((LPCUTF8) qb3.Ptr()) + 1;
-            if (qb->Alloc(iLen) == NULL)
-                COMPlusThrowOM();
-            strncpy((LPUTF8) qb->Ptr(), (LPCUTF8) qb3.Ptr(), iLen);
-            szToName = (LPCUTF8) qb->Ptr();
-            fSetName = true;
-        }
-    }
-
-    if(fAssembly) {
-        CQuickBytes qb2;
-        Assembly* pAssembly = pRC->GetTypeHandle().GetAssembly();
-        LPCWSTR pAssemblyName;
-        if(SUCCEEDED(pAssembly->GetFullName(&pAssemblyName))) {
-            MAKE_WIDEPTR_FROMUTF8(wName, szToName);
-            ns::MakeAssemblyQualifiedName(qb2, wName, pAssemblyName);
-            MAKE_UTF8PTR_FROMWIDE(szQualName, (LPWSTR)qb2.Ptr());
-
-            int iLen = (int)strlen(szQualName) + 1;
-            if (qb->Alloc(iLen) == NULL)
-                COMPlusThrowOM();
-            strncpy((LPUTF8) qb->Ptr(), szQualName, iLen);
-            fSetName = true;
-        }
-    }
-
-    // In some cases above, we have written the Type name into the QuickBytes pointer already.
-    // Make sure we don't call qb.Alloc then, which will free that memory, allocate new memory 
-    // then try using the freed memory.
-    if (!fSetName && qb->Ptr() != (void*)szToName) {
-        int iLen = (int)strlen(szToName) + 1;
-        if (qb->Alloc(iLen) == NULL)
-            COMPlusThrowOM();
-        strncpy((LPUTF8) qb->Ptr(), szToName, iLen);
-    }
-}
-
-LPCUTF8 COMClass::_GetName(ReflectClass* pRC, BOOL fNameSpace, CQuickBytes *qb)
-{
-    THROWSCOMPLUSEXCEPTION();
-
-    LPCUTF8         szcNameSpace;
-    LPCUTF8         szToName;
-    LPCUTF8         szcName;
-
-    // Convert the name to a string
-    pRC->GetName(&szcName, (fNameSpace) ? &szcNameSpace : NULL);
-    if(!szcName) {
-        _ASSERTE(!"Unable to get Name of Class");
-        FATAL_EE_ERROR();
-    }
-
-    // Construct the fully qualified name
-    if (fNameSpace && szcNameSpace && *szcNameSpace)
-    {
-        ns::MakePath(*qb, szcNameSpace, szcName);
-        szToName = (LPCUTF8) qb->Ptr();
-    }
-
-    else
-    {
-        // For Arrays we really only have a single name which is fully qualified.
-        // We need to remove the full qualification
-        if (pRC->IsArray() && !fNameSpace) {
-            szToName = ns::FindSep(szcName);
-            if (szToName)
-                ++szToName;
-            else
-                szToName = szcName;
-        }
-        else 
-            szToName = szcName;
-    }
-
-    return szToName;
-}
 
 // _GetName
-// If the bFullName is true, the fully qualified class name is returned
-//  otherwise just the class name is returned.
-StringObject* COMClass::_GetName(ReflectClassBaseObject* refThis, int nameType)
+StringObject* COMClass::_GetName(ReflectClassBaseObject* refThis, BOOL fNamespace, BOOL fFullInst, BOOL fAssembly)
 {
     StringObject        *refName;
-    CQuickBytes       qb;
 
     THROWSCOMPLUSEXCEPTION();
 
     ReflectClass* pRC = (ReflectClass*) refThis->GetData();
     _ASSERTE(pRC);
 
-    GetNameInternal(pRC, nameType, &qb);
-    refName = (StringObject*)( OBJECTREFToObject( COMString::NewString((LPUTF8)qb.Ptr()) ));
-    
+    TypeHandle t = pRC->GetTypeHandle();
+    CQuickBytes bytes;
+    LPCUTF8 ss = TypeString::AppendType(&bytes, t, fNamespace, fFullInst, fAssembly);
+    refName = (StringObject*)( OBJECTREFToObject( COMString::NewString(ss) ));
+
     return refName;
 }
 
@@ -1553,22 +1441,8 @@ FCIMPL1(void*, COMClass::GetClassHandle, ReflectClassBaseObject* refThisUNSAFE)
     ReflectClass* pRC = (ReflectClass*) refThis->GetData();
     _ASSERTE(pRC);
 
-    if (pRC->IsArray()) {
-        ReflectArrayClass* pRAC = (ReflectArrayClass*) pRC;
-        TypeHandle ret = pRAC->GetTypeHandle();
-        pv = ret.AsPtr();
-    }
-    else
-    if (pRC->IsTypeDesc()) {
-        ReflectTypeDescClass* pRTD = (ReflectTypeDescClass*) pRC;
-        TypeHandle ret = pRTD->GetTypeHandle();
-        pv = ret.AsPtr();
-    }
-    else
-    {
-        pv = pRC->GetClass()->GetMethodTable();
-    }
-
+    TypeHandle ret = pRC->GetTypeHandle();
+    pv = ret.AsPtr();
     HELPER_METHOD_FRAME_END();
     return pv;
 }
@@ -1588,15 +1462,15 @@ FCIMPL1(Object*, COMClass::GetClassFromHandle, LPVOID handle) {
     //
     TypeHandle typeHnd(handle);
     if (!typeHnd.IsTypeDesc()) {
-        EEClass *pClass = typeHnd.GetClass();
+        MethodTable *pMT = typeHnd.GetMethodTable();
 
         //
-        // If we got an EEClass, check to see if we've already allocated 
+        // If we got a MethodTable, check to see if we've already allocated 
         // a type object for it.  If we have, then simply return that one
         // and don't build a method frame.
         //
-        if (pClass) {
-            OBJECTREF o = pClass->GetExistingExposedClassObject();
+        if (pMT) {
+            OBJECTREF o = pMT->GetExistingExposedClassObject();
             if (o != NULL) {
                 return (OBJECTREFToObject(o));
             }
@@ -1662,9 +1536,11 @@ INT32  __stdcall COMClass::InternalIsPrimitive(REFLECTCLASSBASEREF args)
 // words, it now does the same thing as GetFullName() below.
 FCIMPL1(Object*, COMClass::GetProperName, ReflectClassBaseObject* refThis)
 {
+    THROWSCOMPLUSEXCEPTION();
+
     StringObject* refString = NULL;
     HELPER_METHOD_FRAME_BEGIN_RET_ATTRIB_1(Frame::FRAME_ATTR_RETURNOBJ, refString);
-    refString = _GetName(refThis, TYPE_NAME | TYPE_NAMESPACE);
+    refString = _GetName(refThis, TRUE, FALSE, FALSE);
     HELPER_METHOD_FRAME_END();
     return refString;
 }
@@ -1674,9 +1550,12 @@ FCIMPLEND
 // This method returns the unqualified name of a primitive as a String
 FCIMPL1(Object*, COMClass::GetName, ReflectClassBaseObject* refThis)
 {
-   	StringObject* refString = NULL;
+    THROWSCOMPLUSEXCEPTION();
+
+    StringObject* refString = NULL;
+
     HELPER_METHOD_FRAME_BEGIN_RET_ATTRIB_1(Frame::FRAME_ATTR_RETURNOBJ, refString);
-    refString = _GetName(refThis, TYPE_NAME);
+    refString = _GetName(refThis, FALSE, FALSE, FALSE);
     HELPER_METHOD_FRAME_END();
 
     return refString;
@@ -1688,26 +1567,29 @@ FCIMPLEND
 // This will return the fully qualified name of the class as a String.
 FCIMPL1(Object*, COMClass::GetFullName, ReflectClassBaseObject* refThis )
 {
-	StringObject* refString = NULL;
-	HELPER_METHOD_FRAME_BEGIN_RET_ATTRIB_1(Frame::FRAME_ATTR_RETURNOBJ, refString);
-	refString = _GetName( refThis, TYPE_NAME | TYPE_NAMESPACE);
-	HELPER_METHOD_FRAME_END();
-    
-	return refString;
+    THROWSCOMPLUSEXCEPTION();
+
+    StringObject* refString = NULL;
+    HELPER_METHOD_FRAME_BEGIN_RET_ATTRIB_1(Frame::FRAME_ATTR_RETURNOBJ, refString);
+    refString = _GetName( refThis, TRUE, TRUE, FALSE);
+    HELPER_METHOD_FRAME_END();
+   
+    return refString;
 }
 FCIMPLEND
 
 // GetAssemblyQualifiedyName
 // This will return the assembly qualified name of the class as a String.
-FCIMPL1(Object*, COMClass::GetAssemblyQualifiedName, ReflectClassBaseObject* refThisUNSAFE)
+FCIMPL1(Object*, COMClass::GetAssemblyQualifiedName, ReflectClassBaseObject* refThis)
 {
-    REFLECTCLASSBASEREF     refThis   = (REFLECTCLASSBASEREF)refThisUNSAFE;;
-    STRINGREF               refString = NULL;;
+    THROWSCOMPLUSEXCEPTION();
 
-    HELPER_METHOD_FRAME_BEGIN_RET_ATTRIB_2(Frame::FRAME_ATTR_RETURNOBJ, refThis, refString);
-    refString = ObjectToSTRINGREF(_GetName((ReflectClassBaseObject*)OBJECTREFToObject(refThis), TYPE_NAME | TYPE_NAMESPACE | TYPE_ASSEMBLY));
+    StringObject* refString = NULL;
+    HELPER_METHOD_FRAME_BEGIN_RET_ATTRIB_1(Frame::FRAME_ATTR_RETURNOBJ, refString);
+    refString = _GetName( refThis, TRUE, TRUE, TRUE);
     HELPER_METHOD_FRAME_END();
-    return OBJECTREFToObject(refString);
+
+    return refString;
 }
 FCIMPLEND
 
@@ -1718,7 +1600,7 @@ FCIMPL1(LPVOID, COMClass::GetNameSpace, ReflectClassBaseObject* refThis)
 
     LPVOID          rv                          = NULL;      // Return value
     LPCUTF8         szcName;
-    LPCUTF8         szcNameSpace;
+    LPCUTF8         szcNameSpace = NULL;
     STRINGREF       refName = NULL;
 
 
@@ -1727,53 +1609,26 @@ FCIMPL1(LPVOID, COMClass::GetNameSpace, ReflectClassBaseObject* refThis)
     ReflectClass* pRC = (ReflectClass*) refThis->GetData();
     _ASSERTE(pRC);
 
-    // Convert the name to a string
-    pRC->GetName(&szcName, &szcNameSpace);
-    if(!szcName) 
-    {
-        _ASSERTE(!"Unable to get Name of Class");
-        FATAL_EE_ERROR();
+    TypeHandle t = pRC->GetTypeHandle();
+
+    // Strip type down to a non-instantiated, non-array, non-pointer type
+    // (e.g. List<string>[]* -> List)
+    t = t.GetTypeWithDef();
+
+    // Namespace of a nested class is that of the outermost class
+    mdTypeDef mdEncl = t.GetClass()->GetCl();
+    IMDInternalImport *pImport = t.GetClass()->GetMDImport();
+
+    // Only look for nesting chain if this is a nested type.
+    DWORD dwAttr = 0;
+    pImport->GetTypeDefProps(mdEncl, &dwAttr, NULL);
+    if (IsTdNested(dwAttr))
+    {   // Get to the outermost class
+      while (SUCCEEDED(pImport->GetNestedClassProps(mdEncl, &mdEncl)));
     }
 
-    if( !(szcNameSpace && *szcNameSpace) ) 
-    {
-        if (pRC->IsNested()) 
-        {
-            if (pRC->IsArray() || pRC->IsTypeDesc()) 
-            {
-                EEClass *pTypeClass = pRC->GetTypeHandle().GetClassOrTypeParam();
-                _ASSERTE(pTypeClass);
-                mdTypeDef mdEncl = pTypeClass->GetCl();
-                IMDInternalImport *pImport = pTypeClass->GetMDImport();
-
-                // Only look for nesting chain if this is a nested type.
-                DWORD dwAttr = 0;
-                pImport->GetTypeDefProps(mdEncl, &dwAttr, NULL);
-                if (IsTdNested(dwAttr))
-                {   // Get to the outermost class
-                    while (SUCCEEDED(pImport->GetNestedClassProps(mdEncl, &mdEncl)));
-                    pImport->GetNameOfTypeDef(mdEncl, &szcName, &szcNameSpace);
-                }
-            }
-        }
-        else 
-        {
-            if (pRC->IsArray()) 
-            {
-                int len = (int)strlen(szcName);
-                const char* p = (len == 0) ? szcName : (szcName + len - 1);
-                while (p != szcName && *p != '.') p--;
-                if (p != szcName) 
-                {
-                    len = (int)(p - szcName);
-                    char *copy = (char*) _alloca(len + 1);
-                    strncpy(copy,szcName,len);
-                    copy[len] = 0;
-                    szcNameSpace = copy;
-                }               
-            }
-        }
-    }
+    // We're there at last: now extract the namespace
+    pImport->GetNameOfTypeDef(mdEncl, &szcName, &szcNameSpace);
     
     HELPER_METHOD_FRAME_BEGIN_RET_ATTRIB_2(Frame::FRAME_ATTR_RETURNOBJ, rv, refName);
 
@@ -1923,6 +1778,166 @@ FCIMPL1(Object*, COMClass::GetArrayElementType, ReflectClassBaseObject* refThisU
         refRetVal = th.CreateClassObj();
     }
 
+    HELPER_METHOD_FRAME_END();
+
+    return OBJECTREFToObject(refRetVal);
+}
+FCIMPLEND
+
+// IsGenericTypeDefinition
+// Return true if the argument is an uninstantiated generic type
+FCIMPL1(INT32, COMClass::IsGenericTypeDefinition, ReflectClassBaseObject* refThisUNSAFE)
+{
+    INT32 ret = 0; 
+    REFLECTCLASSBASEREF refThis = (REFLECTCLASSBASEREF) refThisUNSAFE;
+
+    HELPER_METHOD_FRAME_BEGIN_RET_1(refThis);
+
+    ReflectClass* pRC = (ReflectClass*) refThis->GetData();
+    _ASSERTE(pRC);
+    TypeHandle th = pRC->GetTypeHandle();
+    ret = (!th.HasInstantiation() && th.GetNumGenericArgs() != 0);
+
+    HELPER_METHOD_FRAME_END();
+    return ret;
+}
+FCIMPLEND
+
+// IsInstantiated
+// Return true if the argument is an instantiated generic type
+FCIMPL1(INT32, COMClass::IsInstantiated, ReflectClassBaseObject* refThisUNSAFE)
+{
+    INT32 ret = 0; 
+    REFLECTCLASSBASEREF refThis = (REFLECTCLASSBASEREF) refThisUNSAFE;
+
+    HELPER_METHOD_FRAME_BEGIN_RET_1(refThis);
+
+    ReflectClass* pRC = (ReflectClass*) refThis->GetData();
+    _ASSERTE(pRC);
+    TypeHandle th = pRC->GetTypeHandle();
+    ret = (th.GetInstantiation() != NULL);
+    HELPER_METHOD_FRAME_END();
+    return ret;
+}
+FCIMPLEND
+
+// GetGenericType
+// Given an instantiated type (e.g. List<int>), return the generic type itself (e.g. List)
+// Return null if not instantiated
+FCIMPL1(Object*, COMClass::GetGenericType, ReflectClassBaseObject* refThisUNSAFE)
+{
+    REFLECTCLASSBASEREF  refThis    = (REFLECTCLASSBASEREF)refThisUNSAFE;
+    OBJECTREF            refRetVal  = NULL;
+
+    HELPER_METHOD_FRAME_BEGIN_RET_2(refThis, refRetVal);
+
+    ReflectClass* pRC = (ReflectClass*) refThis->GetData();
+    _ASSERTE(pRC);
+   
+    TypeHandle genericType = pRC->GetTypeHandle().StripInstantiation();
+    if (!genericType.IsNull()) 
+      refRetVal = genericType.CreateClassObj();
+
+    HELPER_METHOD_FRAME_END();
+
+    return OBJECTREFToObject(refRetVal);
+}
+FCIMPLEND
+
+// Instantiate
+// Given a generic type, instantiate with the type parameters given as an array argument
+// If the type is not generic, is already instantiated, or is given the wrong number of
+// parameters, then raise a type load exception
+FCIMPL2(Object*, COMClass::Instantiate, ReflectClassBaseObject* refThisUNSAFE, PTRArray* instArray)
+{
+    REFLECTCLASSBASEREF  refThis    = (REFLECTCLASSBASEREF)refThisUNSAFE;
+    OBJECTREF            refRetVal  = NULL;
+
+    THROWSCOMPLUSEXCEPTION();
+
+    HELPER_METHOD_FRAME_BEGIN_RET_2(refThis, refRetVal);
+
+    ReflectClass* pRC = (ReflectClass*) refThis->GetData();
+    _ASSERTE(pRC);
+   
+    TypeHandle genericType = pRC->GetTypeHandle();
+    _ASSERTE(!genericType.IsNull());
+
+    if (instArray == NULL) { 
+        COMPlusThrowArgumentNull(L"inst", L"ArgumentNull_Array");
+    }
+
+    DWORD ntypars = instArray->GetNumComponents();
+    TypeHandle *inst = (TypeHandle*) _alloca(ntypars * sizeof(TypeHandle));
+    for (DWORD i = 0; i < ntypars; i++)
+    {
+       REFLECTCLASSBASEREF type = (REFLECTCLASSBASEREF)(instArray->GetAt(i));
+       if (type == NULL) { 
+           COMPlusThrowArgumentNull(L"inst", L"ArgumentNull_ArrayElement");
+       }
+
+       ReflectClass *pType = (ReflectClass*)type->GetData();
+       inst[i] = pType->GetTypeHandle();
+       _ASSERTE(!inst[i].IsNull());
+    }
+    
+    OBJECTREF Throwable = NULL;
+    TypeHandle th;
+
+    // We need to pass in the throwable
+    GCPROTECT_BEGIN(Throwable);
+
+    th = ClassLoader::LoadGenericInstantiation(genericType, inst, ntypars, &Throwable);
+    if (Throwable != NULL)
+       COMPlusThrow(Throwable);
+    GCPROTECT_END();
+
+    if (!th.IsNull())
+      refRetVal = th.CreateClassObj();
+
+    HELPER_METHOD_FRAME_END();
+
+    return OBJECTREFToObject(refRetVal);
+}
+FCIMPLEND
+
+// This routine will return the instantiation from an instantiated type, as an array
+// of System.Type instances
+// It returns an empty array if the type is not instantiated
+FCIMPL1(Object*, COMClass::GetInstantiation, ReflectClassBaseObject* refThisUNSAFE)
+{
+    REFLECTCLASSBASEREF  refThis    = (REFLECTCLASSBASEREF)refThisUNSAFE;
+    OBJECTREF            refRetVal  = NULL;
+
+    THROWSCOMPLUSEXCEPTION();
+
+    HELPER_METHOD_FRAME_BEGIN_RET_2(refThis, refRetVal);
+
+    ReflectClass* pRC = (ReflectClass*) refThis->GetData();
+    _ASSERTE(pRC);
+   
+    TypeHandle ty = pRC->GetTypeHandle();
+    _ASSERTE(!ty.IsNull());
+   
+    TypeHandle* inst = ty.GetInstantiation();
+
+    // Allocate the array
+    DWORD n = inst == NULL ? 0 : ty.GetNumGenericArgs();
+
+    PTRARRAYREF refArrTypes = (PTRARRAYREF) AllocateObjectArray(n, g_pRefUtil->GetTrueType(RC_Class));
+    GCPROTECT_BEGIN(refArrTypes);
+
+    // Create type array
+    for(DWORD i = 0; i < n; i++)
+    {
+      OBJECTREF o = inst[i].CreateClassObj();
+      refArrTypes->SetAt(i, o);
+      _ASSERTE(refArrTypes->m_Array[i]);
+    }
+
+    // Set the return value
+    *((PTRARRAYREF *)&refRetVal) = refArrTypes;
+    GCPROTECT_END();
     HELPER_METHOD_FRAME_END();
 
     return OBJECTREFToObject(refRetVal);
@@ -2109,8 +2124,6 @@ Object* COMClass::GetClassInner(STRINGREF *refClassName,
     if (!sRef)
         COMPlusThrowArgumentNull(L"className",L"ArgumentNull_String");
 
-    BOOL            errorInArrayDefinition = FALSE;
-    LPUTF8          szSimpleClassName = NULL, szNameSpaceSep = NULL;
     DWORD           strLen = sRef->GetStringLength() + 1;
     LPUTF8          szFullClassName = (LPUTF8)_alloca(strLen);
     CQuickBytes     bytes;
@@ -2120,262 +2133,28 @@ Object* COMClass::GetClassInner(STRINGREF *refClassName,
     if (!COMString::TryConvertStringDataToUTF8(sRef, szFullClassName, strLen))
         szFullClassName = GetClassStringVars(sRef, &bytes, &cClassName);
 
-    if(!*szFullClassName)
-      errorInArrayDefinition = TRUE;
-    char* assembly = szFullClassName;
+    TypeHandle typeHnd = GetClassInnerHelper(szFullClassName, bThrowOnError, bIgnoreCase, stackMark, pbAssemblyIsLoading, bVerifyAccess, bPublicOnly);
+    if (typeHnd.IsNull())
+      return NULL;
+    else
+      return OBJECTREFToObject(typeHnd.CreateClassObj());
+}
 
-    // make sure every parameterized specification is skipped (i.e. int[*,*,*]) 
-    BOOL normalize = FALSE;
-    for (; *assembly; assembly++) {
+TypeHandle COMClass::GetClassInnerHelper(LPUTF8 szFullClassName,
+                               BOOL bThrowOnError, 
+                               BOOL bIgnoreCase, 
+                               StackCrawlMark *stackMark,
+                               BYTE *pbAssemblyIsLoading,
+                               BOOL bVerifyAccess,
+                               BOOL bPublicOnly)
+{
+    THROWSCOMPLUSEXCEPTION();
 
-        // break if a ',' - that is ASSEMBLY_SEPARATOR_CHAR - is encountered
-        if (*assembly == ASSEMBLY_SEPARATOR_CHAR) {
+    TypeParser tp = TypeParser(szFullClassName, bThrowOnError, bIgnoreCase, bVerifyAccess, bPublicOnly, 
+                               pbAssemblyIsLoading, stackMark);
+    LPCUTF8 szTypeExpr = szFullClassName;
 
-            // "\," means that the comma is part of the original type name
-            BOOL evenSlashes = TRUE;
-            for (char *ptr=assembly;
-                 (ptr != szFullClassName) && (*(ptr-1) == BACKSLASH_CHAR);
-                 ptr--)
-                evenSlashes = !evenSlashes;
-
-            // Even # of slashes means there is no slash for this comma
-            if (evenSlashes) {
-
-                *assembly = '\0'; // so we have the name of the class with no noise (assembly name) in szFullClassName
-
-                if (assembly - szFullClassName >= MAX_CLASSNAME_LENGTH)
-                    COMPlusThrow(kArgumentException, L"Argument_TypeNameTooLong");
-
-                while (COMCharacter::nativeIsWhiteSpace(*(++assembly))); // assembly now points to the assembly name
-                break;
-            }
-        }
-        else if (*assembly == '[') {
-            // "\[" means that the bracket is part of the original type name
-            BOOL evenSlashes = TRUE;
-            for (char *ptr=assembly;
-                 (ptr != szFullClassName) && (*(ptr-1) == BACKSLASH_CHAR);
-                 ptr--)
-                evenSlashes = !evenSlashes;
-
-            // Even # of slashes means there is no slash for this bracket
-            if (evenSlashes) {
-
-                // array may contain ',' inside so skip to the closing array bracket
-                for (;*assembly && *assembly != ']'; assembly++) {
-                    if (*assembly == '*' || *assembly == '?')
-                        normalize = TRUE;
-                }
-                if (!*assembly) { // array is malformed (no closing bracket)
-                    errorInArrayDefinition = TRUE;
-                    break;
-                }
-            }
-        } 
-        else if (*assembly == NAMESPACE_SEPARATOR_CHAR) {
-            szNameSpaceSep = assembly;
-            szSimpleClassName = assembly + 1;
-        }
-    }
-    if (normalize) {
-        // this function will change szFullClassName, notice that it can only shrink it
-        if (!NormalizeArrayTypeName(szFullClassName, (*assembly) ? (DWORD)(assembly - szFullClassName - 1) : (DWORD) (assembly - szFullClassName) ))
-            errorInArrayDefinition = TRUE;
-    }
-
-    if (!*szFullClassName)
-      COMPlusThrow(kArgumentException, L"Format_StringZeroLength");
-
-    // No assembly info with the type name - check full length
-    if ((!*assembly) &&
-        (assembly - szFullClassName >= MAX_CLASSNAME_LENGTH))
-        COMPlusThrow(kArgumentException, L"Argument_TypeNameTooLong");
-
-    OBJECTREF Throwable = NULL;
-    EEClass *pCallersClass = NULL;
-    Assembly *pCallersAssembly = NULL;
-    void *returnIP = NULL;
-    BOOL fCheckedPerm = FALSE;
-
-
-    // Even if there's an error in the array def, we need the pCallersAssembly
-    // or returnIP set for the exception message.
-    if (bVerifyAccess || (assembly && *assembly)) {
-        // Find the return address. This can be used to find caller's assembly.
-        // If we're not checking security, the caller is always mscorlib.
-
-        // 
-
-        if (!bVerifyAccess)
-            fCheckedPerm = TRUE;
-    } else {
-        pCallersAssembly = SystemDomain::SystemAssembly();
-        fCheckedPerm = TRUE;
-    }
-
-
-    if (!errorInArrayDefinition) {
-        LOG((LF_CLASSLOADER, 
-             LL_INFO100, 
-             "Get class %s through reflection\n", 
-             szFullClassName));
-
-        Assembly* pAssembly = NULL;
-        TypeHandle typeHnd;
-        NameHandle typeName;
-        char noNameSpace = '\0';
-
-        if (szNameSpaceSep) {
-            *szNameSpaceSep = '\0';
-            typeName.SetName(szFullClassName, szSimpleClassName);
-        }
-        else
-            typeName.SetName(&noNameSpace, szFullClassName);
-
-        if(bIgnoreCase)
-            typeName.SetCaseInsensitive();
-
-        // We need to pass in the throwable
-        GCPROTECT_BEGIN(Throwable);
-
-        if(assembly && *assembly) {
-
-            AssemblySpec spec;
-            HRESULT hr = spec.Init(assembly);
-
-            if (SUCCEEDED(hr)) {
-
-                pCallersClass = GetCallersClass(stackMark, returnIP);
-                pCallersAssembly = (pCallersClass) ? pCallersClass->GetAssembly() : NULL;
-                if (pCallersAssembly && (!pCallersAssembly->IsShared()))
-                    spec.GetCodeBase()->SetParentAssembly(pCallersAssembly->GetFusionAssembly());
-
-                hr = spec.LoadAssembly(&pAssembly, &Throwable, NULL, (pbAssemblyIsLoading != NULL));
-                if(SUCCEEDED(hr)) {
-                    typeHnd = pAssembly->FindNestedTypeHandle(&typeName, &Throwable);
-
-                    if (typeHnd.IsNull() && (Throwable == NULL)) 
-                        // If it wasn't in the available table, maybe it's an internal type
-                            typeHnd = pAssembly->GetInternalType(&typeName, bThrowOnError, &Throwable);
-                    }
-                else if (pbAssemblyIsLoading &&
-                         (hr == MSEE_E_ASSEMBLYLOADINPROGRESS))
-                    *pbAssemblyIsLoading = TRUE;
-            }
-        }
-        else {
-            // Look for type in caller's assembly
-            if (pCallersAssembly == NULL) {
-                pCallersClass = GetCallersClass(stackMark, returnIP);
-                pCallersAssembly = (pCallersClass) ? pCallersClass->GetAssembly() : NULL;
-            }
-            if(pCallersAssembly) {
-                typeHnd = pCallersAssembly->FindNestedTypeHandle(&typeName, &Throwable);
-                if (typeHnd.IsNull() && (Throwable == NULL))
-                    // If it wasn't in the available table, maybe it's an internal type
-                    typeHnd = pCallersAssembly->GetInternalType(&typeName, bThrowOnError, &Throwable);
-            }
-
-            // Look for type in system assembly
-            if (typeHnd.IsNull() && (Throwable == NULL) && (pCallersAssembly != SystemDomain::SystemAssembly()))
-                typeHnd = SystemDomain::SystemAssembly()->FindNestedTypeHandle(&typeName, &Throwable);
-
-            BaseDomain *pDomain = SystemDomain::GetCurrentDomain();
-            if (typeHnd.IsNull() &&
-                (pDomain != SystemDomain::System())) {
-                if (szNameSpaceSep)
-                    *szNameSpaceSep = NAMESPACE_SEPARATOR_CHAR;
-                if ((pAssembly = ((AppDomain*) pDomain)->RaiseTypeResolveEvent(szFullClassName, &Throwable)) != NULL) {
-                    if (szNameSpaceSep)
-                        *szNameSpaceSep = '\0';
-                    typeHnd = pAssembly->FindNestedTypeHandle(&typeName, &Throwable);
-                    
-                    if (typeHnd.IsNull() && (Throwable == NULL)) {
-                        // If it wasn't in the available table, maybe it's an internal type
-                            typeHnd = pAssembly->GetInternalType(&typeName, bThrowOnError, &Throwable);
-                        }
-                    else
-                        Throwable = NULL;
-                }
-            }
-
-            if (!typeHnd.IsNull())
-                pAssembly = typeHnd.GetAssembly();
-        }
-        
-        if (Throwable != NULL && bThrowOnError)
-            COMPlusThrow(Throwable);
-        GCPROTECT_END();
-        
-        BOOL fVisible = TRUE;
-        if (!typeHnd.IsNull() && !fCheckedPerm && bVerifyAccess) {
-
-            // verify visibility
-            EEClass *pClass = typeHnd.GetClassOrTypeParam();
-            
-            if (bPublicOnly && !(IsTdPublic(pClass->GetProtection()) || IsTdNestedPublic(pClass->GetProtection())))
-                // the user is asking for a public class but the class we have is not public, discard
-                fVisible = FALSE;
-            else {
-                // if the class is a top level public there is no check to perform
-            if (!IsTdPublic(pClass->GetProtection())) {
-                    if (!pCallersAssembly) {
-                        pCallersClass = GetCallersClass(stackMark, returnIP);
-                        pCallersAssembly = (pCallersClass) ? pCallersClass->GetAssembly() : NULL;
-                    }
-                
-                    if (pCallersAssembly && // full trust for interop
-                        !ClassLoader::CanAccess(pCallersClass,
-                                                pCallersAssembly,
-                                                pClass,
-                                                pClass->GetAssembly(),
-                                                pClass->GetAttrClass())) {
-                        // This is not legal if the user doesn't have reflection permission
-                        if (!AssemblyNative::HaveReflectionPermission(bThrowOnError))
-                            fVisible = FALSE;
-                    }
-                }
-            }
-        }
-        
-        if ((!typeHnd.IsNull()) && fVisible)
-            return(OBJECTREFToObject(typeHnd.CreateClassObj()));
-    }
-
-    if (bThrowOnError) {
-        Throwable = NULL;
-        GCPROTECT_BEGIN(Throwable);
-        if (szNameSpaceSep)
-            *szNameSpaceSep = NAMESPACE_SEPARATOR_CHAR;
-
-        if (errorInArrayDefinition) 
-            COMPlusThrow(kArgumentException, L"Argument_InvalidArrayName");
-        else if (assembly && *assembly) {
-            MAKE_WIDEPTR_FROMUTF8(pwzAssemblyName, assembly);
-            PostTypeLoadException(NULL, szFullClassName, pwzAssemblyName,
-                                  NULL, IDS_CLASSLOAD_GENERIC, &Throwable);
-        }
-        else if (pCallersAssembly ||
-                 (pCallersAssembly = GetCallersAssembly(stackMark, returnIP)) != NULL)
-            pCallersAssembly->PostTypeLoadException(szFullClassName, 
-                                                    IDS_CLASSLOAD_GENERIC,
-                                                    &Throwable);
-        else {
-            WCHAR   wszTemplate[30];
-            if (FAILED(LoadStringRC(IDS_EE_NAME_UNKNOWN,
-                                    wszTemplate,
-                                    sizeof(wszTemplate)/sizeof(wszTemplate[0]),
-                                    FALSE)))
-                wszTemplate[0] = L'\0';
-            PostTypeLoadException(NULL, szFullClassName, wszTemplate,
-                                  NULL, IDS_CLASSLOAD_GENERIC, &Throwable);
-        }
-
-        COMPlusThrow(Throwable);
-        GCPROTECT_END();
-    }
-
-    return NULL;
+    return(tp.Parse(&szTypeExpr, FALSE));
 }
 
 // GetSuperclass
@@ -2395,6 +2174,7 @@ FCIMPL1(LPVOID, COMClass::GetSuperclass, ReflectClassBaseObject* refThis)
     TypeHandle typeHnd = pRC->GetTypeHandle();
     if (typeHnd.IsNull())
         return 0;
+
     TypeHandle parentType = typeHnd.GetParent();
 
     REFLECTCLASSBASEREF  refClass = 0;
@@ -2426,6 +2206,9 @@ FCIMPL1(Object*, COMClass::GetInterfaces, ReflectClassBaseObject* refThisUNSAFE)
     THROWSCOMPLUSEXCEPTION();
     ReflectClass* pRC = (ReflectClass*) refThis->GetData();
     EEClass*    pVMC = pRC->GetClass();
+    TypeHandle th = pRC->GetTypeHandle();
+    MethodTable *pMT = th.GetMethodTable();
+
     if (pVMC == 0) {
         _ASSERTE(pRC->IsTypeDesc());
         refArrIFace = (PTRARRAYREF) AllocateObjectArray(0, 
@@ -2446,7 +2229,7 @@ FCIMPL1(Object*, COMClass::GetInterfaces, ReflectClassBaseObject* refThisUNSAFE)
         // Do not change this code.  This is done this way to
         //  prevent a GC hole in the SetObjectReference() call.  The compiler
         //  is free to pick the order of evaluation.
-        OBJECTREF o = pVMC->GetInterfaceMap()[i].m_pMethodTable->GetClass()->GetExposedClassObject();
+        OBJECTREF o = TypeHandle(pMT->GetInterfaceMap()[i].m_pMethodTable).CreateClassObj();
         refArrIFace->SetAt(i, o);
         _ASSERTE(refArrIFace->m_Array[i]);
     }
@@ -2475,8 +2258,8 @@ FCIMPL3(Object*, COMClass::GetInterface, ReflectClassBaseObject* refThisUNSAFE, 
     LPCUTF8         pszcCurIFaceNameSpace;
     DWORD           cIFaceName;
     DWORD           dwNumIFaces;
-    EEClass**       rgpVMCIFaces;
-    EEClass*        pVMCCurIFace       = NULL;
+    TypeHandle*       rgpVMCIFaces;
+    TypeHandle        pVMCCurIFace       = TypeHandle();
     DWORD           i;
 
     THROWSCOMPLUSEXCEPTION();
@@ -2485,13 +2268,9 @@ FCIMPL3(Object*, COMClass::GetInterface, ReflectClassBaseObject* refThisUNSAFE, 
         COMPlusThrow(kNullReferenceException);
 
     ReflectClass*   pRC = (ReflectClass*) refThis->GetData();
-	EEClass*        pVMC = NULL;
-
-    if (pRC->IsTypeDesc())
+    TypeHandle th = pRC->GetTypeHandle();
+    if (pRC->IsTypeDesc()) 
         goto lExit;
-
-    pVMC = pRC->GetClass();
-    _ASSERTE(pVMC);
 
     {
     CQuickBytes bytes;
@@ -2503,12 +2282,12 @@ FCIMPL3(Object*, COMClass::GetInterface, ReflectClassBaseObject* refThisUNSAFE, 
     ns::SplitInline(pszIFaceNameTmp, pszIFaceNameSpace, pszIFaceName);
 
     // Get the array of interfaces
-    dwNumIFaces = ReflectInterfaces::GetMaxCount(pVMC, false);
+    dwNumIFaces = ReflectInterfaces::GetMaxCount(th, false);
     
     if(dwNumIFaces)
     {
-        rgpVMCIFaces = (EEClass**) _alloca(dwNumIFaces * sizeof(EEClass*));
-        dwNumIFaces = ReflectInterfaces::GetInterfaces(pVMC, rgpVMCIFaces, false);
+        rgpVMCIFaces = (TypeHandle*) _alloca(dwNumIFaces * sizeof(TypeHandle));
+        dwNumIFaces = ReflectInterfaces::GetInterfaces(th, rgpVMCIFaces, false);
     }
     else
         rgpVMCIFaces = NULL;
@@ -2518,10 +2297,10 @@ FCIMPL3(Object*, COMClass::GetInterface, ReflectClassBaseObject* refThisUNSAFE, 
     {
         // Get an interface's EEClass
         pVMCCurIFace = rgpVMCIFaces[i];
-        _ASSERTE(pVMCCurIFace);
+        _ASSERTE(!pVMCCurIFace.IsNull());
 
         // Convert the name to a string
-        pVMCCurIFace->GetMDImport()->GetNameOfTypeDef(pVMCCurIFace->GetCl(),
+        pVMCCurIFace.GetClass()->GetMDImport()->GetNameOfTypeDef(pVMCCurIFace.GetClass()->GetCl(),
             &pszcCurIFaceName, &pszcCurIFaceNameSpace);
         _ASSERTE(pszcCurIFaceName);
 
@@ -2544,7 +2323,7 @@ FCIMPL3(Object*, COMClass::GetInterface, ReflectClassBaseObject* refThisUNSAFE, 
     if (i != dwNumIFaces)
     {
 
-        refIFace = (REFLECTCLASSBASEREF) pVMCCurIFace->GetExposedClassObject();
+        refIFace = (REFLECTCLASSBASEREF) pVMCCurIFace.CreateClassObj();
         _ASSERTE(refIFace);
     }
 
@@ -2593,7 +2372,8 @@ FCIMPL2(Object*, COMClass::GetMembers, ReflectClassBaseObject* refThisUNSAFE, DW
 
 	MethodTable *pParentMT = NULL;
 
-	EEClass* pEEC = pRC->GetClass();
+    EEClass* pEEC = pRC->GetClass();
+    TypeHandle th = pRC->GetTypeHandle();
     if (pEEC == NULL){
         pMembers = (PTRARRAYREF)AllocateObjectArray(0, COMMember::m_pMTIMember->GetClass()->GetMethodTable());
         goto lExit;
@@ -2753,7 +2533,7 @@ FCIMPL2(Object*, COMClass::GetMembers, ReflectClassBaseObject* refThisUNSAFE, DW
             }
 
             if (declaredOnly) {
-                if (pProps->props[i].pDeclCls != pEEC)
+                if (pProps->props[i].declType != th)
                      continue;
             }
 
@@ -2787,7 +2567,7 @@ FCIMPL2(Object*, COMClass::GetMembers, ReflectClassBaseObject* refThisUNSAFE, DW
             }
 
             if (declaredOnly) {
-                if (pEvents->events[i].pDeclCls != pEEC)
+                if (pEvents->events[i].declType != th)
                      continue;
             }
             // Check for static instance 
@@ -2811,18 +2591,18 @@ FCIMPL2(Object*, COMClass::GetMembers, ReflectClassBaseObject* refThisUNSAFE, DW
         for (DWORD i=0;i<pNests->dwTypes;i++) {
 
             // Check for access to publics, non-publics
-            if (IsTdNestedPublic(pNests->types[i]->GetAttrClass())) {
+            if (IsTdNestedPublic(pNests->types[i].GetClass()->GetAttrClass())) {
                 if (!addPub) continue;
             }
             else {
                 if (!addPriv) continue;
             }
-            if (!InvokeUtil::CheckAccessType(&sCtx, pNests->types[i], 0)) continue;
+            if (!InvokeUtil::CheckAccessType(&sCtx, pNests->types[i].GetClass(), 0)) continue;
 
             // Do not change this code.  This is done this way to
             //  prevent a GC hole in the SetObjectReference() call.  The compiler
             //  is free to pick the order of evaluation.
-            OBJECTREF o = (OBJECTREF) pNests->types[i]->GetExposedClassObject();
+            OBJECTREF o = (OBJECTREF) pNests->types[i].CreateClassObj();
             pMembers->SetAt(dwCur++, o);
         }       
     }
@@ -2962,7 +2742,7 @@ FCIMPL4(Object*, COMClass::GetMember, ReflectClassBaseObject* refThisUNSAFE, Str
     ReflectMethod**     rgpCons = NULL;
     ReflectProperty**   rgpProps = NULL;
     ReflectEvent**      rgpEvents = NULL;
-    EEClass**           rgpNests = NULL;
+    TypeHandle*           rgpNests = NULL;
 
     DWORD           dwNumFields = 0;
     DWORD           dwNumMethods = 0;
@@ -2988,6 +2768,8 @@ FCIMPL4(Object*, COMClass::GetMember, ReflectClassBaseObject* refThisUNSAFE, Str
     MethodTable *pParentMT = NULL;
     if (pEEC) 
         pParentMT = pEEC->GetMethodTable();
+
+    TypeHandle th = pRC->GetTypeHandle();
 
     // The Search modifiers
     bool bIgnoreCase = ((bindingAttr & BINDER_IgnoreCase) != 0);
@@ -3046,7 +2828,7 @@ FCIMPL4(Object*, COMClass::GetMember, ReflectClassBaseObject* refThisUNSAFE, Str
     ReflectTypeList*    pNests = NULL;
     if ((memberType & MEMTYPE_NestedType) != 0) {
         pNests = pRC->GetNestedTypes();
-        rgpNests = (EEClass**) _alloca(pNests->dwTypes * sizeof (EEClass*));
+        rgpNests = (TypeHandle*) _alloca(pNests->dwTypes * sizeof (TypeHandle));
     }
 
     // Filter the constructors
@@ -3256,7 +3038,7 @@ FCIMPL4(Object*, COMClass::GetMember, ReflectClassBaseObject* refThisUNSAFE, Str
             }
 
             if (declaredOnly) {
-                if (pProps->props[i].pDeclCls != pEEC)
+                if (pProps->props[i].declType != th)
                      continue;
             }
             // Check fo static instance 
@@ -3305,7 +3087,7 @@ FCIMPL4(Object*, COMClass::GetMember, ReflectClassBaseObject* refThisUNSAFE, Str
             }
 
             if (declaredOnly) {
-                if (pEvents->events[i].pDeclCls != pEEC)
+                if (pEvents->events[i].declType != th)
                      continue;
             }
 
@@ -3355,13 +3137,13 @@ FCIMPL4(Object*, COMClass::GetMember, ReflectClassBaseObject* refThisUNSAFE, Str
         DWORD cName = (DWORD)strlen(pszNestName);
         for (i = 0, dwCurIndex = 0; i < pNests->dwTypes; i++) {
             // Check for access to non-publics
-            if (!addPriv && !IsTdNestedPublic(pNests->types[i]->GetAttrClass()))
+            if (!addPriv && !IsTdNestedPublic(pNests->types[i].GetClass()->GetAttrClass()))
                 continue;
-            if (!InvokeUtil::CheckAccessType(&sCtx, pNests->types[i], 0)) continue;
+            if (!InvokeUtil::CheckAccessType(&sCtx, pNests->types[i].GetClass(), 0)) continue;
 
             LPCUTF8 szcName;
             LPCUTF8 szcNameSpace;
-            REFLECTCLASSBASEREF o = (REFLECTCLASSBASEREF) pNests->types[i]->GetExposedClassObject();
+            REFLECTCLASSBASEREF o = (REFLECTCLASSBASEREF) pNests->types[i].CreateClassObj();
             ReflectClass* thisRC = (ReflectClass*) o->GetData();
             _ASSERTE(thisRC);
 
@@ -3528,7 +3310,7 @@ FCIMPL4(Object*, COMClass::GetMember, ReflectClassBaseObject* refThisUNSAFE, Str
         // Do not change this code.  This is done this way to
         //  prevent a GC hole in the SetObjectReference() call.  The compiler
         //  is free to pick the order of evaluation.
-        OBJECTREF o = (OBJECTREF) rgpNests[i]->GetExposedClassObject();
+        OBJECTREF o = (OBJECTREF) rgpNests[i].CreateClassObj();
         refArrIMembers->SetAt(dwCurIndex, o);
     }
 
@@ -3673,15 +3455,16 @@ FCIMPL1(Object*, COMClass::GetUninitializedObject, ReflectClassBaseObject* objTy
 
     ReflectClass* pRC = (ReflectClass*) objType->GetData();
     _ASSERTE(pRC);
-    EEClass *pEEC = pRC->GetClass();
-    _ASSERTE(pEEC);
+    TypeHandle ty = pRC->GetTypeHandle();
+    _ASSERTE(!ty.IsNull());
+    _ASSERTE(!ty.IsTypeDesc());
     
     //We don't allow unitialized strings.
-    if (pEEC == g_pStringClass->GetClass()) {
+    if (ty == TypeHandle(g_pStringClass)) {
         COMPlusThrow(kArgumentException, L"Argument_NoUninitializedStrings");
     }
 
-    retVal = pEEC->GetMethodTable()->Allocate();     
+    retVal = ty.GetMethodTable()->Allocate();     
     
     HELPER_METHOD_FRAME_END();
     return OBJECTREFToObject(retVal);
@@ -3810,11 +3593,11 @@ FCIMPL2_INST_RET_VC(InterfaceMapData, data, COMClass::GetInterfaceMap, ReflectCl
     ReflectClass* pRC = (ReflectClass*) refThis->GetData();
     if (pRC->IsTypeDesc()) 
         COMPlusThrow(kArgumentException, L"Arg_NotFoundIFace");
-    EEClass* pTarget = pRC->GetClass();
+    MethodTable* pTarget = pRC->GetMethodTable();
 
     // Cast to the Type object
     ReflectClass* pIRC = (ReflectClass*) type->GetData();
-    EEClass* pIface = pIRC->GetClass();
+    MethodTable* pIface = pIRC->GetMethodTable();
 
     ZeroMemory(data, sizeof(*data));
 
@@ -3831,8 +3614,8 @@ FCIMPL2_INST_RET_VC(InterfaceMapData, data, COMClass::GetInterfaceMap, ReflectCl
     if (pTarget->IsInterface())
         COMPlusThrow(kArgumentException, L"Argument_InterfaceMap");
 
-    unsigned slotCnt = pIface->GetMethodTable()->GetInterfaceMethodSlots();
-    InterfaceInfo_t* pII = pTarget->FindInterface(pIface->GetMethodTable());
+    unsigned slotCnt = pIface->GetInterfaceMethodSlots();
+    InterfaceInfo_t* pII = pTarget->FindInterface(pIface);
     if (!pII) 
         COMPlusThrow(kArgumentException, L"Arg_NotFoundIFace");
 
@@ -3842,7 +3625,7 @@ FCIMPL2_INST_RET_VC(InterfaceMapData, data, COMClass::GetInterfaceMap, ReflectCl
 
     for (unsigned i=0;i<slotCnt;i++) {
         // Build the interface array...
-        MethodDesc* pCurMethod = pIface->GetUnknownMethodDescForSlot(i);
+        MethodDesc* pCurMethod = pIface->GetClass()->GetUnknownMethodDescForSlot(i);
         ReflectMethod* pRMeth = pIRM->FindMethod(pCurMethod);
         _ASSERTE(pRMeth);
 
@@ -3850,7 +3633,7 @@ FCIMPL2_INST_RET_VC(InterfaceMapData, data, COMClass::GetInterfaceMap, ReflectCl
         data->m_interfaceMethods->SetAt(i, o);
 
         // Build the type array...
-        pCurMethod = pTarget->GetUnknownMethodDescForSlot(i+pII->m_wStartSlot);
+        pCurMethod = pTarget->GetClass()->GetUnknownMethodDescForSlot(i+pII->m_wStartSlot);
         pRMeth = pRM->FindMethod(pCurMethod);
         if (pRMeth) 
             o = (OBJECTREF) pRMeth->GetMethodInfo(pRC);
@@ -3909,17 +3692,17 @@ FCIMPL3(Object*, COMClass::GetNestedType, ReflectClassBaseObject* pRefThis, Stri
 
         EEClass* pThisEEC = pRC->GetClass();
 
-        EEClass* retEEC = 0;
+        TypeHandle retEEC = TypeHandle();
         for (DWORD i=0;i<pTypes->dwTypes;i++) {
             LPCUTF8 szcName;
             LPCUTF8 szcNameSpace;
             REFLECTCLASSBASEREF o;
-            o = (REFLECTCLASSBASEREF) pTypes->types[i]->GetExposedClassObject();
+            o = (REFLECTCLASSBASEREF) pTypes->types[i].CreateClassObj();
             ReflectClass* thisRC = (ReflectClass*) o->GetData();
             _ASSERTE(thisRC);
 
             // Check for access to non-publics
-            if (IsTdNestedPublic(pTypes->types[i]->GetAttrClass())) {
+            if (IsTdNestedPublic(pTypes->types[i].GetClass()->GetAttrClass())) {
                 if (!addPub)
                     continue;
             }
@@ -3927,11 +3710,11 @@ FCIMPL3(Object*, COMClass::GetNestedType, ReflectClassBaseObject* pRefThis, Stri
                 if (!addPriv)
                     continue;
             }
-            if (!InvokeUtil::CheckAccessType(&sCtx, pTypes->types[i], 0)) continue;
+            if (!InvokeUtil::CheckAccessType(&sCtx, pTypes->types[i].GetClass(), 0)) continue;
 
             // Are we only looking at the declared nested classes?
             if (declaredOnly) {
-                EEClass* pEEC = pTypes->types[i]->GetEnclosingClass();
+                EEClass* pEEC = pTypes->types[i].GetClass()->GetEnclosingClass();
                 if (pEEC != pThisEEC)
                     continue;
             }
@@ -3957,14 +3740,14 @@ FCIMPL3(Object*, COMClass::GetNestedType, ReflectClassBaseObject* pRefThis, Stri
                 if(_stricmp(pszNestName, szcName))
                     continue;
             }
-            if (retEEC)
+            if (!retEEC.IsNull())
                 COMPlusThrow(kAmbiguousMatchException);
             retEEC = pTypes->types[i];
             if (!ignoreCase)
                 break;
         }
-        if (retEEC)
-            rv = OBJECTREFToObject(retEEC->GetExposedClassObject());
+        if (!retEEC.IsNull())
+            rv = OBJECTREFToObject(retEEC.CreateClassObj());
     }
     HELPER_METHOD_FRAME_END();
     return rv;
@@ -4001,7 +3784,7 @@ FCIMPL2(Object*, COMClass::GetNestedTypes, ReflectClassBaseObject* vRefThis, INT
     EEClass* pThisEEC = pRC->GetClass();
     unsigned int pos = 0;
     for (unsigned int i=0;i<pTypes->dwTypes;i++) {
-        if (IsTdNestedPublic(pTypes->types[i]->GetAttrClass())) {
+        if (IsTdNestedPublic(pTypes->types[i].GetClass()->GetAttrClass())) {
             if (!addPub)
                 continue;
         }
@@ -4009,13 +3792,13 @@ FCIMPL2(Object*, COMClass::GetNestedTypes, ReflectClassBaseObject* vRefThis, INT
             if (!addPriv)
                 continue;
         }
-        if (!InvokeUtil::CheckAccessType(&sCtx, pTypes->types[i], 0)) continue;
+        if (!InvokeUtil::CheckAccessType(&sCtx, pTypes->types[i].GetClass(), 0)) continue;
         if (declaredOnly) {
-            EEClass* pEEC = pTypes->types[i]->GetEnclosingClass();
+            EEClass* pEEC = pTypes->types[i].GetClass()->GetEnclosingClass();
             if (pEEC != pThisEEC)
                 continue;
         }
-        OBJECTREF o = pTypes->types[i]->GetExposedClassObject();
+        OBJECTREF o = pTypes->types[i].CreateClassObj();
         nests->SetAt(pos++, o);
     }
 
@@ -4053,29 +3836,22 @@ FCIMPL2(INT32, COMClass::IsSubClassOf, ReflectClassBaseObject* refThis, ReflectC
     ReflectClass *pRCOther = (ReflectClass *)refOther->GetData();
 
 
-    EEClass *pEEThis = pRCThis->GetClass();
-    EEClass *pEEOther = pRCOther->GetClass();
+    TypeHandle thisTy = pRCThis->GetTypeHandle();
+    TypeHandle otherTy = pRCOther->GetTypeHandle();
 
-    // If these types aren't actually classes, they're not subclasses. 
-    if ((!pEEThis) || (!pEEOther))
-        return false;
-
-    if (pEEThis == pEEOther)
+    if (thisTy == otherTy)
         // this api explicitly tests for proper subclassness
-        return false;
-
-    if (pEEThis == pEEOther)
         return false;
 
     do 
     {
-        if (pEEThis == pEEOther)
+        if (thisTy == otherTy)
             return true;
 
-        pEEThis = pEEThis->GetParentClass();
+        thisTy = thisTy.GetParent();
 
     } 
-    while (pEEThis != NULL);
+    while (!thisTy.IsNull());
 
     return false;
 }

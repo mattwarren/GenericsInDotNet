@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -49,6 +54,15 @@ MethodTable *Object::GetTrueMethodTable()
 {
     C_ASSERT(offsetof(Object, m_pMethTab) == offsetof(CORINFO_Object, methTable));
     return GetMethodTable()->AdjustForThunking(ObjectToOBJECTREF(this));
+}
+
+//<REVIEW>GENERICS: are we doing the right thing for arrays?</REVIEW>
+TypeHandle Object::GetTrueTypeHandle()
+{
+  if (m_pMethTab->IsArray())
+    return ((ArrayBase*) this)->GetTypeHandle();
+  else
+    return TypeHandle(GetTrueMethodTable());
 }
 
 EEClass *Object::GetTrueClass()
@@ -896,7 +910,8 @@ VOID Object::Validate(BOOL bDeep)
     {
         MethodTable *pMT = GetGCSafeMethodTable();
 
-        _ASSERTE(pMT->GetClass()->GetMethodTable() == pMT);
+        //<REVIEW> </REVIEW>GENERICS: this won't hold now that EEClass and MethodTable aren't one-to-one
+        //_ASSERTE(pMT->GetClass()->GetMethodTable() == pMT);
 
         _ASSERTE(g_pGCHeap->IsHeapPointer(this));
 
@@ -921,8 +936,9 @@ VOID Object::Validate(BOOL bDeep)
         {
             // The special case where this can happen is Context proxies, where we
             // build a small number of large VTables and share them.
-            if (!pMT->IsThunking() ||
-                !pMT->GetClass()->IsThunking())
+	  // Also: instantiated classes
+            if ((!pMT->IsThunking() ||
+                !pMT->GetClass()->IsThunking()) && pMT->GetInstantiation() == NULL)
             {
                 _ASSERTE(!"Detected use of a corrupted OBJECTREF. Possible GC hole.");
             }

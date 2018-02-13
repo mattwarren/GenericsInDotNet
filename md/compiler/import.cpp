@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -2899,6 +2904,92 @@ ErrExit:
     return hr;
 } // HRESULT RegMeta::GetParamProps()
 
+
+//*****************************************************************************
+// This routine gets the properties for the given GenericPar token.
+//*****************************************************************************
+HRESULT RegMeta::GetGenericParProps(         // S_OK or error.
+        mdGenericPar rd,                   // [IN] The type parameter
+        ULONG* pulSequence,                 // [OUT] Parameter sequence number
+        DWORD* pdwAttr,                     // [OUT] Type parameter flags (for future use)       
+        mdToken *ptOwner,                   // [OUT] The owner (TypeDef or MethodDef) 
+	mdToken *ptKind,                    // [OUT] The kind (TypeDef/Ref/Spec, for future use)
+	mdToken *ptConstraint,              // [OUT] The constraint (TypeDef/Ref/Spec)
+        LPWSTR szName,                      // [OUT] The name
+        ULONG cchName,                      // [IN] Size of name buffer
+        ULONG *pchName)                     // [OUT] Actual size of name
+{
+    HRESULT         hr = NOERROR;
+    GenericParRec  *pGenericParRec;
+    CMiniMdRW       *pMiniMd = &(m_pStgdb->m_MiniMd);
+
+    LOG((LOGMD, "MD RegMeta::GetGenericParProps(0x%08x, 0x%08x, 0x%08x, 0x%08x, 0x%08x, 0x%08x, 0x%08x, 0x%08x, 0x%08x)\n", 
+        rd, pulSequence, pdwAttr, ptOwner, ptKind, ptConstraint, szName, cchName, pchName));
+    START_MD_PERF();
+
+    _ASSERTE(TypeFromToken(rd) == mdtGenericPar && RidFromToken(rd));
+    
+    pGenericParRec = pMiniMd->getGenericPar(RidFromToken(rd));
+
+    if (pulSequence)
+        *pulSequence = pMiniMd->getNumberOfGenericPar(pGenericParRec);
+    if (pdwAttr)
+      *pdwAttr = pMiniMd->getFlagsOfGenericPar(pGenericParRec);
+    if (ptOwner)
+      *ptOwner = pMiniMd->getOwnerOfGenericPar(pGenericParRec);
+    if (ptKind)
+      *ptKind = pMiniMd->getKindOfGenericPar(pGenericParRec);
+    if (ptConstraint)
+      *ptConstraint = pMiniMd->getConstraintOfGenericPar(pGenericParRec);
+    if (pchName || szName)
+        IfFailGo(pMiniMd->getNameOfGenericPar(pGenericParRec, szName, cchName, pchName));
+
+ErrExit:
+    STOP_MD_PERF(GetGenericParProps);
+    return hr;
+} // HRESULT RegMeta::GetGenericParProps()
+
+//*****************************************************************************
+// This routine gets the properties for the given MethodSpec token.
+//*****************************************************************************
+HRESULT RegMeta::GetMethodSpecProps(         // S_OK or error.
+        mdMethodSpec mi,           // [IN] The method instantiation
+        mdToken *tkParent,                  // [OUT] MethodDef or MemberRef
+        PCCOR_SIGNATURE *ppvSigBlob,        // [OUT] point to the blob value of meta data   
+        ULONG       *pcbSigBlob)            // [OUT] actual size of signature blob  
+{
+    HRESULT         hr = NOERROR;
+    MethodSpecRec  *pMethodSpecRec;
+    CMiniMdRW       *pMiniMd = &(m_pStgdb->m_MiniMd);
+
+    LOG((LOGMD, "MD RegMeta::GetMethodSpecProps(0x%08x, 0x%08x, 0x%08x, 0x%08x)\n", 
+        mi, tkParent, ppvSigBlob, pcbSigBlob));
+    START_MD_PERF();
+
+    _ASSERTE(TypeFromToken(mi) == mdtMethodSpec && RidFromToken(mi));
+    
+    pMethodSpecRec = pMiniMd->getMethodSpec(RidFromToken(mi));
+
+    if (tkParent)
+        *tkParent = pMiniMd->getMethodOfMethodSpec(pMethodSpecRec);
+
+    if (ppvSigBlob || pcbSigBlob)
+    {   
+        // caller wants signature information
+        PCCOR_SIGNATURE pvSigTmp;
+        ULONG           cbSig;
+        pvSigTmp = pMiniMd->getInstantiationOfMethodSpec(pMethodSpecRec, &cbSig);
+        if ( ppvSigBlob )
+            *ppvSigBlob = pvSigTmp;
+        if ( pcbSigBlob)
+            *pcbSigBlob = cbSig;                
+    }
+
+
+    STOP_MD_PERF(GetMethodSpecProps);
+    return hr;
+} // HRESULT RegMeta::GetMethodSpecProps()
+
 //*****************************************************************************
 // This routine gets the parent class for the nested class.
 //*****************************************************************************
@@ -2959,6 +3050,7 @@ HRESULT RegMeta::GetNativeCallConvFromSig( // S_OK or error.
     ULONG       cbCur = 0;              // index through the pvSigBlob
     ULONG       cb;
     ULONG       cArg;
+    ULONG       cTyArg = 0;
     ULONG       callingconv;
     ULONG       cArgsIndex;
     ULONG       callConv = pmCallConvWinapi;  // The calling convention.
@@ -2968,6 +3060,14 @@ HRESULT RegMeta::GetNativeCallConvFromSig( // S_OK or error.
     // remember the number of bytes to represent the calling convention
     cb = CorSigUncompressData (pvSigBlob, &callingconv);
     cbCur += cb;
+
+    // remember the number of bytes to represent the type parameter count
+    if (callingconv & IMAGE_CEE_CS_CALLCONV_GENERIC)
+    {
+      cb= CorSigUncompressData (&pvSigBlob[cbCur], &cTyArg);
+      cbCur += cb;
+    }
+
 
     // remember number of bytes to represent the arg counts
     cb= CorSigUncompressData (&pvSigBlob[cbCur], &cArg);
@@ -3122,6 +3222,29 @@ HRESULT RegMeta::_SearchOneArgForCallConv(// S_OK, -1 if found, or error.
             cbTotal += cb;
             break;
 
+        case ELEMENT_TYPE_VAR : 
+        case ELEMENT_TYPE_MVAR : 
+  	    // skip over index
+            cbTotal += CorSigUncompressData(&pbSig[cbTotal], &ulData);
+            break;
+
+        case ELEMENT_TYPE_WITH :
+            // skip over generic type
+            IfFailGo( _SearchOneArgForCallConv(&pbSig[cbTotal], &cb, pCallConv) );
+            cbTotal += cb;
+
+            // skip over number of parameters
+            cbTotal += CorSigUncompressData(&pbSig[cbTotal], &cArg);
+
+            // loop through type parameters
+            for (cArgsIndex = 0; cArgsIndex < cArg; cArgsIndex++)
+            {
+                IfFailGo( _SearchOneArgForCallConv( &pbSig[cbTotal], &cb, pCallConv) );
+                cbTotal += cb;
+            }
+
+            break;
+ 
         case ELEMENT_TYPE_FNPTR:
             cbTotal += CorSigUncompressData (&pbSig[cbTotal], &callingconv);
 

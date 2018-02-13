@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -724,8 +729,8 @@ public:
         pModA = pMethDescA->GetModule();
         pModB = pMethDescB->GetModule();
 
-        MetaSig SigA(pSigA, pModA);
-        MetaSig SigB(pSigB, pModB);
+        MetaSig SigA(pMethDescA);
+        MetaSig SigB(pMethDescB);
 
         // check everyting CompareMethodSigs() does not check
         if (SigA.GetCallingConventionInfo() != SigB.GetCallingConventionInfo())
@@ -744,7 +749,7 @@ public:
             return FALSE;
         }
 
-        return MetaSig::CompareMethodSigs(pSigA, dwSigA, pModA, pSigB, dwSigB, pModB);
+        return MetaSig::CompareMethodSigs(pSigA, dwSigA, pModA, NULL, pSigB, dwSigB, pModB, NULL);
     }
 
     // We have a byref X, so dereference it to X and promote it to the stack, turning I1/I2/U4's into I4's etc.

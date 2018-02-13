@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -342,6 +347,12 @@ public:
     //*****************************************
     STDMETHODIMP_(mdToken) GetTypeOfInterfaceImpl( // return the TypeRef/typedef token for the interfaceimpl
         mdInterfaceImpl iiImpl);            // given a interfaceimpl
+
+    STDMETHODIMP GetMethodSpecProps(
+        mdMethodSpec mi,                    // [IN] The method instantiation
+        mdToken *tkParent,                  // [OUT] MethodDef or MemberRef
+        PCCOR_SIGNATURE *ppvSigBlob,        // [OUT] point to the blob value of meta data   
+        ULONG       *pcbSigBlob);           // [OUT] actual size of signature blob  
 
     //*****************************************
     // look up function for TypeDef

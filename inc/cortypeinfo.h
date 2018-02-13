@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -37,18 +42,20 @@ TYPEINFO(ELEMENT_TYPE_PTR,          0,                  sizeof(void*),  TYPE_GC_
 TYPEINFO(ELEMENT_TYPE_BYREF,        0,                  sizeof(void*),  TYPE_GC_BYREF,  false,  false,  false,  true )
 TYPEINFO(ELEMENT_TYPE_VALUETYPE,    0,                  (unsigned) -1,  TYPE_GC_OTHER,  false,  false,  false,  false)
 TYPEINFO(ELEMENT_TYPE_CLASS,        0,                  sizeof(void*),  TYPE_GC_REF,    false,  false,  false,  false)
-TYPEINFO(ELEMENT_TYPE_VAR,          0,                  sizeof(void*),  TYPE_GC_REF,    false,  false,  false,  false)
+TYPEINFO(ELEMENT_TYPE_VAR,          0,                  sizeof(void*),  TYPE_GC_OTHER,  false,  false,  false,  false)
 TYPEINFO(ELEMENT_TYPE_ARRAY,        0,                  sizeof(void*),  TYPE_GC_REF,    true,   false,  false,  true )
-
-TYPEINFO((CorElementType) 0x15,/* unused placeholder*/0,(unsigned) -1,  TYPE_GC_NONE,   false,  false,  false,  false)
+TYPEINFO(ELEMENT_TYPE_WITH,	        0,	                sizeof(void*),  TYPE_GC_OTHER,  false,  false,  false,  false)
 TYPEINFO(ELEMENT_TYPE_TYPEDBYREF,   "System.TypedReference",2*sizeof(void*),TYPE_GC_BYREF,false,false,  false,  false)
 TYPEINFO(ELEMENT_TYPE_VALUEARRAY,    0,                 (unsigned) -1,  TYPE_GC_NONE,   false,  false,  false,  true )
-
 TYPEINFO(ELEMENT_TYPE_I,            "System.IntPtr",    sizeof(void*),  TYPE_GC_NONE,   false,  true,   false,  false)
 TYPEINFO(ELEMENT_TYPE_U,            "System.UIntPtr",   sizeof(void*),  TYPE_GC_NONE,   false,  true,   false,  false)
 TYPEINFO(ELEMENT_TYPE_R,            0,                  8,              TYPE_GC_NONE,   false,  true,   true,   false)
-
 TYPEINFO(ELEMENT_TYPE_FNPTR,        0,                  sizeof(void*),  TYPE_GC_NONE,   false,  false,  false,  false)
 TYPEINFO(ELEMENT_TYPE_OBJECT,       "System.Object",    sizeof(void*),  TYPE_GC_REF,    false,  false,  false,  false)
 TYPEINFO(ELEMENT_TYPE_SZARRAY,      0,                  sizeof(void*),  TYPE_GC_REF,    true,   false,  false,  true )
+TYPEINFO(ELEMENT_TYPE_MVAR,         0,                  sizeof(void*),  TYPE_GC_OTHER,  false,  false,  false,  false)
+TYPEINFO(ELEMENT_TYPE_CMOD_REQD,    0,                  0,              TYPE_GC_NONE,   false,  false,  false,  false)
+TYPEINFO(ELEMENT_TYPE_CMOD_OPT,     0,                  0,              TYPE_GC_NONE,   false,  false,  false,  false)
+TYPEINFO(ELEMENT_TYPE_INTERNAL,     0,                  0,              TYPE_GC_OTHER,  false,  false,  false,  false)
+
 

@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -28,6 +33,9 @@ PREDEFNAMEDEF(PN_DTOR,       "Finalize")          // name of destructors.
 PREDEFNAMEDEF(PN_STATCTOR,   ".cctor")        // name of static constructors.
 PREDEFNAMEDEF(PN_ENUMVALUE,  "value__")           // name of special value field in enums.
 
+PREDEFNAMEDEF(PN_INSTMETH,    "{}")               // GENERICS: name used for instantiated methods
+PREDEFNAMEDEF(PN_INSTAGGINSTMETH,"<>{}")             // GENERICS: name used for instantiated methods inside instantiated types
+PREDEFNAMEDEF(PN_INSTAGG,    "<>")               // GENERICS: name used for instantiated types
 PREDEFNAMEDEF(PN_PTR,        "*")               // name used for pointer types
 PREDEFNAMEDEF(PN_PINNED,     "@")               // name used for pinned types
 PREDEFNAMEDEF(PN_OUTPARAM,   "#")               // name used for out param types

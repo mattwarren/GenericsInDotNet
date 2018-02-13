@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -40,6 +45,7 @@ NODEKIND(CATCH              , CATCH             , 0                             
 NODEKIND(CHECKED            , LABELSTMT         , NG_STATEMENT | NG_EMBEDDEDSTMTOWNER                                                       )
 NODEKIND(CLASS              , CLASS             , NG_TYPE | NG_AGGREGATE | NG_KEYED                                                         )
 NODEKIND(CONST              , FIELD             , NG_FIELD | NG_MEMBER                                                                      )
+NODEKIND(CONSTRAINT         , CONSTRAINT        , 0																							)
 NODEKIND(CONSTVAL           , CONSTVAL          , 0                                                                                         )
 NODEKIND(CONTINUE           , EXPRSTMT          , NG_STATEMENT                                                                              )
 NODEKIND(CTOR               , METHOD            , NG_METHOD | NG_KEYED | NG_INTERIOR | NG_MEMBER                                            )
@@ -54,6 +60,7 @@ NODEKIND(ENUMMBR            , ENUMMBR           , NG_KEYED | NG_MEMBER          
 NODEKIND(EXPRSTMT           , EXPRSTMT          , NG_STATEMENT                                                                              )
 NODEKIND(FIELD              , FIELD             , NG_FIELD | NG_MEMBER                                                                      )
 NODEKIND(FOR                , FORSTMT           , NG_STATEMENT | NG_GLOBALCOMPLETION | NG_BREAKABLE | NG_CONTINUABLE | NG_EMBEDDEDSTMTOWNER )
+NODEKIND(GENERICNAME        , GENERICNAME       , 0                                                                                         )
 NODEKIND(GOTO               , EXPRSTMT          , NG_STATEMENT                                                                              )
 NODEKIND(IF                 , IFSTMT            , NG_STATEMENT | NG_GLOBALCOMPLETION | NG_EMBEDDEDSTMTOWNER                                 )
 NODEKIND(INTERFACE          , CLASS             , NG_TYPE | NG_AGGREGATE | NG_KEYED                                                         )

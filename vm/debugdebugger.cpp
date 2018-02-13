@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -316,9 +321,9 @@ FCIMPL3(void, DebugStackTrace::GetStackFramesInternal, StackFrameHelper* pStackF
             {
                 if (data.pElements[i].pFunc->IsCtor())
                 {
-                    EEClass *pEEClass = data.pElements[i].pFunc->GetClass();
+                    MethodTable *pMT = data.pElements[i].pFunc->GetMethodTable();
 
-                    REFLECTCLASSBASEREF obj = (REFLECTCLASSBASEREF) pEEClass->GetExposedClassObject();
+                    REFLECTCLASSBASEREF obj = (REFLECTCLASSBASEREF) pMT->GetExposedClassObject();
                 
                     if (!obj) {
                         _ASSERTE(!"Didn't find Object");
@@ -342,7 +347,7 @@ FCIMPL3(void, DebugStackTrace::GetStackFramesInternal, StackFrameHelper* pStackF
                 else
                 {
                     o = (OBJECTREF) (COMMember::g_pInvokeUtil->GetMethodInfo(
-                                        data.pElements[i].pFunc));
+                                        data.pElements[i].pFunc, TypeHandle(data.pElements[i].owner)));
                 }
 
                 pStackFrameHelper->rgMethodInfo->SetAt(iNumValidFrames, o);
@@ -643,6 +648,7 @@ StackWalkAction DebugStackTrace::GetStackFramesCallback(CrawlFrame* pCf, VOID* d
     }    
 
     pData->pElements[pData->cElements].pFunc = pFunc;
+    pData->pElements[pData->cElements].owner = Generics::GetFrameOwner(pCf).GetMethodTable();
 
     SLOT ip;
 
@@ -734,6 +740,7 @@ void DebugStackTrace::GetStackFramesFromException(OBJECTREF * e, GetStackFramesD
             MethodDesc *pMD = pCur->pFunc;
             _ASSERTE(pMD);
             pData->pElements[i].pFunc = pMD;
+            pData->pElements[i].owner = pCur->owner;
 
             // Calculate the native offset
             // This doesn't work for framed methods, since internal calls won't

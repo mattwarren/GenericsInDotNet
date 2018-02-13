@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -85,6 +90,8 @@ class UMThunkMarshInfo
                           BOOL                     fIsStatic,
                           BYTE                     nlType,
                           CorPinvokeMap            unmgdCallConv,
+			  TypeHandle*              classInst = NULL,
+			  TypeHandle*              methodInst = NULL,
                           mdMethodDef              mdForNativeTypes = mdMethodDefNil);
 
 
@@ -109,6 +116,8 @@ class UMThunkMarshInfo
                           BOOL                     fIsStatic,
                           BYTE                     nlType,
                           CorPinvokeMap            unmgdCallConv,
+			  TypeHandle*              classInst = NULL,
+			  TypeHandle*              methodInst = NULL,
                           mdMethodDef              mdForNativeTypes = mdMethodDefNil);
 
 
@@ -211,6 +220,8 @@ class UMThunkMarshInfo
         DWORD             m_cSig;         // signature size
         Module           *m_pModule;      // module
         BOOL              m_fIsStatic;    // static or virtual?
+	TypeHandle*       m_classInst;    // instantiation of class type parameters
+	TypeHandle*       m_methodInst;   // instantiation of method type parameters
         Stub             *m_pMLStub;      // if interpreted, UmThunkMLHeader-prefixed ML stub for marshaling - NULL otherwise
         Stub             *m_pExecStub;    // UMEntryThunk jumps directly here
         UINT32            m_cbRetPop;     // stack bytes popped by callee (for UpdateRegDisplay)

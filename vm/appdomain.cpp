@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -1978,11 +1983,11 @@ HRESULT SystemDomain::ExecuteMainMethod(PEFile *pFile, LPWSTR wszImageName)
     }
 
 exit:
-	BOOL fToggle = !pThread->PreemptiveGCDisabled();    
+    BOOL fToggle = !pThread->PreemptiveGCDisabled();
     if (fToggle) 
-		pThread->DisablePreemptiveGC();    
+        pThread->DisablePreemptiveGC();
 
-	GCPROTECT_END();
+    GCPROTECT_END();
     pThread->ReturnToContext(&frame, TRUE);
     pThread->PopDomain();
 
@@ -2801,7 +2806,7 @@ HRESULT AppDomain::Init()
     m_UnlinkClasses = NULL;
 
 
-	m_pSecDesc = NULL;
+    m_pSecDesc = NULL;
 
     HRESULT hr = BaseDomain::Init();
 

@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -357,23 +362,24 @@ PCOR_SIGNATURE EMITTER::EmitSignatureType(PCOR_SIGNATURE sig, PTYPESYM type)
             ASSERT(0);
             return sig;
 
-        case SK_ARRAYSYM:
-            if (type->asARRAYSYM()->rank == 1) {
+        case SK_ARRAYSYM: {
+            ARRAYSYM *arr = type->asARRAYSYM();
+            if (arr->rank == 1) {
                 // Single dimensional array. Emit SZARRAY, element type, size.
-                sig = EmitSignatureByte(sig, ELEMENT_TYPE_SZARRAY);
-                sig = EmitSignatureType(sig, type->asARRAYSYM()->elementType());
+				sig = EmitSignatureByte(sig, (ELEMENT_TYPE_SZARRAY));
+                sig = EmitSignatureType(sig, arr->elementType());
             } else {
                 // Known rank > 1
                 sig = EmitSignatureByte(sig, ELEMENT_TYPE_ARRAY);
-                sig = EmitSignatureType(sig, type->asARRAYSYM()->elementType());
-                sig = EmitSignatureUInt(sig, type->asARRAYSYM()->rank);
+                sig = EmitSignatureType(sig, arr->elementType());
+                sig = EmitSignatureUInt(sig, arr->rank);
                 sig = EmitSignatureUInt(sig, 0);  // sizes.
-                sig = EmitSignatureUInt(sig, type->asARRAYSYM()->rank);  // lower bounds.
-                for (int i = 0; i < type->asARRAYSYM()->rank; ++i)
+                sig = EmitSignatureUInt(sig, arr->rank);  // lower bounds.
+                for (int i = 0; i < arr->rank; ++i)
                     sig = EmitSignatureUInt(sig, 0);  // lower bound always zero.
             }
             return sig;
-
+                          }
         case SK_VOIDSYM:
             sig = EmitSignatureByte(sig, ELEMENT_TYPE_VOID);
             return sig;
@@ -425,10 +431,59 @@ PCOR_SIGNATURE EMITTER::EmitSignatureType(PCOR_SIGNATURE sig, PTYPESYM type)
                 sig = EmitSignatureByte(sig, ((BYTE*)type->name->text)[i]);
             }
             return sig;
+
+        case SK_INSTAGGSYM:
+		{
+            INSTAGGSYM *agg = type->asINSTAGGSYM();
+	    	// GENERICS: We check the constraints involved in the constructed type here.  This
+			// is checking them as late as possible, which means the behaviour of "/nooutput"
+			// will be a bit odd.  However this means we don't get into any silly problems
+			// with recursion and the construction of types, e.g. I tried to do the checks
+			// MakeTypeDeclared but this is too early - the process of checking constraints
+			// can actually generate new types, and we must call MakeTypeDeclared on these
+			// types at certain points, and if you aren't very very careful 
+			// this in turn generates new constraints to check.  Another option would
+			// be to check all constraints at the end of the "bind" phase.
+			if (!agg->err && agg->cArgs == agg->rootType()->cTypeFormals) {
+		    	agg->err = compiler()->clsDeclRec.checkBounds(agg->parseTree, agg->ppArgs, agg->cArgs, agg->rootType()->ppTypeFormals, agg->rootType()->cTypeFormals, agg);
+			}
+
+            b = compiler()->symmgr.GetElementType(agg->rootType()); 
+            ASSERT (b == ELEMENT_TYPE_CLASS || b == ELEMENT_TYPE_VALUETYPE);
+            
+            sig = EmitSignatureByte(sig, ELEMENT_TYPE_WITH);
+            sig = EmitSignatureByte(sig, b);
+            sig = EmitSignatureToken(sig, GetTypeRef(agg->rootType()));
+            sig = EmitSignatureByte(sig, agg->cArgs);
+            for (unsigned int i = 0; i< agg->cArgs; i++) { 
+                sig = EmitSignatureType(sig, agg->ppArgs[i]);
+            }
+            return sig;
+		}
+        case SK_TYVARSYM:
+            sig = EmitSignatureByte(sig, (type->asTYVARSYM()->parent->kind == SK_METHSYM) ? ELEMENT_TYPE_MVAR : ELEMENT_TYPE_VAR); 
+			sig = EmitSignatureByte(sig, type->asTYVARSYM()->num); 
+            return sig;
+ 
         }
+
     }
 }
 
+
+/*
+ * Emit a method instantiation to the signature. 
+ */
+PCOR_SIGNATURE EMITTER::EmitSignatureForMethInst(PCOR_SIGNATURE sig, unsigned short cMethArgs, PTYPESYM *ppMethArgs)
+{
+            
+            sig = EmitSignatureByte(sig, IMAGE_CEE_CS_CALLCONV_INSTANTIATION);
+            sig = EmitSignatureByte(sig, (BYTE) cMethArgs);
+            for (unsigned int i = 0; i< cMethArgs; i++) { 
+                sig = EmitSignatureType(sig, ppMethArgs[i]);
+            }
+            return sig;
+}
 
 /*
  * Emit the signature of a member variable. The signature and its size
@@ -550,7 +605,12 @@ PCOR_SIGNATURE EMITTER::SignatureOfMethodOrProp(PMETHPROPSYM sym, int * cbSig)
                                                            : IMAGE_CEE_CS_CALLCONV_DEFAULT);
     if (! sym->isStatic)
         callconv |= IMAGE_CEE_CS_CALLCONV_HASTHIS;
-    sig = EmitSignatureByte(sig, callconv);
+    bool isGeneric = (sym->kind != SK_PROPSYM && sym->kind != SK_FAKEPROPSYM) && sym->asFMETHSYM()->cTypeFormals != 0;
+    if (isGeneric)
+        callconv |= IMAGE_CEE_CS_CALLCONV_GENERIC;
+	sig = EmitSignatureByte(sig, callconv);
+    if (isGeneric)
+        sig = EmitSignatureUInt(sig, sym->asFMETHSYM()->cTypeFormals);
 
     int realParams = cParams;
     if (sym->isVarargs) {
@@ -629,20 +689,16 @@ mdToken EMITTER::GetSignatureRef(int cTypes, PTYPESYM * arrTypes)
 }
 
 
+
 /*
  * Get a member ref (or def) for a method for use in emitting code or metadata.
  */
 mdToken EMITTER::GetMethodRef(METHSYM *sym)
 {
-    INFILESYM *inputfile;
-    DWORD scope = 0xFFFFFFFF;
     mdToken parent;
-    mdMemberRef memberRef;
-    PCOR_SIGNATURE sig;
-    int cbSig;
-
+    
 #if DEBUG
-    if (sym->parent && sym->parent->kind == SK_AGGSYM) {
+    if (sym->parent && sym->parent->isAggParent()) {
         // if this fires then the code in FUNCBREC::verifyMethodCall didn't clean up properly...
         ASSERT(!sym->parent->asAGGSYM()->isPrecluded);
     }
@@ -653,19 +709,40 @@ mdToken EMITTER::GetMethodRef(METHSYM *sym)
 
         ASSERT(! sym->isBogus);
 
+        // First we need the containing class of the method being referenced.
+        parent = GetTypeRef(sym->parent->asAGGSYM(), true);  // UNDONE: COM+ doesn't allow typedef in this case, even though we might have one
+                                                             // UNDONE: in the case of a "base" call where we have a memberref to a non-existent member.
+
+        sym->tokenEmit = GetMethodRefGivenParent(sym, parent);
+
+        RecordEmitToken(& sym->tokenEmit);
+    }
+
+    return sym->tokenEmit;
+}
+
+mdToken EMITTER::GetMethodRefGivenParent(PMETHSYM sym, mdToken parent) 
+{
+    INFILESYM *inputfile;
+    DWORD scope = 0xFFFFFFFF;
+    mdMemberRef memberRef;
+    PCOR_SIGNATURE sig;
+    int cbSig;
+
         // See if the class come from metadata or source code.
         inputfile = sym->parent->asAGGSYM()->getInputFile();
         scope = sym->parent->asAGGSYM()->getImportScope();
         if (inputfile->isSource || sym->kind == SK_FAKEMETHSYM) {
-            ASSERT((inputfile->getOutputFile() != compiler()->curFile->GetOutFile())
-                || (sym->kind == SK_FAKEMETHSYM));  // If it's in our file, a def token should already have been assigned.
+            ASSERT(sym->parent->asAGGSYM()->cTypeFormals 
+                || (inputfile->getOutputFile() != compiler()->curFile->GetOutFile())
+                || (sym->kind == SK_FAKEMETHSYM));  // If it's in our file, a def token should already 
+                                                    // have been assigned, unless it's in a generic class
 
-            // Get parent of the member ref. This is the typeref of the containing class, except for varargs
-            // where the parent meth is a methodDef (not a methodRef).
-            if (! (sym->kind == SK_FAKEMETHSYM && sym->asFAKEMETHSYM()->parentMethSym &&
-                   TypeFromToken(parent = GetMethodRef(sym->asFAKEMETHSYM()->parentMethSym)) == mdtMethodDef))
-            {
-                parent = GetTypeRef(sym->parent->asAGGSYM(), true);  // COM+ doesn't allow typedef in this case
+            if (sym->kind == SK_FAKEMETHSYM && sym->asFAKEMETHSYM()->parentMethSym) {
+                mdToken newParent = GetMethodRef(sym->asFAKEMETHSYM()->parentMethSym);
+                if (TypeFromToken(newParent) == mdtMethodDef) {
+                    parent = newParent;
+                }
             }
 
             // Symbol defined by source code. Define a member ref by name & signature.
@@ -673,7 +750,7 @@ mdToken EMITTER::GetMethodRef(METHSYM *sym)
 
             TimerStart(TIME_IME_DEFINEMEMBERREF);
                 CheckHR(metaemit->DefineMemberRef(
-                    parent,                             // ClassRef or ClassDef importing a member.
+                    parent,                             // ClassRef or ClassDef or TypeSpec importing a member.
                     sym->name->text,            // member's name
                         sig, cbSig,                     // point to a blob value of COM+ signature
                         &memberRef));
@@ -684,9 +761,6 @@ mdToken EMITTER::GetMethodRef(METHSYM *sym)
             const void *pHash = NULL;
             DWORD cbHash = 0;
 
-            // First we need the containing class of the method being referenced.
-            parent = GetTypeRef(sym->parent->asAGGSYM(), true);  // COM+ doesn't allow typedef in this case
-
             if( inputfile->assemblyIndex != 0)
                 CheckHR(compiler()->linker->GetAssemblyRefHash(inputfile->mdImpFile, &pHash, &cbHash));
             TimerStart(TIME_IME_DEFINEIMPORTMEMBER);
@@ -696,43 +770,80 @@ mdToken EMITTER::GetMethodRef(METHSYM *sym)
                 inputfile->metaimport[scope],       // [IN] Import scope, with member.  
                 sym->tokenImport,                   // [IN] Member in import scope.   
                 inputfile->assemimport ? metaassememit : NULL, // [IN] Assembly into which the Member is imported. (NULL if member isn't being imported from an assembly).
-                parent,                             // [IN] Classref or classdef in emit scope.    
+                parent,                             // [IN] Classref or classdef or TypeSpec in emit scope.    
                 &memberRef));                       // [OUT] Put member ref here.   
             TimerStop(TIME_IME_DEFINEIMPORTMEMBER);
         }
+        return memberRef;
 
-        sym->tokenEmit = memberRef;
+}
+
+/*
+ * Get a member ref for a method that belongs to a generic type where the generic type
+ * is used at a particular type.
+ */
+mdToken EMITTER::GetMethodRefAtConstructedType(INSTAGGMETHSYM *sym, mdToken tkClassParent, mdToken tkMethodParent)
+{
+    mdToken parent;
+
+    if (! sym->tokenEmit) {
+        ASSERT(! sym->isBogus);
+        parent = GetTypeRef(sym->methodInType, false, tkClassParent, tkMethodParent);
+        sym->tokenEmit = GetMethodRefGivenParent(sym->getMeth(), parent);
         RecordEmitToken(& sym->tokenEmit);
     }
 
     return sym->tokenEmit;
 }
 
+mdToken EMITTER::GetMethodInstantiation(SYM *instmeth, mdToken parent, unsigned short cMethArgs, PTYPESYM *ppMethArgs, mdToken *slot, mdToken tkClassParent, mdToken tkMethodParent)
+{
+    if (*slot) {
+        return *slot;
+    }
+    
+    PCOR_SIGNATURE sig;
+    int len = 0;
+    
+    sig = BeginSignature();
+    sig = EmitSignatureForMethInst(sig, cMethArgs, ppMethArgs);
+    sig = EndSignature(sig, &len);
+    
+    ASSERT(parent);
+    TimerStart(TIME_IME_DEFINEMETHODINSTANTIATION);
+    CheckHR(metaemit->DefineMethodSpec(    
+        parent,
+        sig,          
+        len,           
+        slot));
+    TimerStop(TIME_IME_DEFINEMETHODINSTANTIATION); 
+    RecordEmitToken(slot);
+    
+    return *slot;
+
+
+}
+   
 
 /*
  * Get a member ref for a member variable for use in emitting code or metadata.
  */
-mdToken EMITTER::GetMembVarRef(PMEMBVARSYM sym)
+mdToken EMITTER::GetMembVarRefGivenParent(PMEMBVARSYM sym, mdToken parent)
 {
     PINFILESYM inputfile;
     DWORD scope;
-    mdToken parent;
     mdMemberRef memberRef;
     PCOR_SIGNATURE sig;
     int cbSig;
-
-    if (! sym->tokenEmit) {
-        // Create a memberRef token for this symbol.
-        ASSERT(! sym->isBogus);
-
-        // First we need the containing class of the method being referenced.
-        parent = GetTypeRef(sym->parent->asAGGSYM(), true);
 
         // See if the class came from metadata or source code.
         inputfile = sym->parent->asAGGSYM()->getInputFile();
         scope = sym->parent->asAGGSYM()->getImportScope();
         if (inputfile->isSource) {
-            ASSERT(inputfile->getOutputFile() != compiler()->curFile->GetOutFile());  // If it's in our file, a def token should already have been assigned.
+            ASSERT(sym->parent->asAGGSYM()->cTypeFormals
+                || inputfile->getOutputFile() != compiler()->curFile->GetOutFile());  
+                      // If it's in our file, a def token should already have been assigned,
+                      // unless it's in a generic class
 
             // Symbol defined by source code. Define a member ref by name & signature.
             sig = SignatureOfMembVar(sym, & cbSig);
@@ -764,14 +875,50 @@ mdToken EMITTER::GetMembVarRef(PMEMBVARSYM sym)
                 &memberRef));                       // [OUT] Put member ref here.   
             TimerStop(TIME_IME_DEFINEIMPORTMEMBER);
         }
+        return memberRef;
+}
 
-        sym->tokenEmit = memberRef;
+/*
+ * Get a member ref for a member variable for use in emitting code or metadata.
+ */
+mdToken EMITTER::GetMembVarRef(PMEMBVARSYM sym)
+{
+    mdToken parent;
+
+    if (! sym->tokenEmit) {
+        // Create a memberRef token for this symbol.
+        ASSERT(! sym->isBogus);
+
+        // First we need the containing class of the method being referenced.
+        parent = GetTypeRef(sym->parent->asAGGSYM(), true);    // UNDONE: COM+ doesn't handle typedef in this case.
+
+        sym->tokenEmit = GetMembVarRefGivenParent(sym, parent);
         RecordEmitToken(& sym->tokenEmit);
     }
 
     return sym->tokenEmit;
 }
 
+/*
+ * Get a member ref for a member variable for use in emitting code or metadata.
+ */
+mdToken EMITTER::GetMembVarRefAtConstructedType(PINSTAGGMEMBVARSYM sym)
+{
+    mdToken parent;
+
+    if (! sym->tokenEmit) {
+        // Create a memberRef token for this symbol.
+        ASSERT(! sym->isBogus);
+
+        // First we need the containing class of the method being referenced.
+        parent = GetTypeRef(sym->methodInType);
+
+        sym->tokenEmit = GetMembVarRefGivenParent(sym->getMembVar(), parent);
+        RecordEmitToken(& sym->tokenEmit);
+    }
+
+    return sym->tokenEmit;
+}
 
 /*
  * Metadata tokens are specific to a particular metadata output file.
@@ -875,10 +1022,10 @@ mdToken EMITTER::GetScopeForTypeRef(SYM *sym)
 
 /*
  * Get a type ref for a type for use in emitting code or metadata.
- * Normally returns either a typeDef or a typeRef, if noDefAllowed is
- * set then only a typeRef is returns (which could be inefficient).
+ * Returns a typeDef, typeRef or typeSpec.  If noDefAllowed is
+ * set then only a typeRef or typeSpec is returned (which could be inefficient).
  */
-mdToken EMITTER::GetTypeRef(PTYPESYM sym, bool noDefAllowed)
+mdToken EMITTER::GetTypeRef(PTYPESYM sym, bool noDefAllowed, mdToken mdClassParent, mdToken mdMethodParent)
 {
     mdToken * tokAddr;
     mdToken tokenTemp;
@@ -888,48 +1035,6 @@ mdToken EMITTER::GetTypeRef(PTYPESYM sym, bool noDefAllowed)
 
         if (noDefAllowed && *tokAddr && TypeFromToken(*tokAddr) == mdtTypeDef)
             tokAddr = & sym->asAGGSYM()->tokenEmitRef;
-    }
-    else if (sym->kind == SK_ARRAYSYM || sym->kind == SK_PTRSYM)  {
-        // We use typespecs instead...
-
-        mdToken * slot;
-
-        if (sym->kind == SK_ARRAYSYM) {
-            slot = &(sym->asARRAYSYM()->tokenEmit);
-        } else {
-            slot = &(sym->asPTRSYM()->tokenEmit);
-        }
-
-        if (*slot) {
-            return *slot;
-        }
-
-        PCOR_SIGNATURE sig;
-        int len = 0;
-
-        sig = BeginSignature();
-        sig = EmitSignatureType(sig, sym);
-        sig = EndSignature(sig, &len);
-
-        TimerStart(TIME_IME_GETTOKENFROMTYPESPEC);
-        CheckHR(metaemit->GetTokenFromTypeSpec(
-            sig,          // Namespace name.
-            len,           // type name
-            slot));
-        TimerStop(TIME_IME_GETTOKENFROMTYPESPEC);
-
-        RecordEmitToken(slot);
-
-        return *slot;
-
-    } else if (sym->kind == SK_VOIDSYM) {
-        // this should be happening in typeof(void) statements only
-        return this->GetTypeRef(compiler()->symmgr.GetPredefType(PT_SYSTEMVOID, false), noDefAllowed);
-    } else {
-        ASSERT(0);  // Can't get a typeref token for any other type...
-        return 0;
-    }
-
     // At this point we know:
     //  sym is an aggregate.
     //  tokAddr has the address to assign a token tok.
@@ -989,8 +1094,66 @@ mdToken EMITTER::GetTypeRef(PTYPESYM sym, bool noDefAllowed)
 }
 
     return *tokAddr;
+	
+	}
+    else if (sym->kind == SK_ARRAYSYM || sym->kind == SK_PTRSYM || sym->kind == SK_INSTAGGSYM || sym->kind == SK_TYVARSYM)  {
+      return GetTypeSpec(sym,noDefAllowed, mdClassParent,  mdMethodParent);
+    } else if (sym->kind == SK_VOIDSYM) {
+        // this should be happening in typeof(void) statements only
+        return this->GetTypeRef(compiler()->symmgr.GetPredefType(PT_SYSTEMVOID, false), noDefAllowed);
+	} else {    
+		ASSERT(0);  // Can't get a typeref token for any other type...
+        return 0;
+    }
 }
 
+
+/*
+ * Get a type spec for a type for use in emitting code or metadata.
+ * Used when the interpretation of a typeRef/typeDef for a value type
+ * is ambiguous.  Is allowed to return a typeRef/typeDef for class types, because
+ * these are always unambiguous.
+ */
+mdToken EMITTER::GetTypeSpec(PTYPESYM sym, bool noDefAllowed, mdToken tkClassParent, mdToken tkMethodParent)
+{
+    if  (sym->kind == SK_AGGSYM && !sym->asAGGSYM()->isStruct) return GetTypeRef(sym,noDefAllowed);
+    mdToken * slot;
+    
+    switch (sym->kind) {
+    case SK_AGGSYM: slot = &(sym->asAGGSYM()->tokenEmit); break;
+    case SK_ARRAYSYM: slot = &(sym->asARRAYSYM()->tokenEmit); break;
+    case SK_TYVARSYM: slot = &(sym->asTYVARSYM()->tokenEmit); break;
+    case SK_PTRSYM: slot = &(sym->asPTRSYM()->tokenEmit); break;
+    case SK_INSTAGGSYM: slot = &(sym->asINSTAGGSYM()->tokenEmit); break; 
+    default: 
+        {
+            ASSERT(0);  // Can't get a typeref token for any other type...
+            return 0;
+        }
+    }
+    if (*slot) {
+        return *slot;
+    }
+    
+    PCOR_SIGNATURE sig;
+    int len = 0;
+    
+    sig = BeginSignature();
+    sig = EmitSignatureType(sig, sym);
+    sig = EndSignature(sig, &len);
+    
+    TimerStart(TIME_IME_GETTOKENFROMTYPESPEC);
+    CheckHR(metaemit->GetTokenFromTypeSpec(
+        sig,          // Namespace name.
+        len,           // type name
+        slot));
+    TimerStop(TIME_IME_GETTOKENFROMTYPESPEC);
+    
+    RecordEmitToken(slot);
+    
+    return *slot;
+
+}
 
 /*
  * For accessing arrays, the COM+ EE defines four "pseudo-methods" on arrays:
@@ -1180,9 +1343,6 @@ void EMITTER::EmitAggregateDef(PAGGSYM sym)
 {
     DWORD flags;
     WCHAR typeNameText[MAX_FULLNAME_SIZE];
-    mdToken tokenBaseClass;
-    mdToken * tokenInterfaces;
-    int cInterfaces;
 
     // If this assert triggers, we're emitting the same aggregate twice into an output scope.
     ASSERT(sym->tokenEmit == 0 || TypeFromToken(sym->tokenEmit) == mdtTypeRef);
@@ -1208,7 +1368,82 @@ void EMITTER::EmitAggregateDef(PAGGSYM sym)
     // Determine flags.
     flags = METADATAHELPER::GetAggregateFlags(sym);
 
-    // Determine base class.
+      
+    if (sym->parent->kind == SK_NSSYM) { 
+	    // Create the aggregate definition for a top level type.
+	    TimerStart(TIME_IME_DEFINETYPEDEF);
+	    CheckHR(metaemit->DefineTypeDef(
+		        typeNameText,                   // Full name of TypeDef
+		        flags,                          // CustomValue flags
+				NULL,                           // extends this TypeDef or typeref - GENERICS: set later due to possible recursion
+				NULL,                           // Implements interfaces - GENERICS: set later due to possible recursion
+		        & sym->tokenEmit));
+	    TimerStop(TIME_IME_DEFINETYPEDEF);
+    }
+    else {
+	    // Create the aggregate definition for a nested type.
+            ASSERT(sym->parent->asAGGSYM()->isTypeDefEmitted);
+	    mdToken tokenParent = GetTypeRef(sym->parent->asAGGSYM());
+
+	    TimerStart(TIME_IME_DEFINENESTEDTYPE);
+	    CheckHR(metaemit->DefineNestedType(
+                        sym->name->text,                // Simple Name of TypeDef for nested classes.
+		        flags,                          // CustomValue flags
+	            NULL,                           // extends this TypeDef or typeref - GENERICS: set later due to possible recursion
+		        NULL,                           // Implements interfaces - GENERICS - set later due to possible recursion
+		        tokenParent,					// Enclosing class
+		        & sym->tokenEmit));
+	    TimerStop(TIME_IME_DEFINENESTEDTYPE);
+    }
+
+    // record the emit token for later writing to the incremental build file
+    if (sym->incrementalInfo) {
+        sym->incrementalInfo->token = sym->tokenEmit;
+    }
+
+    // Don't emit ComType for TypeDefs in the manifest file
+    if (compiler()->BuildAssembly() && sym->hasExternalAccess()) {
+        ASSERT(!sym->getInputFile()->canRefThisFile && sym->getInputFile()->isSource);
+        HRESULT hr;
+        if (sym->parent->kind == SK_NSSYM)
+            hr = compiler()->linker->ExportType(compiler()->assemID, sym->getInputFile()->getOutputFile()->idFile,
+                sym->tokenEmit, typeNameText, flags, &sym->tokenComType);
+        else 
+            hr = compiler()->linker->ExportNestedType(compiler()->assemID, sym->getInputFile()->getOutputFile()->idFile,
+                sym->tokenEmit, sym->parent->asAGGSYM()->tokenComType, typeNameText, flags, &sym->tokenComType);
+        CheckHR(FTL_InternalError, hr);
+    }
+    RecordEmitToken(& sym->tokenEmit);
+}
+
+void EMITTER::EmitAggregateBases(PAGGSYM sym)
+{
+    DWORD flags;
+    mdToken tokenBaseClass;
+    mdToken * tokenInterfaces;
+    int cInterfaces;
+
+        // If any typarams, allocate array and fill it in.
+    if (sym->cTypeFormals) {
+        mdToken * tokenTyParams = (mdToken *) _alloca(sizeof(mdToken) * (sym->cTypeFormals + 1));
+        LPCWSTR *nameTyParams = (LPCWSTR *) _alloca(sizeof(LPCWSTR) * (sym->cTypeFormals + 1));
+
+        int i;
+        for (i = 0; i < sym->cTypeFormals; i++) {
+            tokenTyParams[i] = compiler()->emitter.GetTypeRef(sym->ppTypeFormals[i]->bound);
+            nameTyParams[i] = sym->ppTypeFormals[i]->name->text;
+        }
+        tokenTyParams[i] = mdTypeRefNil;
+        nameTyParams[i] = NULL;
+
+        CheckHR(metaemit->SetGenericPars(
+            sym->tokenEmit,                  // TypeDef
+            sym->cTypeFormals,               // Number of type params
+            tokenTyParams,                   // Bounds on type params
+            nameTyParams));                  // Names of type params
+    }
+
+        // Determine base class.
     tokenBaseClass = mdTypeRefNil;
     if (sym->baseClass) {
         tokenBaseClass = GetTypeRef(sym->baseClass);
@@ -1238,55 +1473,17 @@ void EMITTER::EmitAggregateDef(PAGGSYM sym)
         tokenInterfaces = NULL;
     }
 
-    if (sym->parent->kind == SK_NSSYM) { 
-	    // Create the aggregate definition for a top level type.
-	    TimerStart(TIME_IME_DEFINETYPEDEF);
-	    CheckHR(metaemit->DefineTypeDef(
-		        typeNameText,                   // Full name of TypeDef
-		        flags,                          // CustomValue flags
-		        tokenBaseClass,                 // extends this TypeDef or typeref
-		        tokenInterfaces,                // Implements interfaces
-		        & sym->tokenEmit));
-	    TimerStop(TIME_IME_DEFINETYPEDEF);
-    }
-    else {
-	    // Create the aggregate definition for a nested type.
+    // Determine flags.
+    flags = METADATAHELPER::GetAggregateFlags(sym);
 
-            ASSERT(sym->parent->asAGGSYM()->isTypeDefEmitted);
-	    mdToken tokenParent = GetTypeRef(sym->parent->asAGGSYM());
+	CheckHR(metaemit->SetTypeDefProps(
+            sym->tokenEmit,                 // TypeDef
+            flags,                          // flags - do I need to reset these?
+            tokenBaseClass,                 // base class
+            tokenInterfaces));              // interfaces
 
-	    TimerStart(TIME_IME_DEFINENESTEDTYPE);
-	    CheckHR(metaemit->DefineNestedType(
-                        sym->name->text,                // Simple Name of TypeDef for nested classes.
-		        flags,                          // CustomValue flags
-		        tokenBaseClass,                 // extends this TypeDef or typeref
-		        tokenInterfaces,                // Implements interfaces
-		        tokenParent,					// Enclosing class
-		        & sym->tokenEmit));
-	    TimerStop(TIME_IME_DEFINENESTEDTYPE);
-    }
 
-    // record the emit token for later writing to the incremental build file
-    if (sym->incrementalInfo) {
-        sym->incrementalInfo->token = sym->tokenEmit;
-    }
-
-    // Don't emit ComType for TypeDefs in the manifest file
-    if (compiler()->BuildAssembly() && sym->hasExternalAccess()) {
-        ASSERT(!sym->getInputFile()->canRefThisFile && sym->getInputFile()->isSource);
-        HRESULT hr;
-        if (sym->parent->kind == SK_NSSYM)
-            hr = compiler()->linker->ExportType(compiler()->assemID, sym->getInputFile()->getOutputFile()->idFile,
-                sym->tokenEmit, typeNameText, flags, &sym->tokenComType);
-        else 
-            hr = compiler()->linker->ExportNestedType(compiler()->assemID, sym->getInputFile()->getOutputFile()->idFile,
-                sym->tokenEmit, sym->parent->asAGGSYM()->tokenComType, typeNameText, flags, &sym->tokenComType);
-        CheckHR(FTL_InternalError, hr);
-    }
-
-    RecordEmitToken(& sym->tokenEmit);
 }
-
 /*
  * Emit any "special fields" associated with an aggregate. This can't be done
  * in EmitAggregateDef or EmiAggregateInfo due to the special order rules
@@ -1944,6 +2141,29 @@ void EMITTER::EmitMethodDef(METHSYM * sym)
                 0,                  // implementation flags (will be set in EmitMethodInfo)
                 & sym->tokenEmit));
     TimerStop(TIME_IME_DEFINEMETHOD);
+
+
+    // If any typarams, allocate array and fill it in.
+    if (sym->cTypeFormals) {
+
+        mdToken * tokenTyParams = (mdToken *) _alloca(sizeof(mdToken) * (sym->cTypeFormals + 1));
+        LPCWSTR *nameTyParams = (LPCWSTR *) _alloca(sizeof(LPCWSTR) * (sym->cTypeFormals + 1));
+
+        int i;
+        for (i = 0; i < sym->cTypeFormals; i++) {
+            tokenTyParams[i] = GetTypeRef(sym->ppTypeFormals[i]->bound);
+            nameTyParams[i] = sym->ppTypeFormals[i]->name->text;
+        }
+        tokenTyParams[i] = mdTypeRefNil;
+        nameTyParams[i] = NULL;
+
+        CheckHR(metaemit->SetGenericPars(
+            sym->tokenEmit,                 // MethodDef
+            sym->cTypeFormals,              // Number of type params
+            tokenTyParams,                  // Bounds on type params
+            nameTyParams));                 // Names of type params
+    }
+
 
     RecordEmitToken(& sym->tokenEmit);
 

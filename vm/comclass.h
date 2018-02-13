@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -320,6 +325,13 @@ public:
                                 BYTE *pbAssemblyIsLoading,
                                 BOOL bVerifyAccess,
                                 BOOL bPublicOnly);
+    TypeHandle static GetClassInnerHelper(LPUTF8 szFullClassName,
+                                BOOL bThrowOnError, 
+                                BOOL bIgnoreCase, 
+                                StackCrawlMark *stackMark,
+                                BYTE *pbAssemblyIsLoading,
+                                BOOL bVerifyAccess,
+                                BOOL bPublicOnly);
 
 
     // GetConstructors
@@ -392,6 +404,32 @@ public:
     //  the Class represents an array.  A NotSupported exception is
     //  thrown if the class is not an array.
     static FCDECL1(Object*, GetArrayElementType, ReflectClassBaseObject* refThisUNSAFE);
+
+    //@GENERICS: new methods on System.Type for instantiated types
+
+    // GetInstantiation
+    // Returns the type parameters in an instantiated type as an array of RuntimeType instances
+    // Return NULL if the type is not instantiated
+    static FCDECL1(Object*, GetInstantiation, ReflectClassBaseObject* refThisUNSAFE);
+
+    // Instantiate
+    // Given a generic type, instantiate with the type parameters given as an array argument
+    // If the type is not generic, is already instantiated, or is given the wrong number of
+    // parameters, then raise a type load exception
+    static FCDECL2(Object*, Instantiate, ReflectClassBaseObject* refThisUNSAFE, PTRArray* instArray);
+
+    // GetGenericType
+    // Given an instantiated type (e.g. List<int>), return the generic type itself (e.g. List)
+    // Return null if not instantiated
+    static FCDECL1(Object*, GetGenericType, ReflectClassBaseObject* refThisUNSAFE);
+
+    // IsGenericTypeDefinition
+    // Return true if the argument is an uninstantiated generic type
+    static FCDECL1(INT32, IsGenericTypeDefinition, ReflectClassBaseObject* refThisUNSAFE);
+
+    // IsInstantiated
+    // Return true if the argument is an instantiated generic type
+    static FCDECL1(INT32, IsInstantiated, ReflectClassBaseObject* refThisUNSAFE);
 
     // InternalGetArrayRank
     // This routine will return the rank of an array assuming the Class represents an array.  
@@ -481,11 +519,9 @@ public:
     // Check if argument is a parent of "this"
     static FCDECL2(INT32, IsSubClassOf, ReflectClassBaseObject* vThis, ReflectClassBaseObject* vOther);
 
-    static void GetNameInternal(ReflectClass *pRC, int nameType, CQuickBytes *qb);
-
 private:
     // InitializeReflection
-	static void InitializeReflectCrst();
+        static void InitializeReflectCrst();
 
     // This method will initalize reflection.
     static void MinimalReflectionInit();
@@ -494,22 +530,25 @@ private:
     static bool m_fAreReflectionStructsInitialized;
 
     // _GetName
-    // If the bFullName is true, teh fully qualified class name is return
-    //  otherwise just the class name is returned.
-    static StringObject* _GetName(ReflectClassBaseObject* refThis, int nameType);
-    static LPCUTF8 _GetName(ReflectClass* pRC, BOOL fNameSpace, CQuickBytes *qb);
+
+    // Create a string representation of the type
+    // If fNamespace=TRUE, include the namespace/enclosing classes
+    // If fFullInst=TRUE (regardless of fNamespace and fAssembly), include namespace and assembly for any type parameters
+    // If fAssembly=TRUE, suffix with a comma and the full assembly qualification 
+    static StringObject* _GetName(ReflectClassBaseObject* refThis, BOOL fNamespace, BOOL fFullInst, BOOL fAssembly);
 
 
     // If you are tempted to use this, use TypeHandle::CreateClassObj instead!!
-    // pVMCClass -- the EEClass we are creating the object for.
+    // Works for ordinary classes and instantiated classes (no TypeDescs i.e. no arrays or pointer types)
+    // th -- the type handle we are creating the object for.
     // pRefClass -- A pointer to a pointer which we will return the newly created object
-    static void COMClass::CreateClassObjFromEEClass(EEClass* pVMCClass, REFLECTCLASSBASEREF* pRefClass);
+    static void COMClass::CreateClassObjFromTypeHandle(TypeHandle th, REFLECTCLASSBASEREF* pRefClass);
 
     // Internal helper function for GetProperName
     static INT32  __stdcall InternalIsPrimitive(REFLECTCLASSBASEREF args);
 
         // Needed so it can get at above method
-    friend OBJECTREF EEClass::GetExposedClassObject();
+    friend OBJECTREF MethodTable::GetExposedClassObject();
 
 
     //

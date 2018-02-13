@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -1885,6 +1890,9 @@ StackWalkAction COMPlusThrowCallback (CrawlFrame *pCf, ThrowCallbackType *pData)
     if (pExInfo->m_dFrameCount < pExInfo->m_cStackTrace) {
         SystemNative::StackTraceElement* pStackTrace = (SystemNative::StackTraceElement*)pExInfo->m_pStackTrace;
         pStackTrace[pExInfo->m_dFrameCount].pFunc = pFunc;
+        // For method code that's shared between instantiations, we get the exact owner from the this pointer
+        pStackTrace[pExInfo->m_dFrameCount].owner = Generics::GetFrameOwner(pCf).GetMethodTable();
+	
         if (pCf->IsFrameless()) {
             pStackTrace[pExInfo->m_dFrameCount].ip = *(pCf->GetRegisterSet()->pPC);
             pStackTrace[pExInfo->m_dFrameCount].sp = (DWORD)(size_t)GetRegdisplaySP(pCf->GetRegisterSet());
@@ -1928,11 +1936,11 @@ StackWalkAction COMPlusThrowCallback (CrawlFrame *pCf, ThrowCallbackType *pData)
         return SWA_CONTINUE;
     }
 
-    EEClass* thrownClass = NULL;
+    TypeHandle thrownType = TypeHandle();
     // if we are being called on an unwind for an exception that we did not try to catch, eg.
     // an internal EE exception, then pThread->GetThrowable will be null
     if (pThread->GetThrowable() != NULL)
-        thrownClass = pThread->GetThrowable()->GetTrueClass();
+        thrownType = TypeHandle(pThread->GetThrowable()->GetTrueMethodTable());
     PREGDISPLAY regs = pCf->GetRegisterSet();
     BYTE *pStack        = (BYTE *) GetRegdisplaySP(regs);
 #ifdef DEBUGGING_SUPPORTED
@@ -1992,15 +2000,18 @@ StackWalkAction COMPlusThrowCallback (CrawlFrame *pCf, ThrowCallbackType *pData)
         //BOOL isFaultOrFinally = IsFaultOrFinally(EHClausePtr);
         BOOL isTypedHandler = IsTypedHandler(EHClausePtr);
         //BOOL hasCachedEEClass = HasCachedEEClass(EHClausePtr);
-        if (isTypedHandler && thrownClass) {
+        if (isTypedHandler && !thrownType.IsNull()) {
             if ((mdToken)EHClausePtr->ClassToken == mdTypeRefNil)
                 // this is a catch(...)
                 typeMatch = TRUE;
             else {
-                if (! HasCachedEEClass(EHClausePtr))
-                     pJitManager->ResolveEHClause(pCf->GetMethodToken(),&pEnumState,EHClausePtr);
+	        TypeHandle exnType;
+                if (! HasCachedTypeHandle(EHClausePtr))
+                  exnType = pJitManager->ResolveEHClause(pCf->GetMethodToken(),&pEnumState,EHClausePtr,pCf);
+                else 
+                  exnType = TypeHandle(EHClausePtr->exnType);
                 // if doesn't have cached class then class wasn't loaded so couldn't have been thrown
-                typeMatch = HasCachedEEClass(EHClausePtr) && ExceptionIsOfRightType(EHClausePtr->pEEClass, thrownClass);
+                typeMatch = !exnType.IsNull() && ExceptionIsOfRightType(exnType, thrownType);
             }
         }
 
@@ -2132,11 +2143,11 @@ StackWalkAction COMPlusUnwindCallback (CrawlFrame *pCf, ThrowCallbackType *pData
         return SWA_CONTINUE;
     }
 
-    EEClass* thrownClass = NULL;
+    TypeHandle thrownType = TypeHandle();
     // if we are being called on an unwind for an exception that we did not try to catch, eg.
     // an internal EE exception, then pThread->GetThrowable will be null
     if (pThread->GetThrowable() != NULL)
-        thrownClass = pThread->GetThrowable()->GetTrueClass();
+        thrownType = TypeHandle(pThread->GetThrowable()->GetTrueMethodTable());
     PREGDISPLAY regs = pCf->GetRegisterSet();
     BYTE *pStack        = (BYTE *) GetRegdisplaySP(regs);
 #ifdef DEBUGGING_SUPPORTED
@@ -2191,15 +2202,18 @@ StackWalkAction COMPlusUnwindCallback (CrawlFrame *pCf, ThrowCallbackType *pData
             continue;
 
         BOOL typeMatch = FALSE;
-        if ( IsTypedHandler(EHClausePtr) && thrownClass) {
+        if ( IsTypedHandler(EHClausePtr) && !thrownType.IsNull()) {
             if ((mdToken)EHClausePtr->ClassToken == mdTypeRefNil)
                 // this is a catch(...)
                 typeMatch = TRUE;
             else {
-                if (! HasCachedEEClass(EHClausePtr))
-                     pJitManager->ResolveEHClause(pCf->GetMethodToken(),&pEnumState,EHClausePtr);
+	      TypeHandle exnType;
+                if (! HasCachedTypeHandle(EHClausePtr))
+                  exnType = pJitManager->ResolveEHClause(pCf->GetMethodToken(),&pEnumState,EHClausePtr,pCf);
+                else
+                  exnType = TypeHandle(EHClausePtr->exnType);
                 // if doesn't have cached class then class wasn't loaded so couldn't have been thrown
-                typeMatch = HasCachedEEClass(EHClausePtr) && ExceptionIsOfRightType(EHClausePtr->pEEClass, thrownClass);
+                typeMatch = !exnType.IsNull() && ExceptionIsOfRightType(exnType, thrownType);
             }
         }
 

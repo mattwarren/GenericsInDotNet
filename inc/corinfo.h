@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -177,6 +182,10 @@ enum CorInfoHelpFunc
     CORINFO_HELP_MEMSET,		// Init block of memory
     CORINFO_HELP_MEMCPY,		// Copy block of memory
 
+    // GENERICS
+    CORINFO_HELP_RUNTIMEHANDLE,         // determine a type/field/method handle at run-time
+    CORINFO_HELP_GENERICVIRTUAL,        // look up an instantiated generic virtual method at run-time
+
     /*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-
      *
      * Start of Machine-specific helpers. All new common JIT helpers
@@ -267,6 +276,14 @@ enum CorInfoType
     CORINFO_TYPE_VALUECLASS      = 0x11,
     CORINFO_TYPE_CLASS           = 0x12,
     CORINFO_TYPE_REFANY          = 0x13,
+
+    // CORINFO_TYPE_VAR is for a generic type variable.
+    // Generic type variables only appear when the JIT is doing 
+    // verification (not NOT compilation) of generic code
+    // for the EE, in which case we're running
+    // the JIT in "import only" mode.  
+
+    CORINFO_TYPE_VAR             = 0x14,
     CORINFO_TYPE_COUNT,                         // number of jit types
 };
 
@@ -359,6 +376,7 @@ enum CorInfoFlag
     CORINFO_FLG_INTRINSIC             = 0x00400000, // This method MAY have an intrinsic ID
     CORINFO_FLG_CONSTRUCTOR           = 0x00800000, // method is an instance or type initializer
     CORINFO_FLG_RUN_CCTOR             = 0x01000000, // this method must run the class cctor
+    CORINFO_FLG_SHAREDINST            = 0x02000000, // the code for this method is shared between different type instantiations
 
     // These are the valid bits that a jitcompiler can pass to setJitterMethodFlags for
     // non-native methods only; a jitcompiler can access these flags using getMethodFlags.
@@ -392,6 +410,7 @@ enum CorInfoFlag
     CORINFO_FLG_MARSHAL_BYREF         = 0x04000000, // is this a subclass of MarshalByRef ?
     CORINFO_FLG_CONTAINS_STACK_PTR    = 0x08000000, // This class has a stack pointer inside it
     CORINFO_FLG_NEEDS_INIT            = 0x10000000, // This class needs JIT hooks for cctor
+    CORINFO_FLG_GENERIC_TYPE_VARIABLE = 0x20000000, // This is really a handle for a variable type
 };
 
 enum CORINFO_ACCESS_FLAGS
@@ -504,6 +523,18 @@ enum CorInfoInline
     INLINE_NEVER = -2,                  // This method should never be inlined, regardless of context
 };
 
+// This is for use when the JIT is compiling an instantiation
+// of generic code.  The JIT needs to know if the generic code itself
+// (which can be verified once and for all independently of the
+// instantiations) passed verification.
+enum CorInfoInstantiationVerification
+{
+    INSTVER_NOT_INSTANTIATION  = 0,   // The method is not an instantiation of a method in a generic class or a generic method
+    INSTVER_GENERIC_PASSED_OR_SKIPPED_VERIFICATION  = 1, // The method is an instantiation of a method in a generic class or a generic method, and the generic class was successfully verified
+    INSTVER_GENERIC_FAILED_VERIFICATION  = 2, // The method is an instantiation of a method in a generic class or a generic method, and the generic class failed verification
+};
+
+
 inline bool dontInline(CorInfoInline val) {
     return(val < 0);
 }
@@ -532,6 +563,8 @@ struct CORINFO_SIG_INFO
     CorInfoType             retType : 8;
     unsigned                flags   : 8;    	// unused at present
     unsigned                numArgs : 16;
+    CORINFO_CLASS_HANDLE*   classInst;      // (representative, not exact) instantiation for class type variables in signature
+    CORINFO_CLASS_HANDLE*   methodInst;     // (representative, not exact) instantiation for method type variables in signature
     CORINFO_ARG_LIST_HANDLE args;
     CORINFO_SIG_HANDLE      sig;
     CORINFO_MODULE_HANDLE   scope;          // passed to getArgClass
@@ -557,6 +590,91 @@ struct CORINFO_METHOD_INFO
     CorInfoOptions              options;
     CORINFO_SIG_INFO            args;
     CORINFO_SIG_INFO            locals;
+};
+
+// This enumeration is part of the result type of embedGenericHandle.
+//
+// It indicates whether a particular token in the instruction stream can be:
+// (a) Mapped to a handle (type, field or method) at compile-time (CONST)
+// (b) Must be looked up at run-time using the class dictionary 
+//     stored in the vtable of the this pointer (THISOBJ)
+// (c) Must be looked up at run-time using the method dictionary 
+//     stored in the method descriptor parameter passed to a generic 
+//     method (METHODPARAM)
+// (d) Must be looked up at run-time using the class dictionary stored 
+//     in the vtable parameter passed to a method in a generic 
+//     struct (CLASSPARAM)
+enum CORINFO_LOOKUP_KIND 
+{ 
+  CORINFO_LOOKUP_CONST,
+  CORINFO_LOOKUP_THISOBJ,
+  CORINFO_LOOKUP_METHODPARAM,
+  CORINFO_LOOKUP_CLASSPARAM,
+};
+
+// Flags that are combined with a type token in calls to embedGenericHandle, findMethod and JIT_RuntimeHandle
+// ARRAY is used in conjunction with mdtTypeSpec tokens to construct SZARRAY types for newarr.
+//
+// ALLOWINSTPARAM is used in conjunction with mdtMemberRef, mdtMethodSpec 
+// and mdtMethodDef tokens to indicate that the caller can deal with methods
+// that require instantiation parameters (at present this is shared-code
+// generic methods and shared-code instance methods in generic structs).
+//
+// If not set (the default), then you'll get a specialized stub instead, 
+// which is required for LDFTN and also by ngen as it can't assume 
+// anything about the implementation of generic code.
+//
+// ENTRYPOINT is used in conjunction with mdtMemberRef, mdtMethodSpec 
+// and mdtMethodDef tokens to return the entry point instead of the 
+// method descriptor.
+enum CORINFO_ANNOTATION
+{
+  // The two sets of flags are mutually exclusive as they are used with different token types
+  CORINFO_ANNOT_ARRAY       = 0x40000000,
+
+  // These two can be combined
+  CORINFO_ANNOT_ENTRYPOINT  = 0x40000000,
+  CORINFO_ANNOT_ALLOWINSTPARAM = 0x80000000,
+
+  CORINFO_ANNOT_MASK        = 0xC0000000,
+};
+
+
+// Maximum number of indirections returned by embedGenericHandle
+// This accounts for up to 2 indirections to get at a dictionary followed by a possible spill slot
+#define CORINFO_MAXINDIRECTIONS 4
+#define CORINFO_USEHELPER ((WORD) 0xffff)
+
+// Result of calling embedGenericHandle
+struct CORINFO_GENERICHANDLE_RESULT
+{
+    // How is the handle obtained: at compile-time (CORINFO_LOOKUP_CONST), from the vtable pointer, or from the extra vtable/method-desc parameter?
+    CORINFO_LOOKUP_KIND kind;
+
+    // If the handle is obtained at compile-time, then this handle is the "exact" handle (class, method, or field)
+    // Otherwise, it's a representative...
+    CORINFO_GENERIC_HANDLE    handle;
+
+    // compileTimeHandle is guaranteed to be either NULL or a handle that is usable during compile time.
+    // It must not be embedded in the code because it might not be valid at run-time.
+    CORINFO_GENERIC_HANDLE    compileTimeHandle;
+
+    // ...and the exact handle must be obtained at run-time:
+    // - through the this pointer (CORINFO_LOOKUP_THISOBJ) 
+    // - method desc arg (CORINFO_LOOKUP_METHODPARAM)
+    // - or vtable param (CORINFO_LOOKUP_CLASSPARAM)
+
+    // Number of indirections to get there
+    // CORINFO_USEHELPER = don't know how to get it, so use helper function JIT_RuntimeHandle at run-time instead
+    // 0 = use the this pointer itself (e.g. token is C<!0> inside code in sealed class C)
+    //     or method desc itself (e.g. token is method void M::mymeth<!!0>() inside code in M::mymeth)
+    // Otherwise, follow each byte-offset stored in the offsets array (may be negative)
+    WORD indirections;  
+
+    // If set, test for null and branch to helper if null
+    WORD testForNull;
+
+    WORD offsets[CORINFO_MAXINDIRECTIONS];
 };
 
 struct CORINFO_EH_CLAUSE
@@ -751,9 +869,14 @@ public:
             DWORD                       attribs     /* IN */
             ) = 0;
 
+    // Given a method descriptor ftnHnd, extract signature information into sigInfo
+    //
+    // 'memberParent' is typically only set when verifying.  It should be the
+    // result of calling getMemberParent.
     virtual void __stdcall getMethodSig (
              CORINFO_METHOD_HANDLE      ftn,        /* IN  */
-             CORINFO_SIG_INFO          *sig         /* OUT */
+             CORINFO_SIG_INFO          *sig,        /* OUT */
+             CORINFO_CLASS_HANDLE      memberParent = NULL /* IN */
              ) = 0;
 
         /*********************************************************************
@@ -851,10 +974,33 @@ public:
 
     // Given a Delegate type and a method, check if the method signature
     // is Compatible with the Invoke method of the delegate.
+    //@GENERICSVER: deprecated (not suitable for generics)
     virtual BOOL __stdcall isCompatibleDelegate(
             CORINFO_CLASS_HANDLE        objCls,
             CORINFO_METHOD_HANDLE       method,
             CORINFO_METHOD_HANDLE       delegateCtor
+            ) = 0;
+
+    // Given a delegate target class, a target method parent class,  a  target method, 
+    // a delegate class, a scope, the target method ref, and the delegate constructor member ref
+    // check if the method signature is compatible with the Invoke method of the delegate
+    // (under the typical instantiation of any free type variables in the memberref signatures).
+    // NB: arguments 2-4 could be inferred from 5-6, but are assumed to be available, and thus passed in for efficiency.
+    virtual BOOL __stdcall isCompatibleDelegate(
+            CORINFO_CLASS_HANDLE        objCls,           /* type of the delegate target, if any */
+            CORINFO_CLASS_HANDLE        methodParentCls,  /* exact parent of the target method, if any */
+            CORINFO_METHOD_HANDLE       method,           /* (representative) target method, if any */
+            CORINFO_CLASS_HANDLE        delegateCls,      /* exact type of the delegate */
+            CORINFO_MODULE_HANDLE       moduleHnd,        /* scope of the following refs */
+            unsigned        methodMemberRef,              /* memberref of the target method */
+            unsigned        delegateConstructorMemberRef  /* memberref of the delegate constructor */
+            ) = 0;
+
+    // Indicates if the method is an instance of the generic 
+    // method that passes (or has passed) verification, or if 
+    // verification is not needed.
+    virtual CorInfoInstantiationVerification __stdcall isInstantiationOfVerifiedGeneric (
+            CORINFO_METHOD_HANDLE   method      /* IN  */
             ) = 0;
 };
 
@@ -868,6 +1014,7 @@ public:
             CORINFO_MODULE_HANDLE   module          /* IN  */
             ) = 0;
 
+    // Given a type token metaTOK, use context to instantiate any type variables and return a type handle
     // the context parameter is used to do access checks.  If 0, no access checks are done
     virtual CORINFO_CLASS_HANDLE __stdcall findClass (
             CORINFO_MODULE_HANDLE       module,     /* IN  */
@@ -875,6 +1022,7 @@ public:
             CORINFO_METHOD_HANDLE       context     /* IN  */
             ) = 0;
 
+    // Given a field token metaTOK, use context to instantiate any type variables in its *parent* type and return a field handle
     // the context parameter is used to do access checks.  If 0, no access checks are done
     virtual CORINFO_FIELD_HANDLE __stdcall findField (
             CORINFO_MODULE_HANDLE       module,     /* IN  */
@@ -882,18 +1030,26 @@ public:
             CORINFO_METHOD_HANDLE       context     /* IN  */
             ) = 0;
 
+    // Given a method token metaTOK, use context to instantiate any type variables in its *parent* type and return a method handle
     // This looks up a function by token (what the IL CALLVIRT, CALLSTATIC instructions use)
     // the context parameter is used to do access checks.  If 0, no access checks are done
+    // If metaTOK is combined with the flag CORINFO_ANNOT_ALLOWINSTPARAM and it refers to a generic method or an instance method in a generic struct, 
+    // then the method handle returned might be for shared code which expects an extra parameter providing extra instantiation information.
+    // Otherwise (the default), a specialized stub method is returned that doesn't take this parameter 
     virtual CORINFO_METHOD_HANDLE __stdcall findMethod (
             CORINFO_MODULE_HANDLE       module,     /* IN  */
             unsigned                    metaTOK,    /* IN */
             CORINFO_METHOD_HANDLE       context     /* IN  */
             ) = 0;
 
+    // Given a field or method token metaTOK return its parent token
+    virtual unsigned __stdcall getMemberParent(CORINFO_MODULE_HANDLE  scopeHnd, unsigned metaTOK) = 0;
+
     // Signature information about the call sig
     virtual void __stdcall findSig (
             CORINFO_MODULE_HANDLE       module,     /* IN */
-            unsigned                    sigTOK,     /* IN */
+            unsigned                    sigTOK,    /* IN */
+            CORINFO_METHOD_HANDLE       context,     /* IN */
             CORINFO_SIG_INFO           *sig         /* OUT */
             ) = 0;
 
@@ -903,10 +1059,10 @@ public:
     virtual void __stdcall findCallSiteSig (
             CORINFO_MODULE_HANDLE       module,     /* IN */
             unsigned                    methTOK,    /* IN */
+            CORINFO_METHOD_HANDLE       context,     /* IN */
             CORINFO_SIG_INFO           *sig         /* OUT */
             ) = 0;
 
-    //@DEPRECATED: Use embedGenericToken() instead
     // Finds an EE token handle (could be a CORINFO_CLASS_HANDLE, or a
     // CORINFO_METHOD_HANDLE ...) in a generic way
     // the context parameter is used to do access checks.  If 0, no access checks are done
@@ -977,6 +1133,8 @@ public:
     virtual unsigned __stdcall getClassSize (
             CORINFO_CLASS_HANDLE        cls
             ) = 0;
+
+    virtual BYTE* __stdcall unpackMethodInst(CORINFO_MODULE_HANDLE scopeHnd, unsigned metaTOK, unsigned *memberRef) = 0;
 
     // This is only called for Value classes.  It returns a boolean array
     // in representing of 'cls' from a GC perspective.  The class is
@@ -1114,12 +1272,16 @@ public:
                         CORINFO_FIELD_HANDLE    field
                         ) = 0;
 
-    // return the field's type, if it is CORINFO_TYPE_VALUECLASS 'structType' is set
+    // Return the field's type, if it is CORINFO_TYPE_VALUECLASS 'structType' is set
     // the field's value class (if 'structType' == 0, then don't bother
     // the structure info).
+    //
+    // 'memberParent' is typically only set when verifying.  It should be the
+    // result of calling getMemberParent.
     virtual CorInfoType __stdcall getFieldType(
                         CORINFO_FIELD_HANDLE    field,
-                        CORINFO_CLASS_HANDLE   *structType
+                        CORINFO_CLASS_HANDLE   *structType,
+                        CORINFO_CLASS_HANDLE    memberParent = NULL /* IN */
                         ) = 0;
 
     // returns the field's compilation category
@@ -1678,10 +1840,21 @@ public:
                     void                  **ppIndirection = NULL
                     ) = 0;
 
-    // Finds an embeddable EE token handle (could be a CORINFO_CLASS_HANDLE, or a
-    // CORINFO_METHOD_HANDLE ...) in a generic way
-    // the context parameter is used to do access checks.  If 0, no access checks are done
-    virtual CORINFO_GENERIC_HANDLE __stdcall embedGenericHandle(
+    // Given a module scope (module), a method handle (context) and 
+    // a metadata token (metaTOK), fetch the handle 
+    // (type, field or method) associated with the token.
+    // If this is not possible at compile-time (because the current method's 
+    // code is shared and the token contains generic parameters)
+    // then indicate how the handle should be looked up at run-time.
+    // 
+    // Type tokens can be combined with CORINFO_ANNOT_MASK flags 
+    // to obtain array type handles. These are typically required by the 'newarr'
+    // instruction which takes a token for the *element* type of the array.
+    // 
+    // Similarly method tokens can be combined with CORINFO_ANNOT_MASK flags 
+    // method entry points. These are typically required by the 'call' and 'ldftn'
+    // instructions.
+    virtual CORINFO_GENERICHANDLE_RESULT __stdcall embedGenericHandle(
                     CORINFO_MODULE_HANDLE   module,
                     unsigned                metaTOK,
                     CORINFO_METHOD_HANDLE   context,
@@ -1772,16 +1945,9 @@ public:
     // they share a common method table, so we can't use getMethodClass)
     virtual CORINFO_CLASS_HANDLE __stdcall findMethodClass(
                     CORINFO_MODULE_HANDLE   module,
-                    mdToken                 methodTok)
-                    = 0;
-    // returns the extra (type instantiation) parameter to be pushed as the last 
-    // argument for static methods on parametersized types 
-    // (needed when CORINFO_FLG_INSTPARAM is set)
-    virtual LPVOID __stdcall getInstantiationParam(
-                    CORINFO_MODULE_HANDLE   module,
                     mdToken                 methodTok,
-                    void                  **ppIndirection = NULL
-                    ) = 0;
+                    CORINFO_METHOD_HANDLE   context)
+                    = 0;
 
     // Sets another object to intercept calls to "self"
     virtual void __stdcall setOverride(

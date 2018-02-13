@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -37,6 +42,7 @@
 #include "dbginterface.h"
 #include "eeconfig.h"
 #include "comcodeaccesssecurityengine.h"
+#include "generics.h"
 
 #include "threads.inl"
 
@@ -84,7 +90,7 @@ FCIMPL1(Object*, COMMember::GetFieldInfoToString, ReflectBaseObject* refThisUNSA
 
     // Put into a basic block so SigFormat is destroyed before the throw
     {
-        FieldSigFormat sigFmt(pField);
+        FieldSigFormat sigFmt(pField, pRF->declType.GetInstantiation());
         refSig = sigFmt.GetString();
     }
     if (!refSig) {
@@ -124,7 +130,7 @@ FCIMPL1(Object*, COMMember::GetMethodInfoToString, ReflectBaseObject* refThisUNS
 
         // Put into a basic block so SigFormat is destroyed before the throw
     {
-        SigFormat sigFmt(pMeth, pRM->typeHnd);
+        SigFormat sigFmt(pMeth, pRM->declType.GetClassOrArrayInstantiation());
         refSig = sigFmt.GetString();
     }
     if (!refSig) {
@@ -365,19 +371,14 @@ FCIMPL1(Object*, COMMember::GetReturnType, ReflectBaseObject* refThisUNSAFE)
     _ASSERTE(pMeth);
 
     HELPER_METHOD_FRAME_BEGIN_RET_ATTRIB_1(Frame::FRAME_ATTR_RETURNOBJ, ret);
-
-    TypeHandle varTypes;
-    if (pRM->typeHnd.IsArray()) 
-        varTypes = pRM->typeHnd.AsTypeDesc()->GetTypeParam();
     
-    PCCOR_SIGNATURE pSignature; // The signature of the found method
-    DWORD       cSignature;
-    pMeth->GetSig(&pSignature,&cSignature);
-    MetaSig sig(pSignature, pMeth->GetModule());
+    TypeHandle *classInst = pRM->declType.GetClassOrArrayInstantiation();
+    TypeHandle *methodInst = pMeth->GetMethodInstantiation();
+    MetaSig sig(pMeth, classInst, methodInst);
 
     OBJECTREF Throwable = NULL;
     GCPROTECT_BEGIN(Throwable);
-    typeHnd = sig.GetReturnProps().GetTypeHandle(sig.GetModule(), &Throwable, FALSE, FALSE, &varTypes);
+    typeHnd = sig.GetRetTypeHandle(&Throwable);
 
     if (typeHnd.IsNull()) {
         if (Throwable == NULL)
@@ -491,7 +492,7 @@ FCIMPL1(LPVOID, COMMember::GetDeclaringClass, ReflectBaseObject* refThis)
     if (pRM->pMethod->GetClass()->GetCl() != COR_GLOBAL_PARENT_TOKEN)
     {
         HELPER_METHOD_FRAME_BEGIN_RET_ATTRIB_1(Frame::FRAME_ATTR_RETURNOBJ, rv);
-        *((OBJECTREF*)&rv) = pRM->typeHnd.CreateClassObj();
+        *((OBJECTREF*)&rv) = pRM->declType.CreateClassObj();
         HELPER_METHOD_FRAME_END();
     }
 
@@ -512,20 +513,14 @@ FCIMPL1(Object*, COMMember::GetFieldDeclaringClass, ReflectBaseObject* refThisUN
     if (refThis == NULL) 
         COMPlusThrow(kNullReferenceException, L"NullReference_This");
 
-    FieldDesc*  pField;
-    EEClass*    pVMC;
-
     // Assign the return value
     ReflectField* pRF = (ReflectField*) refThis->GetData();
-    pField = pRF->pField;
-    pVMC = pField->GetEnclosingClass();
-    _ASSERTE(pVMC);
+    TypeHandle th = pRF->declType;
+    _ASSERTE(!th.IsNull());
 
     // return NULL for global field
-    if (pVMC->GetCl() != COR_GLOBAL_PARENT_TOKEN)
-    {
-        refRet = pVMC->GetExposedClassObject();
-    }
+    if (th.GetClass()->GetCl() != COR_GLOBAL_PARENT_TOKEN)
+        refRet = th.CreateClassObj();
 
     HELPER_METHOD_FRAME_END();
     return OBJECTREFToObject(refRet);
@@ -547,7 +542,7 @@ FCIMPL1(Object*, COMMember::GetEventDeclaringClass, ReflectTokenBaseObject* refT
         COMPlusThrow(kNullReferenceException, L"NullReference_This");
 
     ReflectEvent* pEvent = (ReflectEvent*) refThis->GetData();
-    refRet = pEvent->pDeclCls->GetExposedClassObject();
+    refRet = pEvent->declType.CreateClassObj();
 
     HELPER_METHOD_FRAME_END();
     return OBJECTREFToObject(refRet);
@@ -569,7 +564,7 @@ FCIMPL1(Object*, COMMember::GetPropDeclaringClass, ReflectBaseObject* refThisUNS
         COMPlusThrow(kNullReferenceException, L"NullReference_This");
 
     ReflectProperty* pProp = (ReflectProperty*) refThis->GetData();
-    refRet = pProp->pDeclCls->GetExposedClassObject();
+    refRet = pProp->declType.CreateClassObj();
 
     HELPER_METHOD_FRAME_END();
     return OBJECTREFToObject(refRet);
@@ -634,7 +629,7 @@ FCIMPL1(Object*, COMMember::GetFieldSignature, ReflectBaseObject* refThisUNSAFE)
 
     // Put into a basic block so SigFormat is destroyed before the throw
     {
-        FieldSigFormat sigFmt(pField);
+        FieldSigFormat sigFmt(pField, pRF->declType.GetInstantiation());
         refSig = sigFmt.GetString();
     }
     if (!refSig) {
@@ -712,14 +707,8 @@ FCIMPL1(INT32, COMMember::GetCallingConvention, ReflectBaseObject* refThisUNSAFE
     //  NOTE: both a constructor and a method are represented by a MetodDesc.
     //      If this ever changes we will need to fix this.
     ReflectMethod* pRM = (ReflectMethod*) refThis->GetData();
-    if (!pRM->pSignature) {
-        PCCOR_SIGNATURE pSignature;     // The signature of the found method
-        DWORD       cSignature;
-        pRM->pMethod->GetSig(&pSignature,&cSignature);
-        pRM->pSignature = ExpandSig::GetReflectSig(pSignature,
-                                pRM->pMethod->GetModule());
-    }
-    BYTE callConv = pRM->pSignature->GetCallingConventionInfo();
+    ExpandSig* pSignature = pRM->GetSig();
+    BYTE callConv = pSignature->GetCallingConventionInfo();
 
     // NOTE: These are defined in CallingConventions.cs.
     if ((callConv & IMAGE_CEE_CS_CALLCONV_MASK) == IMAGE_CEE_CS_CALLCONV_VARARG)
@@ -1203,13 +1192,16 @@ OBJECTREF COMMember::InvokeMethod_Internal(
     pMeth = pRM->pMethod;
     _ASSERTE(pMeth);
     TypeHandle methodTH;
-    if (pRM->typeHnd.IsArray()) 
-        methodTH = pRM->typeHnd;
+    if (pRM->declType.IsArray()) 
+        methodTH = pRM->declType;
     eeClass = pMeth->GetClass();
     //WARNING: for array this is not the "real" class but rather the element type. However that is what we need to
     //         do the checks later on. 
 
     _ASSERTE(eeClass);
+
+    if (pMeth->IsGenericMethodDefinition())
+        COMPlusThrow(kArgumentException, L"Invoke_GenericMethodIllegal");
 
     DWORD attr = pRM->attrs;
     ExpandSig* mSig = pRM->GetSig();
@@ -1296,17 +1288,11 @@ OBJECTREF COMMember::InvokeMethod_Internal(
         COMPlusThrow(kNotSupportedException, L"NotSupported_DynamicAssemblyNoRunAccess");
     }
 
-    TypeHandle targetTH;
-    EEClass* targetClass = NULL;
-    if (gc.target != NULL)
-    {
-        TypeHandle targetHandle = gc.target->GetTypeHandle();
-        if (targetHandle.IsArray()) 
-            targetTH = targetHandle; 
-        targetClass = gc.target->GetTrueClass();;
-    }
+    TypeHandle targetType = TypeHandle();
 
-    VerifyType(gc.target, eeClass, targetClass, thisPtr, &pMeth, methodTH, targetTH);
+    if (gc.target != NULL)
+        targetType = gc.target->GetTrueTypeHandle();
+    VerifyType(gc.target, pRM->declType, targetType, thisPtr, &pMeth);
 
     // Verify that the method isn't one of the special security methods that
     // alter the caller's stack (to add or detect a security frame object).
@@ -1344,7 +1330,7 @@ OBJECTREF COMMember::InvokeMethod_Internal(
         if (gc.caller == NULL) {
 			if (gc.target != NULL) {
 				if (!gc.target->GetTypeHandle().IsTypeDesc()) 
-					sCtx.SetClassOfInstance(targetClass);
+					sCtx.SetClassOfInstance(targetType);
 			}
 
 			CanAccess(pMeth, &sCtx, (dwFlags & RM_ATTR_IS_CTOR) != 0, verifyAccess != 0, (dwFlags & RM_ATTR_SECURITY_IMPOSED) != 0, TRUE);
@@ -1451,7 +1437,7 @@ OBJECTREF COMMember::InvokeMethod_Internal(
     if (thisPtr) {
         //WARNING: because eeClass is not the real class for arrays and because array are reference types 
         //         we need to do the extra check if the eeClass happens to be a value type
-        if (!eeClass->IsValueClass() || targetTH.IsArray())
+        if (!eeClass->IsValueClass() || gc.target->GetTypeHandle().IsArray())
             *pTmpPtr = ObjToArgSlot(gc.target);
         else {
             if (pMeth->IsVirtual())
@@ -1544,23 +1530,17 @@ OBJECTREF COMMember::InvokeMethod_Internal(
 }
 
 // This method will verify the type relationship between the target and
-//      the eeClass of the method we are trying to invoke.  It checks that for 
+//      the type of the method we are trying to invoke.  It checks that for 
 //      non static method, target is provided.  It also verifies that the target is
 //      a subclass or implements the interface that this MethodInfo represents.  
 //  We may update the MethodDesc in the case were we need to lookup the real
 //      method implemented on the object for an interface.
-void COMMember::VerifyType(OBJECTREF target, 
-                           EEClass* eeClass, 
-                           EEClass* targetClass, 
-                           int thisPtr, 
-                           MethodDesc** ppMeth, 
-                           TypeHandle typeTH, 
-                           TypeHandle targetTH)
+void COMMember::VerifyType(OBJECTREF target, TypeHandle type, TypeHandle targetType, int thisPtr, MethodDesc** ppMeth)
 {
     THROWSCOMPLUSEXCEPTION();
 
-    // Make sure that the eeClass is defined if there is a this pointer.
-    _ASSERTE(thisPtr == 0 || eeClass != 0);
+        // Make sure that the type is defined if there is a this pointer.
+        _ASSERTE(thisPtr == 0 || !type.IsNull());
 
     // Verify Static/Object relationship
     if (!target) {
@@ -1572,22 +1552,22 @@ void COMMember::VerifyType(OBJECTREF target,
     }
 
     //  validate the class/method relationship
-    if (thisPtr && (targetClass != eeClass || typeTH != targetTH)) {
+    if (thisPtr && targetType != type) {
 
         BOOL bCastOK = false;
         if(target->GetClass()->IsThunking())
         {
             // This could be a proxy and we may not have refined it to a type
             // it actually supports.
-            bCastOK = CRemotingServices::CheckCast(target, eeClass);
+            bCastOK = CRemotingServices::CheckCast(target, type);
         }
 
         if (!bCastOK)
         {
             // If this is an interface we need to find the real method
-            if (eeClass->IsInterface()) {
+            if (type.GetClass()->IsInterface()) {
                 DWORD slot = 0;
-                InterfaceInfo_t* pIFace = targetClass->FindInterface(eeClass->GetMethodTable());
+                InterfaceInfo_t* pIFace = targetType.GetMethodTable()->FindInterface(type.GetMethodTable());
                 if (!pIFace) {
                     { 
                         // Interface not found for the object
@@ -1597,29 +1577,13 @@ void COMMember::VerifyType(OBJECTREF target,
                 else
                 {
                     slot = (*ppMeth)->GetSlot() + pIFace->m_wStartSlot;
-                    MethodDesc* newMeth = targetClass->GetMethodDescForSlot(slot);          
+                    MethodDesc* newMeth = targetType.GetClass()->GetMethodDescForSlot(slot);          
                     _ASSERTE(newMeth != NULL);
                     *ppMeth = newMeth;
                 }
             }
             else {
-                // check the array case 
-                if (!targetTH.IsNull()) {
-                    // recevier is an array
-                    if (targetTH == typeTH ||
-                        eeClass == g_Mscorlib.GetClass(CLASS__ARRAY)->GetClass() ||
-                        eeClass == g_Mscorlib.GetClass(CLASS__OBJECT)->GetClass()) 
-                        return;
-                    else
-                        COMPlusThrow(kTargetException,L"RFLCT.Targ_ITargMismatch");
-                }
-                else if (!typeTH.IsNull())
-                    COMPlusThrow(kTargetException,L"RFLCT.Targ_ITargMismatch");
-
-                while (targetClass && targetClass != eeClass)
-                    targetClass = targetClass->GetParentClass();
-
-                if (!targetClass) {
+  	        if (!targetType.CanCastTo(type)) {
 
                     // The class defined for this method is not a super class of the
                     //  target object
@@ -1751,14 +1715,7 @@ Object* COMMember::InvokeConsInner(_InvokeConsArgs* pArgs)
     if (eeClass->ContainsStackPtr()) 
         COMPlusThrow(kNotSupportedException, L"NotSupported_ContainsStackPtr");
 
-    if (!pRM->pSignature) {
-        PCCOR_SIGNATURE pSignature;     // The signature of the found method
-        DWORD       cSignature;
-        pRM->pMethod->GetSig(&pSignature,&cSignature);
-        pRM->pSignature = ExpandSig::GetReflectSig(pSignature,
-                                                   pRM->pMethod->GetModule());
-    }
-    ExpandSig* mSig = pRM->pSignature;
+    ExpandSig* mSig = pRM->GetSig();
 
     if (mSig->IsVarArg()) 
         COMPlusThrow(kNotSupportedException, IDS_EE_VARARG_NOT_SUPPORTED);
@@ -1845,19 +1802,19 @@ Object* COMMember::InvokeConsInner(_InvokeConsArgs* pArgs)
     // If we are invoking a constructor on an array then we must
     //  handle this specially.  String objects allocate themselves
     //  so they are a special case.
-    if (eeClass != g_pStringClass->GetClass()) {
+    if (pRM->declType != TypeHandle(g_pStringClass)) {
         if (eeClass->IsArrayClass()) {
             o = ObjectToOBJECTREF((Object*)InvokeArrayCons((ReflectArrayClass*) pArgs->refThis->GetReflClass(),
                 pMeth,&pArgs->objs,argCnt));
             goto lExit;
         }
-        else if (CRemotingServices::IsRemoteActivationRequired(eeClass))
+        else if (CRemotingServices::IsRemoteActivationRequired(pRM->declType))
         {
-            o = CRemotingServices::CreateProxyOrObject(eeClass->GetMethodTable());
+            o = CRemotingServices::CreateProxyOrObject(pRM->declType.AsMethodTable());
         }
         else
         {
-            o = AllocateObject(eeClass->GetMethodTable());
+            o = AllocateObject(pRM->declType.AsMethodTable());
         }
     }
     else 
@@ -1999,14 +1956,8 @@ void COMMember::SerializationInvokeInner(_SerializationInvokeArgs *args) {
     eeClass = pMeth->GetClass();
     _ASSERTE(eeClass);
 
-    if (!pRM->pSignature) {
-        PCCOR_SIGNATURE pSignature;     // The signature of the found method
-        DWORD       cSignature;
-        pRM->pMethod->GetSig(&pSignature,&cSignature);
-        pRM->pSignature = ExpandSig::GetReflectSig(pSignature,
-                                                   pRM->pMethod->GetModule());
-    }
-    ExpandSig* mSig = pRM->pSignature;
+    
+    ExpandSig* mSig = pRM->GetSig();
 
     // Make sure we call the <cinit>
     OBJECTREF Throwable = NULL;
@@ -2150,7 +2101,6 @@ FCIMPL2(Object*, COMMember::CreateInstance, ReflectClassBaseObject* refThisUNSAF
 
     EEClass* pVMC;
     MethodDesc* pMeth;
-    DWORD attr;
 
     OBJECTREF rv = NULL;
     OBJECTREF o;
@@ -2167,6 +2117,7 @@ FCIMPL2(Object*, COMMember::CreateInstance, ReflectClassBaseObject* refThisUNSAF
         COMPlusThrow(kMissingMethodException,L"Arg_NoDefCTor");
     }
    
+    {
 
     // If we are creating a COM object which has backing metadata we still
     // need to ensure that the caller has unmanaged code access permission.
@@ -2196,74 +2147,81 @@ FCIMPL2(Object*, COMMember::CreateInstance, ReflectClassBaseObject* refThisUNSAF
         // We didn't find the parameterless constructor,
         //  if this is a Value class we can simply allocate one and return it
 
-        if (!pVMC->IsValueClass())
+        if (pVMC->IsValueClass())
+        {
+            OBJECTREF o = pVMC->GetMethodTable()->Allocate();
+            rv = o;
+            // return rv;
+        }
+        else 
         {
             COMPlusThrow(kMissingMethodException,L"Arg_NoDefCTor");
         }
 
-        rv = pVMC->GetMethodTable()->Allocate();
-        // return rv;
-        goto lExit;
-    }
-
-    pMeth = pVMC->GetMethodTable()->GetDefaultConstructor();
-
-    // Validate the method can be called by this caller
-    attr = pMeth->GetAttrs();
-
-    if (!IsMdPublic(attr) && publicOnly)
-    {
-        COMPlusThrow(kMissingMethodException,L"Arg_NoDefCTor");
-    }
-
-    if (!IsMdPublic(attr) || pMeth->RequiresLinktimeCheck() || !pVMC->IsExternallyVisible()) 
-    {
-        RefSecContext sCtx;
-        CanAccess(pMeth, &sCtx);
-    }
-
-    // call the <cinit> 
-    GCPROTECT_BEGIN(Throwable);
-    if (!pVMC->DoRunClassInit(&Throwable)) 
-    {
-        OBJECTREF except = g_pInvokeUtil->CreateTargetExcept(&Throwable);
-        COMPlusThrow(except);
-    }
-    GCPROTECT_END();
-
-    // We've got the class, lets allocate it and call the constructor
-    if (pVMC->IsThunking())
-        COMPlusThrow(kMissingMethodException,L"NotSupported_Constructor");
-
-    if (CRemotingServices::IsRemoteActivationRequired(pVMC))
-    {
-        o = CRemotingServices::CreateProxyOrObject(pVMC->GetMethodTable());
     }
     else
     {
-        o = AllocateObject(pVMC->GetMethodTable());
-    }
+        pMeth = pVMC->GetMethodTable()->GetDefaultConstructor();
+            
+        TypeHandle ty = pRC->GetTypeHandle();
+            
+        MetaSig sig(pMeth,pMeth->GetClassInstantiation(ty),pMeth->GetMethodInstantiation());
+            
+        // Validate the method can be called by this caller
+        DWORD attr = pMeth->GetAttrs();
+            
+        if (!IsMdPublic(attr) && publicOnly)
+        {
+            COMPlusThrow(kMissingMethodException,L"Arg_NoDefCTor");
+        }
 
-    GCPROTECT_BEGIN(o)
-    {
-        MetaSig sig(pMeth->GetSig(),pMeth->GetModule());
+        if (!IsMdPublic(attr) || pMeth->RequiresLinktimeCheck() || !pVMC->IsExternallyVisible()) 
+        {
+            RefSecContext sCtx;
+            CanAccess(pMeth, &sCtx);
+        }
 
-        // Copy "this" pointer
-        ARG_SLOT arg;
+        // call the <cinit> 
+        GCPROTECT_BEGIN(Throwable);
+        if (!pVMC->DoRunClassInit(&Throwable)) 
+        {
+            OBJECTREF except = g_pInvokeUtil->CreateTargetExcept(&Throwable);
+            COMPlusThrow(except);
+        }
+        GCPROTECT_END();
 
-        if (pVMC->IsValueClass()) 
-            arg = PtrToArgSlot(o->UnBox());
+        // We've got the class, lets allocate it and call the constructor
+        if (pVMC->IsThunking())
+            COMPlusThrow(kMissingMethodException,L"NotSupported_Constructor");
+
+        if (CRemotingServices::IsRemoteActivationRequired(ty))
+        {
+            o = CRemotingServices::CreateProxyOrObject(ty.GetMethodTable());
+        }
         else
-            arg = ObjToArgSlot(o);
+        {
+            o = AllocateObject(ty.GetMethodTable());
+        }
 
-        // Call the method
-        TryCallMethod(pMeth, &arg, &sig);
+        GCPROTECT_BEGIN(o)
+        {
 
-        rv = o;
+            // Copy "this" pointer
+            ARG_SLOT arg;
+
+            if (pVMC->IsValueClass()) 
+                arg = PtrToArgSlot(o->UnBox());
+            else
+                arg = ObjToArgSlot(o);
+
+            // Call the method
+            TryCallMethod(pMeth, &arg, &sig);
+
+            rv = o;
+        }
+        GCPROTECT_END();
     }
-    GCPROTECT_END();
-
-lExit: ;
+    }
     HELPER_METHOD_FRAME_END();
     return OBJECTREFToObject(rv);
 }
@@ -2299,7 +2257,7 @@ VOID COMMember::InitReflectField(FieldDesc *pField, ReflectField *pRF)
     {
         CorElementType t;
         // Get the type of the field
-        pRF->thField = g_pInvokeUtil->GetFieldTypeHandle(pField, &t);
+        pRF->thField = g_pInvokeUtil->GetFieldTypeHandle(pField, &t, pRF->declType);
         // Field attributes
         pRF->dwAttr = pField->GetAttributes();
         //Do this last to prevent race conditions
@@ -2323,16 +2281,16 @@ FCIMPL3(Object*, COMMember::FieldGet, ReflectBaseObject* refThisUNSAFE, Object* 
     HELPER_METHOD_FRAME_BEGIN_RET_ATTRIB_1(Frame::FRAME_ATTR_RETURNOBJ, target);
 
     FieldDesc*  pField;
-    EEClass*    eeClass;
+    TypeHandle  declType;
 
-    // Get the field and EEClass from the Object
+    // Get the field and type from the Object
     pField = pRF->pField;
     _ASSERTE(pField);
-    eeClass = pField->GetEnclosingClass();
-    _ASSERTE(eeClass);
+    declType = pRF->declType;
+    _ASSERTE(!declType.IsNull());
 
     // Validate the call
-    g_pInvokeUtil->ValidateObjectTarget(pField,eeClass,target);
+    g_pInvokeUtil->ValidateObjectTarget(pField,declType,target);
 
     // See if cached field information is available
     InitReflectField(pField, pRF);
@@ -2342,7 +2300,7 @@ FCIMPL3(Object*, COMMember::FieldGet, ReflectBaseObject* refThisUNSAFE, Object* 
         RefSecContext sCtx;
         if (target != NULL && !pField->IsStatic()) {
             if (!target->GetTypeHandle().IsTypeDesc()) {
-                sCtx.SetClassOfInstance(target->GetClass());
+                sCtx.SetClassOfInstance(target->GetTypeHandle());
             }
         }
         CanAccessField(pRF, &sCtx);
@@ -2384,30 +2342,29 @@ FCIMPL3(Object*, COMMember::DirectFieldGet, ReflectBaseObject* refThisUNSAFE, Ty
     _ASSERTE(pField);
 
     ARG_SLOT value;
-    EEClass* fldEEC;
+    TypeHandle declType = TypeHandle();
 
     // Find the Object and its type
-    EEClass* targetEEC = target.type.GetClass();
-    if (pField->IsStatic() || !targetEEC->IsValueClass())
-    {
-        refRet = DirectObjectFieldGet(pField, target);
+    TypeHandle targetType = target.type;
+    if (pField->IsStatic() || !targetType.IsValueType()) { 
+        refRet = DirectObjectFieldGet(pRF, target);
         goto lExit;
     }
 
     // See if cached field information is available
     InitReflectField(pField, pRF);
 
-    fldEEC = pField->GetEnclosingClass();
-    _ASSERTE(fldEEC);
+    declType = pRF->declType;
+    _ASSERTE(!declType.IsNull());
 
     // Validate that the target type can be cast to the type that owns this field info.
-    if (!TypeHandle(targetEEC).CanCastTo(TypeHandle(fldEEC)))
+    if (!targetType.CanCastTo(declType))
         COMPlusThrowArgumentException(L"obj", NULL);
 
     // Verify the callee/caller access
     if (requiresAccessCheck) {
         RefSecContext sCtx;
-        sCtx.SetClassOfInstance(targetEEC);
+        sCtx.SetClassOfInstance(targetType);
         CanAccessField(pRF, &sCtx);
     }
 
@@ -2569,11 +2526,11 @@ FCIMPL8(void, COMMember::FieldSet,
     ReflectField* pRF = (ReflectField*) gc.refThis->GetData();
     FieldDesc*  pField = pRF->pField;
     _ASSERTE(pField);
-    EEClass* eeClass = pField->GetEnclosingClass();
-    _ASSERTE(eeClass);
+    TypeHandle declType = pRF->declType;
+    _ASSERTE(!declType.IsNull());
 
     // Validate the target/fld type relationship
-    g_pInvokeUtil->ValidateObjectTarget(pField,eeClass,gc.target);
+    g_pInvokeUtil->ValidateObjectTarget(pField,declType,gc.target);
 
     // See if cached field information is available
     InitReflectField(pField, pRF);
@@ -2626,7 +2583,7 @@ FCIMPL8(void, COMMember::FieldSet,
     if (requiresAccessCheck) {
         if (gc.target != NULL && !pField->IsStatic()) {
             if (!gc.target->GetTypeHandle().IsTypeDesc()) {
-                sCtx.SetClassOfInstance(gc.target->GetClass());
+                sCtx.SetClassOfInstance(gc.target->GetTypeHandle());
             }
         }
         CanAccessField(pRF, &sCtx);
@@ -2661,20 +2618,20 @@ FCIMPL4_IVII(void, COMMember::DirectFieldSet, ReflectBaseObject* refThisUNSAFE, 
     FieldDesc* pField = pRF->pField;
     _ASSERTE(pField);
 
-    EEClass* fldEEC;
+    TypeHandle declType = TypeHandle();
 
     // Find the Object and its type
-    EEClass* targetEEC = target.type.GetClass();
-    if (pField->IsStatic() || !targetEEC->IsValueClass()) {
-        DirectObjectFieldSet(pField, target, &oValue, requiresAccessCheck);
+    TypeHandle targetType = target.type;
+    if (pField->IsStatic() || !targetType.IsValueType()) {
+        DirectObjectFieldSet(pRF, target, &oValue, requiresAccessCheck);
         goto lExit;
     }
 
-    fldEEC = pField->GetEnclosingClass();
-    _ASSERTE(fldEEC);
+    declType = pRF->declType;
+    _ASSERTE(!declType.IsNull());
 
     // Validate that the target type can be cast to the type that owns this field info.
-    if (!TypeHandle(targetEEC).CanCastTo(TypeHandle(fldEEC)))
+    if (!targetType.CanCastTo(declType))
         COMPlusThrowArgumentException(L"obj", NULL);
 
     // We dont verify that the user has access because
@@ -2712,7 +2669,7 @@ FCIMPL4_IVII(void, COMMember::DirectFieldSet, ReflectBaseObject* refThisUNSAFE, 
         
         // Verify the callee/caller access
         if (requiresAccessCheck) {
-            sCtx.SetClassOfInstance(targetEEC);
+            sCtx.SetClassOfInstance(targetType);
             CanAccessField(pRF, &sCtx);
         }
     }
@@ -2859,11 +2816,13 @@ FCIMPLEND
 // DirectObjectFieldGet
 // When the TypedReference points to a object we call this method to
 //  get the field value
-OBJECTREF COMMember::DirectObjectFieldGet(FieldDesc* pField, TypedByRef target)
+OBJECTREF COMMember::DirectObjectFieldGet(ReflectField *pRF, TypedByRef target)
 {
     OBJECTREF refRet;
-    EEClass* eeClass = pField->GetEnclosingClass();
-    _ASSERTE(eeClass);
+    TypeHandle declType = pRF->declType;
+    _ASSERTE(!declType.IsNull());
+    FieldDesc *pField = pRF->pField;
+    _ASSERTE(pField);
 
     OBJECTREF objRef = NULL;
     GCPROTECT_BEGIN(objRef);
@@ -2872,11 +2831,11 @@ OBJECTREF COMMember::DirectObjectFieldGet(FieldDesc* pField, TypedByRef target)
     }
 
     // Validate the call
-    g_pInvokeUtil->ValidateObjectTarget(pField,eeClass,objRef);
+    g_pInvokeUtil->ValidateObjectTarget(pField,declType,objRef);
 
     // Get the type of the field
     CorElementType type;
-    TypeHandle th = g_pInvokeUtil->GetFieldTypeHandle(pField,&type);
+    TypeHandle th = g_pInvokeUtil->GetFieldTypeHandle(pField,&type,declType);
 
     // There can be no GC after thing until the Object is returned.
     ARG_SLOT value;
@@ -2894,12 +2853,14 @@ OBJECTREF COMMember::DirectObjectFieldGet(FieldDesc* pField, TypedByRef target)
 // DirectObjectFieldSet
 // When the TypedReference points to a object we call this method to
 //  set the field value
-void COMMember::DirectObjectFieldSet(FieldDesc* pField, TypedByRef target, OBJECTREF* pvalue, BOOL requiresAccessCheck)
+void COMMember::DirectObjectFieldSet(ReflectField *pRF, TypedByRef target, OBJECTREF* pvalue, BOOL requiresAccessCheck)
 {
     THROWSCOMPLUSEXCEPTION();
 
-    EEClass* eeClass = pField->GetEnclosingClass();
-    _ASSERTE(eeClass);
+    TypeHandle declType = pRF->declType;
+    _ASSERTE(!declType.IsNull());
+    FieldDesc *pField = pRF->pField;
+    _ASSERTE(pField);
 
     OBJECTREF objRef = NULL;
     GCPROTECT_BEGIN(objRef);
@@ -2907,11 +2868,11 @@ void COMMember::DirectObjectFieldSet(FieldDesc* pField, TypedByRef target, OBJEC
         objRef = ObjectToOBJECTREF(*((Object**)target.data));
     }
     // Validate the target/fld type relationship
-    g_pInvokeUtil->ValidateObjectTarget(pField,eeClass,objRef);
+    g_pInvokeUtil->ValidateObjectTarget(pField,declType,objRef);
 
     // Verify that the value passed can be widened into the target
     CorElementType type;
-    TypeHandle th = g_pInvokeUtil->GetFieldTypeHandle(pField,&type);
+    TypeHandle th = g_pInvokeUtil->GetFieldTypeHandle(pField,&type,declType);
 
     RefSecContext sCtx;
 
@@ -2938,17 +2899,17 @@ void COMMember::DirectObjectFieldSet(FieldDesc* pField, TypedByRef target, OBJEC
     if (!pField->IsPublic() && requiresAccessCheck) {
         if (objRef != NULL) 
             if (!objRef->GetTypeHandle().IsTypeDesc())
-                sCtx.SetClassOfInstance(objRef->GetClass());
+                sCtx.SetClassOfInstance(objRef->GetTypeHandle());
         
         InvokeUtil::CheckAccess(&sCtx,
                                 pField->GetAttributes(),
                                 pField->GetMethodTableOfEnclosingClass(),
                                 REFSEC_CHECK_MEMBERACCESS|REFSEC_THROW_FIELDACCESS);
     }
-    else if (!eeClass->IsExternallyVisible()) {
+    else if (!declType.GetClass()->IsExternallyVisible()) {
         if (objRef != NULL) 
             if (!objRef->GetTypeHandle().IsTypeDesc())
-                sCtx.SetClassOfInstance(objRef->GetClass());
+                sCtx.SetClassOfInstance(objRef->GetTypeHandle());
         
         InvokeUtil::CheckAccess(&sCtx,
                                 pField->GetAttributes(),
@@ -2990,8 +2951,8 @@ FCIMPL3(void, COMMember::MakeTypedReference, TypedByRef* value, Object* targetUN
 
         // Verify that the enclosing class for the field
         //  and the class are the same.  If not this is an exception
-        EEClass* p = pField->GetEnclosingClass();
-        if (typeHnd.GetClass() != p)
+        MethodTable *pMT = pField->GetMethodTableOfEnclosingClass();
+        if (typeHnd.GetMethodTable() != pMT)
             COMPlusThrow(kMissingMemberException,L"MissingMemberTypeRef");
 
         // Prevent making type references to primitives.  
@@ -3002,7 +2963,7 @@ FCIMPL3(void, COMMember::MakeTypedReference, TypedByRef* value, Object* targetUN
 
         typeHnd = pField->LoadType();
         if (i<cnt-1) {
-            if (!typeHnd.GetClass()->IsValueClass())
+            if (!typeHnd.IsValueType())
                 COMPlusThrow(kMissingMemberException,L"MissingMemberNestErr");
         }
         offset += pField->GetOffset();
@@ -3561,28 +3522,15 @@ FCIMPL1(Object*, COMMember::GetFieldType, ReflectTokenBaseObject* refThisUNSAFE)
     if (refThis == NULL) 
         COMPlusThrow(kNullReferenceException, L"NullReference_This");
 
-    PCCOR_SIGNATURE pSig;
-    DWORD           cSig;
-    TypeHandle      typeHnd;
-
     // Get the field
     ReflectField* pRF = (ReflectField*) refThis->GetData();
     FieldDesc* pFld = pRF->pField;
     _ASSERTE(pFld);
 
-    // Get the signature
-    pFld->GetSig(&pSig, &cSig);
-    FieldSig sig(pSig, pFld->GetModule());
-
-    OBJECTREF throwable = NULL;
-    GCPROTECT_BEGIN(throwable);
-    typeHnd = sig.GetTypeHandle(&throwable);
-    if (typeHnd.IsNull())
-        COMPlusThrow(throwable);
-    GCPROTECT_END();
+    InitReflectField(pFld, pRF);
 
     // Ignore null return
-    ret = typeHnd.CreateClassObj();
+    ret = pRF->thField.CreateClassObj();
 
     HELPER_METHOD_FRAME_END();
     return(OBJECTREFToObject(ret));
@@ -3645,7 +3593,7 @@ FCIMPL1(Object*, COMMember::GetBaseDefinition, ReflectBaseObject* refThisUNSAFE)
 
     // Find the Object so we can get its version of the MethodInfo...
     _ASSERTE(pMeth);
-    refRet = g_pInvokeUtil->GetMethodInfo(pMeth);
+    refRet = g_pInvokeUtil->GetMethodInfo(pMeth, pRM->declType);
 
 lExit: ;
     HELPER_METHOD_FRAME_END();
@@ -3701,7 +3649,7 @@ FCIMPL1(Object*, COMMember::GetParentDefinition, ReflectBaseObject* refThisUNSAF
     
     // Find the Object so we can get its version of the MethodInfo...
     _ASSERTE(pMeth);
-    refRet = g_pInvokeUtil->GetMethodInfo(pMeth);
+    refRet = g_pInvokeUtil->GetMethodInfo(pMeth, pRM->declType);
 
 lExit: ;
     HELPER_METHOD_FRAME_END();
@@ -3731,7 +3679,7 @@ FCIMPL1(Object*, COMMember::GetMethodFromHandleImp, LPVOID handle) {
         FCThrowArgumentEx(kArgumentException, NULL, L"InvalidOperation_HandleIsNotInitialized");
 
     HELPER_METHOD_FRAME_BEGIN_RET_0();
-    REFLECTCLASSBASEREF pRefClass = (REFLECTCLASSBASEREF) pMeth->GetClass()->GetExposedClassObject();
+    REFLECTCLASSBASEREF pRefClass = (REFLECTCLASSBASEREF) pMeth->GetMethodTable()->GetExposedClassObject();
 
     if (pMeth->IsCtor() || pMeth->IsStaticInitMethod()) {
         ReflectMethod* pRM = ((ReflectClass*) pRefClass->GetData())->FindReflectConstructor(pMeth);
@@ -3778,7 +3726,7 @@ FCIMPL1(Object*, COMMember::GetFieldFromHandleImp, LPVOID handle) {
         FCThrowArgumentEx(kArgumentException, NULL, L"InvalidOperation_HandleIsNotInitialized");
     
     HELPER_METHOD_FRAME_BEGIN_RET_0();
-    REFLECTCLASSBASEREF pRefClass = (REFLECTCLASSBASEREF) pField->GetEnclosingClass()->GetExposedClassObject();
+    REFLECTCLASSBASEREF pRefClass = (REFLECTCLASSBASEREF) pField->GetMethodTableOfEnclosingClass()->GetExposedClassObject();
 
     ReflectField* pRF = ((ReflectClass*) pRefClass->GetData())->FindReflectField(pField);
     objMeth = (OBJECTREF) pRF->GetFieldInfo((ReflectClass*) pRefClass->GetData());
@@ -3842,13 +3790,13 @@ FCIMPL1(Object *, COMMember::InternalGetEnumUnderlyingType, ReflectClassBaseObje
     OBJECTREF result = NULL;
 
     HELPER_METHOD_FRAME_BEGIN_RET_0();
-    EEClass *pClass = g_Mscorlib.FetchElementType(th.AsMethodTable()->GetNormCorElementType())->GetClass();
+    MethodTable *pMT = g_Mscorlib.FetchElementType(th.AsMethodTable()->GetNormCorElementType());
 
-    result = pClass->GetExistingExposedClassObject();
+    result = pMT->GetExistingExposedClassObject();
 
     if (result == NULL)
     {
-        result = pClass->GetExposedClassObject();
+        result = pMT->GetExposedClassObject();
     }
     HELPER_METHOD_FRAME_END();
 
@@ -4020,6 +3968,201 @@ FCIMPL2(Object*, COMMember::InternalBoxEnumU8, ReflectClassBaseObject* target, U
 }
 FCIMPLEND
 
+FCIMPL1(INT32, COMMember::IsInstantiated, ReflectBaseObject* refThisUNSAFE)
+{
+    REFLECTBASEREF  refThis = (REFLECTBASEREF) refThisUNSAFE;
+    INT32           rv      = false;
+    HELPER_METHOD_FRAME_BEGIN_RET_1(refThis);
+
+    ReflectMethod *pRM = (ReflectMethod *)refThis->GetData();
+    _ASSERTE(pRM);
+    MethodDesc *pMeth = pRM->pMethod;
+    rv = (INT32) pMeth->HasMethodInstantiation();
+    HELPER_METHOD_FRAME_END();
+    return rv;
+}
+FCIMPLEND
+
+// This routine will return the instantiation from an instantiated method, as an array
+// of System.Type instances
+// Return an empty array if the method is not instantiated
+FCIMPL1(Object*, COMMember::GetInstantiation, ReflectBaseObject* refThisUNSAFE)
+{
+    REFLECTBASEREF  refThis = (REFLECTBASEREF) refThisUNSAFE;
+    PTRARRAYREF         refArrTypes   = NULL;
+    HELPER_METHOD_FRAME_BEGIN_RET_1(refThis);
+
+    THROWSCOMPLUSEXCEPTION();
+
+    ReflectMethod *pRM = (ReflectMethod *)refThis->GetData();
+    _ASSERTE(pRM);
+
+    MethodDesc *pMeth = pRM->pMethod;
+    _ASSERTE(pMeth != NULL);
+
+    TypeHandle* inst = pMeth->GetMethodInstantiation();
+
+    // Allocate the array
+    DWORD n = inst == NULL ? 0 : pMeth->GetNumGenericMethodArgs();
+
+    refArrTypes = (PTRARRAYREF) AllocateObjectArray(n, g_pRefUtil->GetTrueType(RC_Class));
+    GCPROTECT_BEGIN(refArrTypes);
+
+    // Create type array
+    for(DWORD i = 0; i < n; i++)
+    {
+      OBJECTREF o = inst[i].CreateClassObj();
+      refArrTypes->SetAt(i, o);
+      _ASSERTE(refArrTypes->m_Array[i]);
+    }
+
+    GCPROTECT_END();
+    HELPER_METHOD_FRAME_END();
+    return OBJECTREFToObject(refArrTypes);
+}
+FCIMPLEND
+
+
+// Instantiate
+// Given a generic method, instantiate with the type parameters given as an array argument
+// If the method is not generic, is already instantiated, or is given the wrong number of
+// parameters, then raise an exception
+FCIMPL2(Object*, COMMember::Instantiate, ReflectBaseObject* refThisUNSAFE, PTRArray* argTypesUNSAFE)
+{
+    THROWSCOMPLUSEXCEPTION();
+
+    OBJECTREF refRetVal = NULL;
+
+    struct _gc
+    {
+        REFLECTBASEREF refThis; 
+        PTRARRAYREF         argTypes;
+    } gc;
+
+    gc.refThis  = (REFLECTBASEREF) refThisUNSAFE;
+    gc.argTypes = (PTRARRAYREF)         argTypesUNSAFE;
+
+    HELPER_METHOD_FRAME_BEGIN_RET_ATTRIB_NOPOLL(Frame::FRAME_ATTR_RETURNOBJ);
+    GCPROTECT_BEGIN(gc);
+    HELPER_METHOD_POLL();
+
+    ReflectMethod* pRM = (ReflectMethod*) gc.refThis->GetData();
+    _ASSERTE(pRM);
+   
+    MethodDesc *pMeth = pRM->pMethod;
+    _ASSERTE(pMeth != NULL);
+
+    if (gc.argTypes == NULL) { 
+        COMPlusThrowArgumentNull(L"inst", L"ArgumentNull_Array");
+    }
+
+    DWORD ntypars = gc.argTypes->GetNumComponents();
+    TypeHandle *inst = (TypeHandle*) _alloca(ntypars * sizeof(TypeHandle));
+    for (DWORD i = 0; i < ntypars; i++)
+    {
+       REFLECTCLASSBASEREF type = (REFLECTCLASSBASEREF)(gc.argTypes->GetAt(i));
+       if (type == NULL) { 
+           COMPlusThrowArgumentNull(L"inst", L"ArgumentNull_ArrayElement");
+       }
+
+       ReflectClass *pType = (ReflectClass*)type->GetData();
+       inst[i] = pType->GetTypeHandle();
+       _ASSERTE(!inst[i].IsNull());
+    }
+    
+    if (!pMeth->IsGenericMethodDefinition() || ntypars != pMeth->GetNumGenericMethodArgs())
+        COMPlusThrow(kArgumentException, L"inst");
+      
+    MethodDesc *pInstMD = InstantiatedMethodDesc::CreateGenericInstantiation(pRM->declType.GetMethodTable(), pMeth, inst);
+
+    ReflectMethod *pInstRM = (ReflectMethod*) 
+      GetAppDomain()->GetReflectionHeap()->AllocMem(sizeof(ReflectMethod));
+
+    if (!pInstRM)
+        COMPlusThrowOM();
+    pInstRM->pMethod = pInstMD;
+    pInstRM->szName = pRM->szName;
+    pInstRM->dwNameCnt = pRM->dwNameCnt;
+    pInstRM->pSignature = pRM->pSignature;
+    pInstRM->attrs = pRM->attrs;
+    pInstRM->dwFlags = pRM->dwFlags;
+    pInstRM->declType = pRM->declType;
+    pInstRM->pNext = NULL;
+    pInstRM->pIgnNext = NULL;
+    GetAppDomain()->AllocateObjRefPtrsInLargeTable(1, &(pInstRM->pMethodObj));
+
+    refRetVal = pInstRM->GetMethodInfo((ReflectClass*) gc.refThis->GetReflClass());
+
+    GCPROTECT_END();
+    HELPER_METHOD_FRAME_END();
+    return OBJECTREFToObject(refRetVal);
+}
+FCIMPLEND
+
+// GetGenericMethod
+// Given an instantiated method (e.g. m<int>), return the generic method itself (e.g. m)
+// Return null if not instantiated
+FCIMPL1(Object*, COMMember::GetGenericMethod, ReflectBaseObject* refThisUNSAFE)
+{
+    REFLECTBASEREF  refThis = (REFLECTBASEREF) refThisUNSAFE;
+    OBJECTREF  refRetVal   = NULL;
+    HELPER_METHOD_FRAME_BEGIN_RET_1(refThis);
+
+    ReflectMethod* pRM = (ReflectMethod*) refThis->GetData();
+    _ASSERTE(pRM);
+   
+    MethodDesc *pMeth = pRM->pMethod;
+    _ASSERTE(pMeth != NULL);
+
+    if (pMeth->IsGenericMethodDefinition()) 
+    {
+      MethodDesc *pGenericMeth = ((InstantiatedMethodDesc*) pMeth)->StripClassAndMethodInstantiation();
+      _ASSERTE(pGenericMeth != NULL);
+
+      refRetVal = g_pInvokeUtil->GetMethodInfo(pGenericMeth, pRM->declType);
+    }
+
+    HELPER_METHOD_FRAME_END();
+    return OBJECTREFToObject(refRetVal);
+}
+FCIMPLEND
+
+
+FCIMPL1(INT32, COMMember::IsGeneric, ReflectBaseObject* refThisUNSAFE)
+{
+    REFLECTBASEREF  refThis = (REFLECTBASEREF) refThisUNSAFE;
+    INT32           rv      = false;
+    HELPER_METHOD_FRAME_BEGIN_RET_1(refThis);
+
+    ReflectMethod *pRM = (ReflectMethod *)refThis->GetData();
+    _ASSERTE(pRM);
+    MethodDesc *pMeth = pRM->pMethod;
+
+    rv = pMeth->IsGenericMethodDefinition();
+    HELPER_METHOD_FRAME_END();
+    return rv;
+}
+FCIMPLEND
+
+FCIMPL1(INT32, COMMember::Arity, ReflectBaseObject* refThisUNSAFE)
+{
+    REFLECTBASEREF  refThis = (REFLECTBASEREF) refThisUNSAFE;
+    INT32           rv      = 0;
+    HELPER_METHOD_FRAME_BEGIN_RET_1(refThis);
+
+    ReflectMethod *pRM = (ReflectMethod *)refThis->GetData();
+    _ASSERTE(pRM);
+    MethodDesc *pMeth = pRM->pMethod;
+
+    if (!pMeth->HasMethodInstantiation())
+      rv = pMeth->GetNumGenericMethodArgs();
+
+    HELPER_METHOD_FRAME_END();
+    return rv;
+}
+FCIMPLEND
+
+
 FCIMPL1(INT32, COMMember::IsOverloaded, ReflectBaseObject* refThisUNSAFE)
 {
     REFLECTBASEREF  refThis = (REFLECTBASEREF) refThisUNSAFE;
@@ -4095,5 +4238,6 @@ FCIMPL1(INT32, COMMember::HasLinktimeDemand, ReflectBaseObject* refThisUNSAFE)
     return rv;
 }
 FCIMPLEND
+
 
 

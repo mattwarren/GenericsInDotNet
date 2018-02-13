@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -103,6 +108,7 @@ void TESTS::TestEmitter()
     meth3 = compiler->symmgr.CreateMethod(NULL, cls);
     meth3->retType = compiler->symmgr.GetPredefType(PT_INT);
     meth3->explicitImpl = imeth;
+    meth3->explicitImplMethodInType = intf;
     meth3->access = ACC_PUBLIC;
     meth3->isMetadataVirtual = true;
     prop = compiler->symmgr.CreateProperty(compiler->namemgr->AddString(L"MyProp"), cls);
@@ -138,6 +144,9 @@ void TESTS::TestEmitter()
     compiler->emitter.EmitAggregateDef(intf);
     compiler->emitter.EmitAggregateDef(cls);
     compiler->emitter.EmitAggregateDef(enm);
+    compiler->emitter.EmitAggregateBases(intf);
+    compiler->emitter.EmitAggregateBases(cls);
+    compiler->emitter.EmitAggregateBases(enm);
     compiler->emitter.EmitAggregateSpecialFields(enm);
 
     METHINFO methinfo;

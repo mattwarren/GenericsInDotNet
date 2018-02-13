@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -185,6 +190,18 @@ public:
         IUnknown    *pHandler);             // [IN] An object to receive to receive error notification.
 
     STDMETHODIMP MergeEnd();                // S_OK or error.
+
+    STDMETHODIMP SetGenericPars(          // S_OK or error.
+        mdToken     tk,                     // [IN] The type def or method def whose type parameters are to be defined
+        ULONG       ulNum,                  // [IN] Number of type parameters
+	mdToken     rtkConstraints[],       // [IN] Bounds on the type parameters
+        LPCWSTR     wzNames[]);             // [IN] Names of the type parameters; elements can be NULL
+
+    STDMETHODIMP DefineMethodSpec( // S_OK or error
+        mdToken     tkImport,               // [IN] MethodDef or MemberRef
+        PCCOR_SIGNATURE pvSigBlob,          // [IN] point to a blob value of COM+ signature
+        ULONG       cbSigBlob,              // [IN] count of bytes in the signature blob
+        mdMethodSpec *pmi);        // [OUT] method instantiation token
 
     STDMETHODIMP DefineTypeDef(             // S_OK or error.
         LPCWSTR     szTypeDef,              // [IN] Name of TypeDef
@@ -878,6 +895,30 @@ public:
         mdToken     pd,                     // [IN] Type, Field, or Method token.
         int         *pbGlobal);             // [OUT] Put 1 if global, 0 otherwise.
 
+    STDMETHODIMP EnumGenericPars(          // S_OK or error.
+	HCORENUM *phEnum,                   // [IN] The enumerator.
+	mdToken tkOwner,                    // [IN] TypeDef or MethodDef of owner.
+        mdGenericPar rTokens[],            // [OUT] Buffer in which to put the GenericPar tokens.
+        ULONG cTokens,                      // [IN] Size of the rTokens buffer.
+        ULONG *pcTokens);                   // [OUT] Actual number of tokens delivered.
+
+    STDMETHODIMP GetGenericParProps(
+        mdGenericPar rd,                   // [IN] The type parameter
+        ULONG* pulSequence,                 // [OUT] Parameter sequence number
+        DWORD* pdwAttr,                     // [OUT] Type parameter flags (for future use)       
+        mdToken *ptOwner,                   // [OUT] The owner (TypeDef or MethodDef) 
+	mdToken *ptKind,                    // [OUT] The kind (TypeDef/Ref/Spec, for future use)
+	mdToken *ptConstraint,              // [OUT] The constraint (TypeDef/Ref/Spec)
+        LPWSTR wzName,                      // [OUT] The name
+        ULONG cchName,                      // [IN] Size of name buffer
+        ULONG *pchName);                    // [OUT] Actual size of name
+
+    STDMETHOD(GetMethodSpecProps)(
+        mdMethodSpec mi,                    // [IN] The method instantiation
+        mdToken *tkParent,                  // [OUT] MethodDef or MemberRef
+        PCCOR_SIGNATURE *ppvSigBlob,        // [OUT] point to the blob value of meta data   
+        ULONG       *pcbSigBlob);           // [OUT] actual size of signature blob  
+
 //*****************************************************************************
 // IMetaDataAssemblyEmit
 //*****************************************************************************
@@ -1380,6 +1421,15 @@ protected:
     HRESULT _SetImplements(                 // S_OK or error.
         mdToken     rTk[],                  // Array of TypeRef or TypeDef tokens for implemented interfaces.
         mdTypeDef   td,                     // Implementing TypeDef.
+        BOOL        bClear);                // Specifies whether to clear the existing records.
+
+    // Creates and sets rows in the GenericPar table.  Optionally clear
+    // pre-existing records for the owning type/method.
+    HRESULT _SetGenericPars(               // S_OK or error.
+        ULONG       ulNum,                  // Number of type parameters
+	mdToken     rtkConstraints[],       // [IN] Bounds on the type parameters
+        LPCWSTR     wzNames[],              // Array of names for parameters.
+        mdToken     tk,                     // TypeDef/MethodDef of generic class or method.
         BOOL        bClear);                // Specifies whether to clear the existing records.
 
     // This routine eliminates duplicates from the given list of InterfaceImpl tokens

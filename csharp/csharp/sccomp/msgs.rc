@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -686,6 +691,8 @@ BEGIN
     IDS_SK_PROPERTY         "property"
     IDS_SK_VAIRABLE         "variable"
     IDS_SK_EVENT            "event"
+    IDS_SK_TYVAR            "type parameter"
+    IDS_SK_GCLASS           "generic class"
 END
 
 STRINGTABLE DISCARDABLE 
@@ -716,6 +723,15 @@ END
 STRINGTABLE DISCARDABLE 
 BEGIN
     IDS_NoNewAbstract       "Cannot create an instance of the abstract class or interface '%1!ls!'"
+    IDS_NoNewTyvar          "Cannot create an instance of the variable type '%1!ls!'"
+    IDS_BadTypeParameter    "The type '%1!ls!' may not be used as a type parameter"
+    IDS_TooFewTypeParams    "The generic type or method '%1!ls!' is used here with too few type parameters"
+    IDS_TooManyTypeParams   "The generic type or method '%1!ls!' is used here with too many type parameters"
+    IDS_TypeParams          "The non-generic type or method '%1!ls!' is used here with type parameters"
+    IDS_GenericStaticField  "The static field '%1!ls!' cannot have a generic type"
+    IDS_GenericStaticMethod  "The static method or property '%1!ls!' uses a class type parameter in its signature.  Apart from operators, statics may not use type parameters belonging to their class, though they may be declared generic themselves."
+    IDS_TyvarNotInScope      "The class type variable '%1!ls!' is not in scope within this static declaration"
+    IDS_GenericConstraintNotSatisfied "The type '%3!ls!' must be convertible to type '%2!ls!' in order to use it as a parameter in the constructed type or method call '%1!ls!'"
     IDS_ConstValueRequired  "A const field requires a value to be provided"
     IDS_CircularBase        "Circular base class definition between '%1!ls!' and '%2!ls!'"
     IDS_BadDelegateConstructor 
@@ -1075,6 +1091,14 @@ BEGIN
     IDS_VolatileStruct      "'%1!ls!': a volatile field can not be of the type '%2!ls!'"
     IDS_VolatileAndReadonly "'%1!ls!': a field can not be both volatile and readonly"
     IDS_InternalVirtual     "Other languages may permit the internal virtual member '%1!ls!' to be overridden"
+    IDS_AbstractField       "The modifier 'abstract' is not valid on fields. Try using a property instead"
+    IDS_BogusExplicitImpl   "'%1!ls!' cannot implement '%2!ls!' because it uses a type not supported by the language"
+    IDS_ExplicitMethodImplAccessor
+                            "'%1!ls!' explicit method implementation cannot implement '%2!ls!' because it is an accessor"
+    IDS_AccessorImplementingMethod
+                            "Accessor '%1!ls!' cannot implement interface member '%2!ls!' for type '%3!ls!'. Use an explicit interface implementation."
+    IDS_ConditionalWithOutParam
+                            "Conditional member '%1!ls!' cannot have an out parameter"
 END
 
 #endif    // English (U.S.) resources

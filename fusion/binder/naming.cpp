@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -432,7 +437,7 @@ CAssemblyName::SetProperty(DWORD PropertyId,
     else if (PropertyId == ASM_NAME_CULTURE) {
         if (pvProperty && !lstrcmpiW((LPWSTR)pvProperty, L"neutral")) {
             pvProperty = (void *)L"";
-            cbProperty = sizeof(L"");
+            cbProperty = (wcslen(L"") + 1) * sizeof(WCHAR);
         }
     }
 
@@ -1986,7 +1991,8 @@ HRESULT CAssemblyName::DownloadAppCfg(IApplicationContext *pAppCtx,
 
             // Indicate that we've already searched for app.cfg
 
-            pAppCtx->Set(ACTAG_APP_CFG_DOWNLOAD_ATTEMPTED, (void *)L"", sizeof(L""), 0);
+            pAppCtx->Set(ACTAG_APP_CFG_DOWNLOAD_ATTEMPTED, (void *)L"",
+                         (wcslen(L"") + 1) * sizeof(WCHAR), 0);
 
             dwFileAttr = GetFileAttributes(wszAppCfg);
             if (dwFileAttr == (DWORD) -1 || (dwFileAttr & FILE_ATTRIBUTE_DIRECTORY)) {

@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -34,12 +39,9 @@
 #include <sighelper.h>
 //#include "asmparse.h"
 #include "binstr.h"
+#include "typar.hpp"
 
 #include "asmenum.h"
-
-
-// ELEMENT_TYPE_NAME has been removed from CORHDR.H, but the assembler uses it internally.                                  
-#define    ELEMENT_TYPE_NAME    (ELEMENT_TYPE_MAX + 2)     // class by name NAME <count> <chars>
 
 #define OUTPUT_BUFFER_SIZE          8192    // initial size of asm code for a single method
 #define OUTPUT_BUFFER_INCREMENT     1024    // size of code buffer increment when it's full
@@ -57,8 +59,14 @@
 #define GLOBAL_DATA_INCREMENT       1024    // size of global data buffer increment when it's full
 #define MAX_METHODS                 1024    // unused
 #define MAX_INPUT_LINE_LEN          1024    // unused
-
+#define MAX_TYPAR                       8
 #define BASE_OBJECT_CLASSNAME   "System.Object"
+
+// Fully-qualified class name separators:
+#define NESTING_SEP     0xF8
+
+extern WCHAR   wzUniBuf[]; // Unicode conversion global buffer (assem.cpp)
+extern DWORD   dwUniBuf;   // Size of Unicode global buffer (8196)
 
 class Class;
 class Method;
@@ -117,6 +125,15 @@ public:
             delete [] m_Arr;
         }
     };
+    void RESET() {
+        if(m_Arr) {
+            for(ULONG i=0; i < m_ulCount; i++) {
+                if(m_Arr[i+m_ulOffset]) delete m_Arr[i+m_ulOffset];
+            }
+            m_ulCount = 0;
+            m_ulOffset= 0;
+        }
+    };
     void PUSH(T *item) 
     {
 		if(item)
@@ -156,20 +173,130 @@ public:
         {
             ret = m_Arr[m_ulOffset++];
             m_ulCount--;
-            if(m_ulOffset >= 1024)
-            {
-                memcpy(m_Arr,&m_Arr[m_ulOffset],m_ulCount*sizeof(T*));
-                m_ulOffset = 0;
-            }
         }
         return ret;
     };
-    T* PEEK(ULONG idx)
+    T* PEEK(ULONG idx) { return (idx < m_ulCount) ? m_Arr[m_ulOffset+idx] : NULL; };
+private:
+    T** m_Arr;
+    ULONG       m_ulCount;
+    ULONG       m_ulOffset;
+    ULONG       m_ulArrLen;
+};
+template <class T>
+class SORTEDARRAY
+{
+public:
+    SORTEDARRAY() { m_Arr = NULL; m_ulArrLen = 0; m_ulCount = 0; m_ulOffset = 0; };
+    ~SORTEDARRAY() {
+        if(m_Arr) {
+            for(ULONG i=0; i < m_ulCount; i++) {
+                if(m_Arr[i+m_ulOffset]) delete m_Arr[i+m_ulOffset];
+            }
+            delete [] m_Arr;
+        }
+    };
+    void RESET() {
+        if(m_Arr) {
+            for(ULONG i=0; i < m_ulCount; i++) {
+                if(m_Arr[i+m_ulOffset]) delete m_Arr[i+m_ulOffset];
+            }
+            m_ulCount = 0;
+            m_ulOffset= 0;
+        }
+    };
+    void PUSH(T *item) 
+    {
+		if(item)
+		{
+			if(m_ulCount+m_ulOffset >= m_ulArrLen)
+			{
+				if(m_ulOffset)
+				{
+					memcpy(m_Arr,&m_Arr[m_ulOffset],m_ulCount*sizeof(T*));
+					m_ulOffset = 0;
+				}
+				else
+				{
+					m_ulArrLen += 1024;
+					T** tmp = new T*[m_ulArrLen];
+					if(tmp)
+					{
+						if(m_Arr)
+						{
+							memcpy(tmp,m_Arr,m_ulCount*sizeof(T*));
+							delete [] m_Arr;
+						}
+						m_Arr = tmp;
+					}
+					else fprintf(stderr,"\nOut of memory!\n");
+				}
+			}
+            if(m_ulCount)
+            {
+                // find  1st arr.element > item
+                T** low = &m_Arr[m_ulOffset];
+                T** high = &m_Arr[m_ulOffset+m_ulCount-1];
+                T** mid;
+            
+                if(item->ComparedTo(*high) > 0) mid = high+1;
+                else if(item->ComparedTo(*low) < 0) mid = low;
+                else for(;;) 
+                {
+                    mid = &low[(high - low) >> 1];
+            
+                    int cmp = item->ComparedTo(*mid);
+            
+                    if (mid == low)
+                    {
+                        if(cmp > 0) mid++;
+                        break;
+                    }
+            
+                    if (cmp > 0) low = mid;
+                    else        high = mid;
+                }
+
+                /////////////////////////////////////////////
+                 memmove(mid+1,mid,(BYTE*)&m_Arr[m_ulOffset+m_ulCount]-(BYTE*)mid);
+                *mid = item;
+            }
+			else m_Arr[m_ulOffset+m_ulCount] = item;
+			m_ulCount++;
+		}
+    };
+    ULONG COUNT() { return m_ulCount; };
+    T* POP() 
     {
         T* ret = NULL;
-        if(idx < m_ulCount) ret = m_Arr[m_ulOffset+idx];
+        if(m_ulCount)
+        {
+            ret = m_Arr[m_ulOffset++];
+            m_ulCount--;
+        }
         return ret;
     };
+    T* PEEK(ULONG idx) { return (idx < m_ulCount) ? m_Arr[m_ulOffset+idx] : NULL; };
+    T* FIND(T* item)
+    {
+        if(m_ulCount)
+        {
+            T** low = &m_Arr[m_ulOffset];
+            T** high = &m_Arr[m_ulOffset+m_ulCount-1];
+            T** mid;
+            if(item->ComparedTo(*high) == 0) return(*high);
+            for(;;) 
+            {
+                mid = &low[(high - low) >> 1];
+                int cmp = item->ComparedTo(*mid);
+                if (cmp == 0) return(*mid);
+                if (mid == low)  break;
+                if (cmp > 0) low = mid;
+                else        high = mid;
+            }
+        }
+        return NULL;
+    }
 private:
     T** m_Arr;
     ULONG       m_ulCount;
@@ -179,25 +306,36 @@ private:
 
 struct MemberRefDescriptor
 {
-    mdTypeDef           m_tdClass;
+    mdToken             m_tdClass;
     Class*              m_pClass;
     char*               m_szName;
+    DWORD               m_dwName;
     BinStr*             m_pSigBinStr;
-    size_t	            m_ulOffset;
+    mdToken             m_tkResolved;
 };
 typedef FIFO<MemberRefDescriptor> MemberRefDList;
 
+
 struct MethodImplDescriptor
 {
-    BinStr*             m_pbsImplementedTypeSpec;
-    char*               m_szImplementedName;
-    BinStr*             m_pbsSig;
-    BinStr*             m_pbsImplementingTypeSpec;
-    char*               m_szImplementingName;
+    mdToken             m_tkImplementedMethod;
     mdToken             m_tkImplementingMethod;
     mdToken             m_tkDefiningClass;
 };
 typedef FIFO<MethodImplDescriptor> MethodImplDList;
+
+struct LocalMemberRefFixup
+{
+    mdToken tk;
+    size_t  offset;
+    LocalMemberRefFixup(mdToken TK, size_t Offset)
+    {
+        tk = TK;
+        offset = Offset;
+    }
+};
+typedef FIFO<LocalMemberRefFixup> LocalMemberRefFixupList;
+
 /**************************************************************************/
 #include "method.hpp"
 #include "iceefilegen.h"
@@ -218,73 +356,74 @@ typedef enum
 class Label
 {
 public:
-    char    m_szName[MAX_LABEL_SIZE];
+    char*   m_szName;
     DWORD   m_PC;
 
     Label(char *pszName, DWORD PC)
     {
-        _ASSERTE(strlen(pszName) < MAX_LABEL_SIZE);
         m_PC    = PC;
-        strcpy(m_szName, pszName);
-    }
+        m_szName = pszName;
+    };
+    ~Label(){ delete [] m_szName; };
+    int ComparedTo(Label* L) { return strcmp(m_szName,L->m_szName); };
 };
-typedef FIFO<Label> LabelList;
+typedef SORTEDARRAY<Label> LabelList;
 
 class GlobalLabel
 {
 public:
-    char            m_szName[MAX_LABEL_SIZE];
+    char*           m_szName;
     DWORD           m_GlobalOffset; 
     HCEESECTION     m_Section;
 
     GlobalLabel(char *pszName, DWORD GlobalOffset, HCEESECTION section)
     {
-        _ASSERTE(strlen(pszName) < MAX_LABEL_SIZE);
         m_GlobalOffset  = GlobalOffset;
         m_Section       = section;
-        strcpy(m_szName, pszName);
+        m_szName = pszName;
     }
+    ~GlobalLabel(){ delete [] m_szName; }
+    int ComparedTo(GlobalLabel* L) { return strcmp(m_szName,L->m_szName); };
 };
-typedef FIFO<GlobalLabel> GlobalLabelList;
+typedef SORTEDARRAY<GlobalLabel> GlobalLabelList;
 
 
 class Fixup
 {
 public:
-    char    m_szLabel[MAX_LABEL_SIZE]; // destination label
+    char*   m_szLabel;
     BYTE *  m_pBytes; // where to make the fixup
     DWORD   m_RelativeToPC;
     BYTE    m_FixupSize;
 
     Fixup(char *pszName, BYTE *pBytes, DWORD RelativeToPC, BYTE FixupSize)
     {
-        _ASSERTE(strlen(pszName) < MAX_LABEL_SIZE);
         m_pBytes        = pBytes;
         m_RelativeToPC  = RelativeToPC;
         m_FixupSize     = FixupSize;
-
-        strcpy(m_szLabel, pszName);
+        m_szLabel = pszName;
     }
+    ~Fixup(){ delete [] m_szLabel; }
 };
 typedef FIFO<Fixup> FixupList;
 
 class GlobalFixup
 {
 public:
-    char    m_szLabel[MAX_LABEL_SIZE];  // destination label
+    char*   m_szLabel;
     BYTE *  m_pReference;               // The place to fix up
 
     GlobalFixup(char *pszName, BYTE* pReference)
     {
-        _ASSERTE(strlen(pszName) < MAX_LABEL_SIZE);
         m_pReference   = pReference;
-        strcpy(m_szLabel, pszName);
+        m_szLabel = pszName;
     }
+    ~GlobalFixup(){ delete [] m_szLabel; }
 };
 typedef FIFO<GlobalFixup> GlobalFixupList;
 
 
-typedef enum { ilRVA, ilOffset, ilGlobal } ILFixupType;
+typedef enum { ilRVA, ilToken, ilGlobal} ILFixupType;
 
 class ILFixup
 {
@@ -323,7 +462,7 @@ public:
 
 struct Labels {
     Labels(char* aLabel, Labels* aNext, bool aIsLabel) : Label(aLabel), Next(aNext), isLabel(aIsLabel) {}
-    ~Labels() { if(isLabel) delete [] Label; delete Next; }
+    ~Labels() { if(isLabel && Label) delete [] Label; delete Next; }
         
     char*       Label;
     Labels*     Next;
@@ -350,27 +489,15 @@ typedef LIFO<char> StringStack;
 typedef LIFO<SEH_Descriptor> SEHD_Stack;
 
 typedef FIFO<Method> MethodList;
+typedef FIFO<mdToken> TokenList;
 /**************************************************************************/
-/* The method, field, event and property descriptor structures            */
-struct MethodDescriptor
-{
-    mdTypeDef       m_tdClass;
-    char*           m_szName;
-    char*           m_szClassName;
-    COR_SIGNATURE*  m_pSig;
-    DWORD           m_dwCSig;
-    mdMethodDef     m_mdMethodTok;
-    WORD            m_wVTEntry;
-    WORD            m_wVTSlot;
-	DWORD			m_dwExportOrdinal;
-	char*			m_szExportAlias;
-};
-typedef FIFO<MethodDescriptor> MethodDList;
+/* The field, event and property descriptor structures            */
 
 struct FieldDescriptor
 {
     mdTypeDef       m_tdClass;
     char*           m_szName;
+    DWORD           m_dwName;
     mdFieldDef      m_fdFieldTok;
     ULONG           m_ulOffset;
     char*           m_rvaLabel;         // if field has RVA associated with it, label for it goes here. 
@@ -395,10 +522,10 @@ struct EventDescriptor
     char*               m_szName;
     DWORD               m_dwAttr;
     mdToken             m_tkEventType;
-    MethodDescriptor*   m_pmdAddOn;
-    MethodDescriptor*   m_pmdRemoveOn;
-    MethodDescriptor*   m_pmdFire;
-    MethodDList         m_mdlOthers;
+    mdToken             m_tkAddOn;
+    mdToken             m_tkRemoveOn;
+    mdToken             m_tkFire;
+    TokenList           m_tklOthers;
     mdEvent             m_edEventTok;
     CustomDescrList     m_CustomDescrList;
 };
@@ -414,9 +541,9 @@ struct PropDescriptor
     DWORD               m_dwCPlusTypeFlag;
     PVOID               m_pValue;
 	DWORD				m_cbValue;
-    MethodDescriptor*   m_pmdSet;
-    MethodDescriptor*   m_pmdGet;
-    MethodDList         m_mdlOthers;
+    mdToken             m_tkSet;
+    mdToken             m_tkGet;
+    TokenList           m_tklOthers;
     mdProperty          m_pdPropTok;
     CustomDescrList     m_CustomDescrList;
 };
@@ -424,7 +551,9 @@ typedef FIFO<PropDescriptor> PropDList;
 
 struct ImportDescriptor
 {
-    char*   szDllName;
+//    char*   szDllName;
+    char   szDllName[MAX_MEMBER_NAME_LENGTH];
+    DWORD  dwDllName;
     mdModuleRef mrDll;
 };
 typedef FIFO<ImportDescriptor> ImportList;
@@ -444,7 +573,7 @@ typedef FIFO<Class> ClassList;
 class PermissionDecl
 {
 public:
-    PermissionDecl(CorDeclSecurity action, BinStr *type, NVPair *pairs)
+    PermissionDecl(CorDeclSecurity action, mdToken type, NVPair *pairs)
     {
         m_Action = action;
         m_TypeSpec = type;
@@ -454,12 +583,11 @@ public:
 
     ~PermissionDecl()
     {
-        delete m_TypeSpec;
         delete [] m_Blob;
     }
 
     CorDeclSecurity     m_Action;
-    BinStr             *m_TypeSpec;
+    mdToken             m_TypeSpec;
     BYTE               *m_Blob;
     long                m_BlobLength;
     PermissionDecl     *m_Next;
@@ -497,8 +625,6 @@ private:
                 break;
             case SERIALIZATION_TYPE_ENUM:
                 length = (int)strlen((const char *)&pVal[1]);
-                if (strchr((const char *)&pVal[1], '^'))
-                    length++;
                 bytes += CPackedLen::Size((ULONG)length) + length;
                 bytes += 4;
                 break;
@@ -525,7 +651,6 @@ private:
         for (i = 0, pBlob = &m_Blob[8], p = pairs; i < count; i++, p = p->Next()) {
             BYTE *pVal = (BYTE*)p->Value()->ptr();
             char *szType;
-            char *szAssembly;
 
             // Set field/property setter type.
             *pBlob++ = SERIALIZATION_TYPE_PROPERTY;
@@ -534,22 +659,10 @@ private:
             // name).
             *pBlob++ = pVal[0];
             if (pVal[0] == SERIALIZATION_TYPE_ENUM) {
-                // If the name is assembly qualified, turn it into the standard
-                // format (type name ',' assembly ref).
-                if ((szType = strchr((const char *)&pVal[1], '^'))) {
-                    szType++;
-                    szAssembly = (char *)&pVal[1];
-                    length = (int)strlen(szAssembly) + 1;
-                    pBlob = (BYTE*)CPackedLen::PutLength(pBlob, length);
-                    strcpy((char *)pBlob, szType);
-                    strcat((char *)pBlob, ", ");
-                    strncat((char *)pBlob, szAssembly, szType - szAssembly - 1);
-                } else {
-                    szType = (char *)&pVal[1];
-                    length = (int)strlen(szType);
-                    pBlob = (BYTE*)CPackedLen::PutLength(pBlob, length);
-                    strcpy((char *)pBlob, szType);
-                }
+                szType = (char *)&pVal[1];
+                length = (int)strlen(szType);
+                pBlob = (BYTE*)CPackedLen::PutLength(pBlob, length);
+                strcpy((char *)pBlob, szType);
                 pBlob += length;
             }
 
@@ -642,22 +755,14 @@ struct	EATEntry
 };
 typedef FIFO<EATEntry> EATList;
 
-struct LocalTypeRefDescr
+struct DocWriter
 {
-    char*   m_szFullName;
-    mdToken m_tok;
-    LocalTypeRefDescr(char* szName) 
-    { 
-        if(szName && *szName) 
-        { 
-            if((m_szFullName = new char[strlen(szName)+1])) strcpy(m_szFullName,szName);
-        }
-        else m_szFullName = NULL;
-    };
-    ~LocalTypeRefDescr() { if(m_szFullName) delete m_szFullName; };
+    char* Name;
+    ISymUnmanagedDocumentWriter* pWriter;
+    DocWriter() { Name=NULL; pWriter=NULL; };
+    ~DocWriter() { delete [] Name; };
 };
-typedef FIFO<LocalTypeRefDescr> LocalTypeRefDList;
-
+typedef FIFO<DocWriter> DocWriterList;
 /**************************************************************************/
 /* The assembler object does all the code generation (dealing with meta-data)
    writing a PE file etc etc. But does NOT deal with syntax (that is what
@@ -669,6 +774,31 @@ struct Instr
     int opcode;
     unsigned linenum;
 	unsigned column;
+    unsigned linenum_end;
+	unsigned column_end;
+    unsigned pc;
+    ISymUnmanagedDocumentWriter* pWriter;
+};
+#define INSTR_POOL_SIZE 16
+
+struct Clockwork
+{
+    DWORD  cBegin;
+    DWORD  cEnd;
+    DWORD  cParsBegin;
+    DWORD  cParsEnd;
+    DWORD  cMDInitBegin;
+    DWORD  cMDInitEnd;
+    DWORD  cMDEmitBegin;
+    DWORD  cMDEmitEnd;
+    DWORD  cMDEmit1;
+    DWORD  cMDEmit2;
+    DWORD  cMDEmit3;
+    DWORD  cMDEmit4;
+    DWORD  cRef2DefBegin;
+    DWORD  cRef2DefEnd;
+    DWORD  cFilegenBegin;
+    DWORD  cFilegenEnd;
 };
 
 class Assembler {
@@ -696,11 +826,16 @@ public:
     BOOL    m_fInitialisedMetaData;
     BOOL    m_fAutoInheritFromObject;
     BOOL    m_fReportProgress;
+    BOOL    m_fIsMscorlib;
+    mdToken m_tkSysObject;
+    mdToken m_tkSysString;
+    mdToken m_tkSysValue;
+    mdToken m_tkSysEnum;
 
     IMetaDataDispenser *m_pDisp;
-    IMetaDataEmit *m_pEmitter;
-    IMetaDataHelper *m_pHelper;
-    ICeeFileGen* m_pCeeFileGen;
+    IMetaDataEmit      *m_pEmitter;
+    ICeeFileGen        *m_pCeeFileGen;
+    IMetaDataImport    *m_pImporter;			// Import interface.
     HCEEFILE m_pCeeFile;
     HCEESECTION m_pGlobalDataSection;
     HCEESECTION m_pILSection;
@@ -715,13 +850,16 @@ public:
 	unsigned	m_ulFullNSLen;
 
     StringStack m_NSstack;
+    mdTypeSpec      m_crExtends;
 
-    char    m_szExtendsClause[MAX_CLASSNAME_LENGTH];
+    //    char    m_szExtendsClause[MAX_CLASSNAME_LENGTH];
 
-    mdTypeRef   *m_crImplList;
+    mdToken   *m_crImplList;
     int     m_nImplList;
     int     m_nImplListSize;
-
+    
+    TyParList       *m_TyParList;
+    
     Method *m_pCurMethod;
     Class   *m_pCurClass;
     ClassStack m_ClassStack; // for nested classes
@@ -738,9 +876,19 @@ public:
     BOOL    m_fHaveFieldsWithRvas;
 
     state_t m_State;
+
+    Instr   m_Instr[INSTR_POOL_SIZE]; // 16
+    inline  Instr* GetInstr() 
+    {
+        int i=0;
+        for(; (i<INSTR_POOL_SIZE)&&(m_Instr[i].opcode != -1); i++);
+        _ASSERTE(i<INSTR_POOL_SIZE);
+        return &m_Instr[i];
+    }
     //--------------------------------------------------------------------------------
     void    ClearImplList(void);
-    void    AddToImplList(char *name);
+    void    AddToImplList(mdToken);
+    void    ClearBoundList(void);
     //--------------------------------------------------------------------------------
     BOOL Init();
     void ProcessLabel(char *pszName);
@@ -761,24 +909,27 @@ public:
 	{ m_pCurSection = m_pTLSSection; m_dwComImageFlags &= ~COMIMAGE_FLAGS_ILONLY; m_dwComImageFlags |= COMIMAGE_FLAGS_32BITREQUIRED;}
     void SetDataSection()       { m_pCurSection = m_pGlobalDataSection; }
     BOOL EmitMethod(Method *pMethod);
-    BOOL AddClass(Class *pClass, Class *pEnclosingClass);
+    BOOL EmitMethodBody(Method* pMethod);
+    BOOL EmitClass(Class *pClass);
     HRESULT CreatePEFile(WCHAR *pwzOutputFilename);
     HRESULT CreateTLSDirectory();
     HRESULT CreateDebugDirectory();
     HRESULT InitMetaData();
-    Class *FindClass(const char *pszFQN);
+    Class *FindCreateClass(char *pszFQN);
     BOOL EmitFieldRef(char *pszArg, int opcode);
     BOOL EmitSwitchData(char *pszArg);
-    mdToken ResolveClassRef(const char *pszClassName, Class** ppClass);
-    BOOL ResolveTypeSpec(BinStr* typeSpec, mdTypeRef *pcr, Class** ppClass);
-    BOOL ResolveTypeSpecToRef(BinStr* typeSpec, mdTypeRef *pcr);
+    mdToken ResolveClassRef(mdToken tkResScope, char *pszClassName, Class** ppClass);
+    mdToken ResolveTypeSpec(BinStr* typeSpec);
+    mdToken GetAsmRef(char* szName);
+    mdToken GetModRef(char* szName);
+    char* ReflectionNotation(mdToken tk);
     HRESULT ConvLocalSig(char* localsSig, CQuickBytes* corSig, DWORD* corSigLen, BYTE*& localTypes);
     DWORD GetCurrentILSectionOffset();
     BOOL EmitCALLISig(char *p);
     void AddException(DWORD pcStart, DWORD pcEnd, DWORD pcHandler, DWORD pcHandlerTo, mdTypeRef crException, BOOL isFilter, BOOL isFault, BOOL isFinally);
     state_t CheckLocalTypeConsistancy(int instr, unsigned arg);
     state_t AddGlobalLabel(char *pszName, HCEESECTION section);
-    void DoDeferredILFixups(ULONG OffsetInFile);
+    void DoDeferredILFixups(Method* pMethod);
     void AddDeferredILFixup(ILFixupType Kind);
     void AddDeferredILFixup(ILFixupType Kind, GlobalFixup *GFixup);
     void SetDLL(BOOL);
@@ -792,9 +943,9 @@ public:
 
     void StartNameSpace(char* name);
     void EndNameSpace();
-    void StartClass(char* name, DWORD attr);
+    void StartClass(char* name, DWORD attr, TyParList *typars);
     void EndClass();
-    void StartMethod(char* name, BinStr* sig, CorMethodAttr flags, BinStr* retMarshal, DWORD retAttr);
+    void StartMethod(char* name, BinStr* sig, CorMethodAttr flags, BinStr* retMarshal, DWORD retAttr, TyParList *typars = NULL);
     void EndMethod();
 
     void AddField(char* name, BinStr* sig, CorFieldAttr flags, char* rvaLabel, BinStr* pVal, ULONG ulOffset);
@@ -817,8 +968,9 @@ public:
     void EmitInstrR(Instr* instr, double* val);
     void EmitInstrBrOffset(Instr* instr, int offset);
     void EmitInstrBrTarget(Instr* instr, char* label);
-    mdToken MakeMemberRef(BinStr* typeSpec, char* name, BinStr* sig, unsigned opcode_len);
-    mdToken MakeTypeRef(BinStr* typeSpec);
+    mdToken MakeMemberRef(mdToken typeSpec, char* name, BinStr* sig, unsigned opcode_len);
+    mdToken MakeMethodSpec(mdToken tkParent, BinStr* sig, unsigned opcode_len);
+    mdToken MakeTypeRef(mdToken tkResScope, char* szFummName);
     void EmitInstrStringLiteral(Instr* instr, BinStr* literal, BOOL ConvertToUnicode);
     void EmitInstrSig(Instr* instr, BinStr* sig);
     void EmitInstrRVA(Instr* instr, char* label, bool islabel);
@@ -836,7 +988,8 @@ public:
 
     ErrorReporter* report;
 
-	BOOL EmitMembers(Class* pClass);
+	BOOL EmitFieldsMethods(Class* pClass);
+	BOOL EmitEventsProps(Class* pClass);
 
     // named args/vars paraphernalia:
 public:
@@ -844,18 +997,19 @@ public:
     {
         if(pbSig && (*(pbSig->ptr()) == ELEMENT_TYPE_VOID))
             report->error("Illegal use of type 'void'\n");
-        if(m_firstArgName)
+        if(m_lastArgName)
         {
-            ARG_NAME_LIST *pArgList=m_firstArgName;
-            int i;
-            for(i=1; pArgList->pNext; pArgList = pArgList->pNext,i++) ;
-            pArgList->pNext = new ARG_NAME_LIST(i,szNewName,pbSig,pbMarsh,dwAttr);
+            m_lastArgName->pNext = new ARG_NAME_LIST(m_lastArgName->nNum+1,szNewName,pbSig,pbMarsh,dwAttr);
+            m_lastArgName = m_lastArgName->pNext;
         }
-        else 
-            m_firstArgName = new ARG_NAME_LIST(0,szNewName,pbSig,pbMarsh,dwAttr);
+        else
+        {
+            m_lastArgName = new ARG_NAME_LIST(0,szNewName,pbSig,pbMarsh,dwAttr);
+            m_firstArgName = m_lastArgName;
+        }
     };
-    ARG_NAME_LIST *getArgNameList(void) 
-    { ARG_NAME_LIST *pRet = m_firstArgName; m_firstArgName=NULL; return pRet;};
+    ARG_NAME_LIST *getArgNameList(void)
+    { ARG_NAME_LIST *pRet = m_firstArgName; m_firstArgName=NULL; m_lastArgName=NULL; return pRet;};
     // Added because recursive destructor of ARG_NAME_LIST may overflow the system stack
     void delArgNameList(ARG_NAME_LIST *pFirst)
     {
@@ -864,6 +1018,7 @@ public:
                         delete pArgList, 
                         pArgList=pArgListNext);
     };
+
     ARG_NAME_LIST   *findArg(ARG_NAME_LIST *pFirst, int num)
     {
         ARG_NAME_LIST *pAN;
@@ -874,6 +1029,7 @@ public:
         return NULL;
     };
     ARG_NAME_LIST *m_firstArgName;
+    ARG_NAME_LIST *m_lastArgName;
 
     // Structured exception handling paraphernalia:
 public:
@@ -881,7 +1037,7 @@ public:
     void NewSEHDescriptor(void); //sets m_SEHD
     void SetTryLabels(char * szFrom, char *szTo);
     void SetFilterLabel(char *szFilter);
-    void SetCatchClass(char *szClass);
+    void SetCatchClass(mdToken catchClass);
     void SetHandlerLabels(char *szHandlerFrom, char *szHandlerTo);
     void EmitTry(void);         //uses m_SEHD
 
@@ -892,26 +1048,25 @@ public:
 public:
     void EndEvent(void);    //emits event definition
     void EndProp(void);     //emits property definition
-    void ResetEvent(char * szName, BinStr* typeSpec, DWORD dwAttr);
+    void ResetEvent(char * szName, mdToken typeSpec, DWORD dwAttr);
     void ResetProp(char * szName, BinStr* bsType, DWORD dwAttr, BinStr* bsValue);
-    void SetEventMethod(int MethodCode, BinStr* typeSpec, char* pszMethodName, BinStr* sig);
-    void SetPropMethod(int MethodCode, BinStr* typeSpec, char* pszMethodName, BinStr* sig);
+    void SetEventMethod(int MethodCode, mdToken typeSpec, char* pszMethodName, BinStr* sig);
+    void SetPropMethod(int MethodCode, mdToken typeSpec, char* pszMethodName, BinStr* sig);
     BOOL EmitEvent(EventDescriptor* pED);   // impl. in ASSEM.CPP
     BOOL EmitProp(PropDescriptor* pPD); // impl. in ASSEM.CPP
-    mdMethodDef GetMethodTokenByDescr(MethodDescriptor* pMD);   // impl. in ASSEM.CPP
-    mdEvent     GetEventTokenByDescr(EventDescriptor* pED); // impl. in ASSEM.CPP
-    mdFieldDef  GetFieldTokenByDescr(FieldDescriptor* pFD); // impl. in ASSEM.CPP
     EventDescriptor*    m_pCurEvent;
     PropDescriptor*     m_pCurProp;
 
 private:
-	// All descriptor lists moved to Class
-    //MethodDList         m_MethodDList;
-    //FieldDList          m_FieldDList;	
-    //EventDList          m_EventDList;
-    //PropDList           m_PropDList;
-    MemberRefDList      m_MemberRefDList;
-    LocalTypeRefDList   m_LocalTypeRefDList;
+    MemberRefDList           m_LocalMethodRefDList;
+    MemberRefDList           m_LocalFieldRefDList;
+    LocalMemberRefFixupList  m_LocalMemberRefFixupList;
+    MemberRefDList           m_MethodSpecList;
+
+public:
+    HRESULT ResolveLocalMemberRefs();
+    HRESULT DoLocalMemberRefFixups();
+    mdToken ResolveLocalMemberRef(mdToken tok);
 
     // PInvoke paraphernalia
 public:
@@ -925,6 +1080,7 @@ public:
 public:
     ISymUnmanagedWriter* m_pSymWriter;
     ISymUnmanagedDocumentWriter* m_pSymDocument;
+    DocWriterList m_DocWriterList;
     ULONG m_ulCurLine; // set by Parser
     ULONG m_ulCurColumn; // set by Parser
     ULONG m_ulLastDebugLine;
@@ -938,7 +1094,7 @@ public:
 
     // Security paraphernalia
 public:
-    void AddPermissionDecl(CorDeclSecurity action, BinStr *type, NVPair *pairs)
+    void AddPermissionDecl(CorDeclSecurity action, mdToken type, NVPair *pairs)
     {
         PermissionDecl *decl = new PermissionDecl(action, type, pairs);
 		if(decl==NULL)
@@ -998,22 +1154,32 @@ public:
 public:
     mdToken m_tkCurrentCVOwner;
     CustomDescrList* m_pCustomDescrList;
-    void DefineCV(mdToken tkOwner, mdToken tkType, BinStr* pBlob)
+    CustomDescrList  m_CustomDescrList;
+    void DefineCV(CustomDescr* pCD)
     {
-        ULONG               cTemp;
-        void *          pBlobBody;
-        mdToken         cv;
-        if(pBlob)
+        if(pCD)
         {
-            pBlobBody = (void *)(pBlob->ptr());
-            cTemp = pBlob->length();
+            ULONG               cTemp = 0;
+            void *          pBlobBody = NULL;
+            mdToken         cv;
+            mdToken tkOwnerType, tkTypeType = TypeFromToken(pCD->tkType);
+            if((tkTypeType != 0x99000000)&&(tkTypeType != 0x98000000))
+            {
+                tkOwnerType = TypeFromToken(pCD->tkOwner);
+                if((tkOwnerType != 0x99000000)&&(tkOwnerType != 0x98000000))
+                {
+                    if(pCD->pBlob)
+                    {
+                        pBlobBody = (void *)(pCD->pBlob->ptr());
+                        cTemp = pCD->pBlob->length();
+                    }
+                    m_pEmitter->DefineCustomAttribute(pCD->tkOwner,pCD->tkType,pBlobBody,cTemp,&cv);
+                    delete pCD;
+                    return;
+                }
+            }
+            m_CustomDescrList.PUSH(pCD);
         }
-        else
-        {
-            pBlobBody = NULL;
-            cTemp = 0;
-        }
-        m_pEmitter->DefineCustomAttribute(tkOwner,tkType,pBlobBody,cTemp,&cv);
     };
     void EmitCustomAttributes(mdToken tok, CustomDescrList* pCDL)
     {
@@ -1021,11 +1187,12 @@ public:
         if(pCDL == NULL || RidFromToken(tok)==0) return;
         while((pCD = pCDL->POP()))
         {
-            DefineCV(tok,pCD->tkType,pCD->pBlob);
-            delete pCD;
+            pCD->tkOwner = tok;
+            DefineCV(pCD);
         }
     };
 
+    void EmitUnresolvedCustomAttributes(); // implementation: writer.cpp
     // VTable blob (if any)
 public:
     BinStr *m_pVTable;
@@ -1042,8 +1209,8 @@ public:
 private:
     MethodImplDList m_MethodImplDList;
 public:
-    void AddMethodImpl(BinStr* pImplementedTypeSpec, char* szImplementedName, BinStr* pSig, 
-                    BinStr* pImplementingTypeSpec, char* szImplementingName);
+    void AddMethodImpl(mdToken tkImplementedTypeSpec, char* szImplementedName, BinStr* pImplementedSig, 
+                    mdToken tkImplementingTypeSpec, char* szImplementingName, BinStr* pImplementingSig);
     BOOL EmitMethodImpls();
     // lexical scope handling paraphernalia:
     void EmitScope(Scope* pSCroot); // struct Scope - see Method.hpp
@@ -1059,7 +1226,13 @@ public:
     DWORD   m_dwComImageFlags;
 	DWORD	m_dwFileAlignment;
 	size_t	m_stBaseAddress;
-
+    // Former globals
+    WCHAR *m_wzResourceFile;
+    WCHAR *m_wzKeySourceName;
+    bool OnErrGo;
+    void SetCodePage(unsigned val) { g_uCodePage = val; };
+    Clockwork* bClock;
+    void SetClock(Clockwork* val) { bClock = val; };
 };
 
 #endif  // Assember_h

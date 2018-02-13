@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -144,6 +149,12 @@ void FUNCBREC::errorSymSymPN(BASENODE * tree, int id, SYM * sym1, SYM * sym2, PR
     LPWSTR szSym2 = compiler()->ErrSym(sym2);
     LPCWSTR szName = compiler()->ErrName(compiler()->namemgr->GetPredefName(pn));
     compiler()->Error(ERRLOC(inputfile, tree), id, szSym1, szSym2, szName);
+}
+
+void FUNCBREC::errorIntStr(BASENODE *tree, int id, int n, LPCWSTR str)
+{
+    ERRLOC errloc(inputfile, tree);
+    compiler()->Error(&errloc, id, n, str);
 }
 
 void FUNCBREC::errorSymNameName(BASENODE *tree, int id, SYM *sym, NAME* name1, NAME* name2)
@@ -418,7 +429,7 @@ EXPR * FUNCBREC::bindConstInitializer(MEMBVARSYM * pAFSym, BASENODE * tree)
     checked.restore(this);
 
     // Convert to the correct destination type
-    if (pAFSym->parent->asAGGSYM()->isEnum) {
+    if (pAFSym->parent->kind == SK_AGGSYM && pAFSym->parent->asAGGSYM()->isEnum) {
         ASSERT(pAFSym->type == pAFSym->parent);  // enumerator must be of correct type.
 
         // Enumerator fields are handled somewhat special. The initializer
@@ -608,7 +619,10 @@ LOCVARSYM * FUNCBREC::addParam(PNAME ident, TYPESYM *type, unsigned paramFlags)
 TYPESYM * FUNCBREC::bindType(TYPENODE * tree)
 {
     PTYPESYM type;
-    type = compiler()->clsDeclRec.bindType(tree, pParent, BTF_NONE | btfFlags, NULL);
+	// GENERICS: use the method as the context for the bind in order to 
+	// be able to access locally declared type parameters.  Don't do this
+	// if static.
+    type = compiler()->clsDeclRec.bindType(tree, (pMSym ? pMSym : pParent), (((!pMSym || pMSym->isStatic) ? BTF_NOTYVARS : BTF_NONE) | btfFlags), NULL);
     if (type) {
         compiler()->symmgr.DeclareType(type);
         if (type->kind == SK_PTRSYM) {
@@ -622,21 +636,30 @@ TYPESYM * FUNCBREC::bindType(TYPENODE * tree)
 
 
 
-// Lookup the method or field in this and all base classes.
+// Lookup the method or field in this and all base classes, by name.
 // If tryInaccessible is true, inaccessible names are found also.
-SYM * FUNCBREC::lookupClassMember(NAME* name, AGGSYM * cls, bool bBaseCall, bool tryInaccessible, bool ignoreSpecialMethods, int forceMask)
+SYM * FUNCBREC::lookupClassMember(NAME* name, TYPESYM * typ, bool bBaseCall, bool tryInaccessible, bool ignoreSpecialMethods, symbmask_t forceMask, TYPESYM **methodInType)
 {
     SYM* rval = NULL;
 
-    if (cls->isInterface) {
-        PSYMLIST list = cls->allIfaceList;
+    // This finds the first interface where "name" appears as a member....
+    TYPESYM *whereToSearch = typ;
+    if (typ->underlyingAggregate()->isInterface) {
+        PSYMLIST moreToSearch = typ->underlyingAggregate()->allIfaceList;
         do
         {
-            addDependancyOnType(cls);
-            if (tryInaccessible)
-                rval = compiler()->clsDeclRec.findNextName(name, cls, rval);
-            else
-                rval = compiler()->clsDeclRec.findNextAccessibleName(name, cls, pParent, rval, false, ignoreSpecialMethods);
+            addDependancyOnType(whereToSearch->underlyingAggregate());
+            // <REVIEW>I believe rval is always NULL when passed into the following - why not just use NULL?</REVIEW>
+            if (tryInaccessible) {
+                TYPESYM *whereToSearchAndMethodInType = whereToSearch;
+                rval = compiler()->clsDeclRec.findNextName(name, &whereToSearchAndMethodInType, rval);
+                if (rval && methodInType) { *methodInType = whereToSearchAndMethodInType; }
+            }
+            else {
+                TYPESYM *whereToSearchAndMethodInType = whereToSearch;
+                rval = compiler()->clsDeclRec.findNextAccessibleName(name, &whereToSearchAndMethodInType, pParent, rval, false, ignoreSpecialMethods);
+                if (rval && methodInType) { *methodInType = whereToSearchAndMethodInType; }
+            }
 
             if (rval) {
                 if (!forceMask || (rval->mask() & forceMask)) {
@@ -646,28 +669,31 @@ SYM * FUNCBREC::lookupClassMember(NAME* name, AGGSYM * cls, bool bBaseCall, bool
                 }
             }
 
-            if (list) {
-                cls = list->sym->asAGGSYM();
-                list = list->next;
+            if (moreToSearch) {
+                whereToSearch = compiler()->symmgr.SubstTypeUsingType(moreToSearch->sym->asTYPESYM(),typ); 
+                moreToSearch = moreToSearch->next;
             } else {
-                cls = NULL;
+                whereToSearch = NULL;
             }
-        } while (cls);
+        } while (whereToSearch);
 
         // maybe its a method on object...
-        cls = getPDT(PT_OBJECT)->asAGGSYM();
+        typ = getPDT(PT_OBJECT)->asTYPESYM();
     }
 
+    // cls now contains the class or interface we _actually_ want to search.  findNextName etc.
+    // look after base classes above this class.                                                 
+    TYPESYM *whereToSearchAndMethodInType = typ;
     do {
-        addDependancyOnType(cls);
-        if (tryInaccessible) 
-            rval = compiler()->clsDeclRec.findNextName(name, cls, rval);
-        else
-            rval = compiler()->clsDeclRec.findNextAccessibleName(name, cls, pParent, rval, bBaseCall, ignoreSpecialMethods);
-
+        addDependancyOnType(whereToSearchAndMethodInType->underlyingAggregate());
+        if (tryInaccessible) {
+            rval = compiler()->clsDeclRec.findNextName(name, &whereToSearchAndMethodInType, rval);
+        }
+        else {
+            rval = compiler()->clsDeclRec.findNextAccessibleName(name, &whereToSearchAndMethodInType, pParent, rval, bBaseCall, ignoreSpecialMethods);
+        }
         if (rval)
         {
-            cls = rval->parent->asAGGSYM();
             bBaseCall = true;
         }
 
@@ -676,6 +702,7 @@ SYM * FUNCBREC::lookupClassMember(NAME* name, AGGSYM * cls, bool bBaseCall, bool
           (((rval->kind == SK_METHSYM) || (rval->kind == SK_PROPSYM)) && 
            !isMethPropCallable(rval->asMETHPROPSYM(), false))));
             
+    if (methodInType) { *methodInType = whereToSearchAndMethodInType; }
     return rval;
 }
 
@@ -803,11 +830,24 @@ MAKENEWBINDING:
 }
 
 
-METHSYM * FUNCBREC::findMethod(BASENODE * tree, PREDEFNAME pn, AGGSYM * cls, TYPESYM *** params, bool reportError)
+// This method is only ever used to find methods with predefined names.
+// It acts as a preliminary to full method binding because
+// it first finds a candidate class which contains a method of the correct
+// name and then looks through all members of that class for one with the
+// correct signature.  It does not do overload resolution - params will be NULL
+// if further overload resolution is to be done in which case it just
+// finds the first potential candidate.                       
+//
+// Actually, this search method appears
+// to be the same as that used to bind the "." operator... (i.e. both boil
+// down to lookupClassMember)  
+//
+// pMethodInType is as for lookupClassMember
+METHSYM * FUNCBREC::findMethod(BASENODE * tree, PREDEFNAME pn, TYPESYM * cls, TYPESYM *** params, bool reportError, TYPESYM **pMethodInType)
 {
     NAME * name = compiler()->namemgr->GetPredefName(pn);
 
-    SYM * rval = lookupClassMember(name, cls, false, false, false);
+    SYM * rval = lookupClassMember(name, cls, false, false, false, 0, pMethodInType);
     if (!rval || rval->kind != SK_METHSYM) {
 LERROR:
         if (reportError) errorSymName(tree, ERR_NoAccessibleMember, cls, name);
@@ -817,7 +857,9 @@ LERROR:
         return rval->asMETHSYM();
     }
 
-    while (rval->asMETHSYM()->params != *params) {
+    TYPESYM *methodInType = pMethodInType ? *pMethodInType : NULL;
+
+    while (compiler()->symmgr.SubstParamsUsingType(rval->asMETHSYM()->cParams,rval->asMETHSYM()->params,methodInType) != *params) {
         rval = compiler()->symmgr.LookupNextSym(rval, rval->parent, MASK_METHSYM);
         if (!rval) goto LERROR;
     }
@@ -827,7 +869,7 @@ LERROR:
 // See if the given name is already bound in the current scope...
 // Returns either the sym, if its of a correct type, 
 // NULL, if nothing found, or symError if found but wrong type
-SYM * FUNCBREC::lookupCachedName(NAMENODE * name, int mask)
+SYM * FUNCBREC::lookupCachedName(NAMENODE * name, symbmask_t mask)
 {
     if (!pOuterScope) return NULL;
 
@@ -882,7 +924,7 @@ FOUNDVISIBLE:
 
 // Display an error based on the fact that the given symbol is not of the
 // expected kind...
-EXPR * FUNCBREC::errorBadSK(BASENODE * tree, SYM * sym, int mask)
+EXPR * FUNCBREC::errorBadSK(BASENODE * tree, SYM * sym, symbmask_t mask)
 {
     ASSERT(!(sym->mask() & mask));
 
@@ -968,8 +1010,13 @@ bool __fastcall FUNCBREC::objectIsLvalue(EXPR * object)
 
 }
 
-void __fastcall FUNCBREC::checkStaticness(BASENODE * tree, SYM * member, EXPR ** object)
+// methodInType specifies the instantiation, if any, where the symbol is being used at.
+
+void __fastcall FUNCBREC::checkStaticness(BASENODE * tree, SYM * member, EXPR ** object, TYPESYM *methodInType)
 {
+    // assert that "methodInType" is, if present, an instantiation of the member's parent
+    ASSERT(!member || !methodInType || member->parent->kind != SK_AGGSYM || 
+           methodInType->behavioralType() == member->parent->asAGGSYM());
     bool isStatic;
     
     switch (member->kind) {
@@ -1005,15 +1052,40 @@ NOOBJECT:
                 else
                     errorSym(tree, ERR_ObjectRequired, member);
             } else {
-                // This check ensures that we do not bind to methods in an outerclass
+                // <REVIEW>(DRS): Check that the object being invoked is of the correct type
+                // for the method/field etc. being invoked.  I believe this may also induce
+                // an implicit coercion.  For generics, we compare against the
+                // instantiated (i.e. substituted) type expected, i.e. when
+                // accessing T List<T>::hd using a List<String> we need to
+                // check that the calling type is indeed a List<String>.  
+                //
+                // To be honest, I'm not sure if this bit is needed at all for generics, though I
+                // guess it acts as a bottom line check to make sure everything adds up ok - I've found
+                // many internal errors by this check triggering.  It checks that the method
+                // found by method binding accepts a this pointer that is compatible with
+                // the thing being used, utilising any implicit coercions, (but no user-defined coercions)
+                //
+                // Original comment: This check ensures that we do not bind to methods in an outerclass
                 // which are visible, but whose this pointer is of an incorrect
                 // type...
+                //
+                // LATER NOTE: The conversion is to convert from a value class to an object when calling
+                // a method on a value class.
                 // NOTE:  this will fail for enums because there is no implicit
                 // conversion from the enum to the method on the enum, so let's catch that first...
-                if ((*object)->type->kind != SK_AGGSYM || !(*object)->type->asAGGSYM()->isEnum) {
-                    EXPR * newObject = tryConvert(*object, member->parent->asAGGSYM(), tree, CONVERT_NOUDC);
+                //
+                // NOTE:  this will also fail for those methods supported by type variables, for similar
+                // reasons....  Perhaps we should have some other check in these cases?</REVIEW>
+                TYPESYM *objtyp = (*object)->type;
+                if (objtyp->kind == SK_TYVARSYM ||
+                    (objtyp->isAggType() && !objtyp->underlyingAggregate()->isEnum)) {
+
+                    AGGSYM *aggBeingCalled = member->parent->asAGGSYM();
+                    ASSERT (!methodInType || methodInType->underlyingAggregate() == aggBeingCalled);
+                    TYPESYM *actualAggBeingCalled = (methodInType && methodInType->kind == SK_INSTAGGSYM) ? methodInType : compiler()->symmgr.GetThisType(aggBeingCalled);
+                    EXPR * newObject = tryConvert(*object, actualAggBeingCalled, tree, CONVERT_NOUDC);
                     if (! newObject) 
-                        errorSymSym(tree, ERR_WrongNestedThis, member->parent, (*object)->type);
+                        errorSymSym(tree, ERR_WrongNestedThis, actualAggBeingCalled, (*object)->type);
                     *object = newObject;
                 }
             }
@@ -1021,6 +1093,8 @@ NOOBJECT:
     }
 }
 
+
+            
 void FUNCBREC::verifyMethodArgs(EXPR * call)
 {
     EXPR **argsPtr = call->getArgsPtr();
@@ -1032,6 +1106,8 @@ void FUNCBREC::verifyMethodArgs(EXPR * call)
     TYPESYM ** destType = mp->params;
     bool markTypeFromExternCall = (mp->kind == SK_METHSYM ? mp->asMETHSYM()->isExternal : false);
 
+
+            
     if (mp->isVarargs) {
         paramCount--; // we don't care about the vararg sentinel
     }
@@ -1077,7 +1153,8 @@ void FUNCBREC::verifyMethodArgs(EXPR * call)
                 // we need to put the rest in an array...
                 goto FIXUPPARAMLIST;
             }
-            EXPR * rval = tryConvert(indir[0], *destType, indir[0]->tree);
+            TYPESYM *substDestType = compiler()->symmgr.SubstTypeUsingCallExpr(*destType, call);
+            EXPR * rval = tryConvert(indir[0], substDestType, indir[0]->tree);
             if (!rval) {
                 // the last arg failed to fix up, so it must fixup into the array element
                 // (we will be passing a 1 element array...)
@@ -1110,7 +1187,7 @@ FIXUPPARAMLIST:
 
     // we need to create an array and put it as the last arg...
 
-    TYPESYM * arrayType = mp->params[mp->cParams - 1];
+    TYPESYM * arrayType = compiler()->symmgr.SubstTypeUsingCallExpr(mp->params[mp->cParams - 1], call);
     TYPESYM * elemType = arrayType->asARRAYSYM()->elementType();
 
 
@@ -1161,20 +1238,28 @@ FIXUPPARAMLIST:
 }
 
 
-EXPR * FUNCBREC::bindToProperty(BASENODE * tree, EXPR * object, PROPSYM * prop, int bindFlags, EXPR * args)
+
+
+EXPR * FUNCBREC::bindToProperty(BASENODE * tree, EXPR * object, PROPSYM * prop, int bindFlags, EXPR * args, TYPESYM *methodInType)
 {
-    METHPROPSYM * candidate = verifyMethodCall(tree, prop, args, &object, bindFlags & EXF_BASECALL);
+
+    EXPRPROP * dummy;
+    dummy = newExpr(tree, EK_PROP, NULL)->asPROP();
+    dummy->methodInType = methodInType;
+
+    METHPROPSYM * candidate = verifyMethodCall(tree, prop, args, &object, bindFlags & EXF_BASECALL, dummy, NULL);
 
     if (!candidate) goto LERROR;
 
     ASSERT(candidate->kind == SK_PROPSYM);
 
     EXPRPROP * rval;
-    rval = newExpr(tree, EK_PROP, candidate->asPROPSYM()->retType)->asPROP();
+    rval = newExpr(tree, EK_PROP, compiler()->symmgr.SubstTypeUsingCallExpr(candidate->asPROPSYM()->retType, dummy))->asPROP();
 
     rval->prop = candidate->asPROPSYM();
     rval->args = args;
     rval->object = object;
+    rval->methodInType = dummy->methodInType;
 
     ASSERT(EXF_BASECALL == BIND_BASECALL);
     rval->flags |= (EXF_BASECALL & bindFlags);
@@ -1212,7 +1297,7 @@ LERROR:
 
 // Construct the EXPR node which corresponds to a field expression
 // for a given field and object pointer.
-EXPR * FUNCBREC::bindToField(BASENODE * tree, EXPR * object, MEMBVARSYM * field, int bindFlags)
+EXPR * FUNCBREC::bindToField(BASENODE * tree, EXPR * object, MEMBVARSYM * field, int bindFlags, TYPESYM *methodInType)
 {
     EXPR * expr;
 
@@ -1225,7 +1310,7 @@ EXPR * FUNCBREC::bindToField(BASENODE * tree, EXPR * object, MEMBVARSYM * field,
         return newError(tree);
     }
 
-    checkStaticness(tree, field, &object);
+    checkStaticness(tree, field, &object, methodInType);
     if (field->isUnevaled) {
         if (!bindUnevaledConstantField(field)) {
             return newError(tree);
@@ -1247,7 +1332,7 @@ EXPR * FUNCBREC::bindToField(BASENODE * tree, EXPR * object, MEMBVARSYM * field,
         expr = newExprConstant(tree, fieldType, field->constVal);
     } else {
 
-        expr = newExpr(tree, EK_FIELD, field->type);
+        expr = newExpr(tree, EK_FIELD, compiler()->symmgr.SubstTypeUsingType(field->type, methodInType));
         expr->asFIELD()->ownerOffset = 0;
 
         unsigned short parentOffset = object ? object->getOffset() : 0;
@@ -1264,6 +1349,7 @@ EXPR * FUNCBREC::bindToField(BASENODE * tree, EXPR * object, MEMBVARSYM * field,
             expr->asFIELD()->ownerOffset = 0;
         }
 
+        expr->asFIELD()->methodInType = methodInType;
         expr->asFIELD()->object = object;
         expr->asFIELD()->field = field;
         ASSERT(BIND_MEMBERSET == EXF_MEMBERSET);
@@ -1296,7 +1382,7 @@ EXPR * FUNCBREC::bindToField(BASENODE * tree, EXPR * object, MEMBVARSYM * field,
 
 // Construct the EXPR node which corresponds to am event expression
 // for a given event and object pointer.
-EXPR * FUNCBREC::bindToEvent(BASENODE * tree, EXPR * object, EVENTSYM * event, int bindFlags)
+EXPR * FUNCBREC::bindToEvent(BASENODE * tree, EXPR * object, EVENTSYM * event, int bindFlags, TYPESYM *methodInType)
 {
     EXPR * expr;
 
@@ -1320,7 +1406,7 @@ EXPR * FUNCBREC::bindToEvent(BASENODE * tree, EXPR * object, EVENTSYM * event, i
         return newError(tree);
     }
 
-    checkStaticness(tree, event, &object);
+    checkStaticness(tree, event, &object, methodInType);
 
     expr = newExpr(tree, EK_EVENT, event->type);
     expr->asEVENT()->object = object;
@@ -1334,23 +1420,30 @@ EXPR * FUNCBREC::bindToEvent(BASENODE * tree, EXPR * object, EVENTSYM * event, i
 
 void FUNCBREC::maybeSetOwnerOffset(LOCVARSYM * local)
 {
-    if (local->type->asAGGSYM()->hasInnerFields()) {
+    if (local->type->underlyingAggregate()->hasInnerFields()) {
         local->ownerOffset = ++uninitedVarCount;
     }
 }
 
 // Bind the unqualified name.  mask details the allowed return types
-EXPR * FUNCBREC::bindName(NAMENODE *name, int mask, int bindFlags)
+EXPR * FUNCBREC::bindName(NAMENODE *name, symbmask_t mask, int bindFlags)
 {
 
+    TYPESYM *methodInType = NULL;
+    bool isFoundInGeneric = false; // used to prevent stores into the cache.
     NAME * ident = name->pName;
     SYM * rval = lookupCachedName(name, mask);
     EXPR * expr;
 
     // If we found a cache entry, dispatch based on what we found:
     if (rval) {
+        // Only put things in the cache if we're not accessing them at some
+        // instantiated type.                                                           
+        //
+        // This also means that if something _is_ in the cache, then the type at which
+        // it is being accessed is simply its parent.
         switch (rval->kind) {
-        case SK_ERRORSYM: goto RETERROR;
+        case SK_ERRORSYM: goto RETERROR_CACHE_HIT;
         case SK_LOCVARSYM: {
             // No need to goto anywhere, since locals are only found as a result of
             // cache hits...
@@ -1377,7 +1470,7 @@ EXPR * FUNCBREC::bindName(NAMENODE *name, int mask, int bindFlags)
                     if (!local->slot.hasInit && !local->slot.ilSlot) {
                         local->slot.ilSlot = ++uninitedVarCount;
                         if (local->type->fundType() == FT_STRUCT) {
-                            uninitedVarCount += local->type->asAGGSYM()->getFieldsSize() - 1;
+                            uninitedVarCount += local->type->underlyingAggregate()->getFieldsSize() - 1;
                             maybeSetOwnerOffset(local);
                         }
                     }
@@ -1387,28 +1480,48 @@ EXPR * FUNCBREC::bindName(NAMENODE *name, int mask, int bindFlags)
         }
         case SK_PROPSYM:
         case SK_MEMBVARSYM:
-        case SK_METHSYM: goto METHORMEMBVAR;
-        case SK_NSSYM: goto NS;
-        case SK_AGGSYM: goto AGG;
+        case SK_METHSYM: 
+             methodInType = (rval->parent->kind == SK_AGGSYM) ? rval->parent->asTYPESYM() : NULL;
+             goto METHORMEMBVAR_CACHE_HIT;
+        case SK_NSSYM: goto NS_CACHE_HIT;
+        case SK_AGGSYM: goto AGG_CACHE_HIT;
         default: ASSERT(!"bad kind");
         }
     }
 
     // ok, we got a cache miss:
-    SYM * cls;
+    PARENTSYM * cls;
     cls = pParent;
 
-    while (cls->kind == SK_AGGSYM) {
+    while (cls->isAggParent()) {
         // See if it is a field or method in the current class...
-        rval = lookupClassMember(ident, cls->asAGGSYM(), false, false, true);
+
+        // <REVIEW>GENERICS: Note that the code below searches the classes in which this
+		// class is nested as well.  I think the idea is to then later
+		// report an error if the types of he "this" pointer don't match up.</REVIEW>
+		//
+		// GENERICS: methodInType tells us, more or less, the instantiation at which the name is being accessed.
+        // However this may be some inst. type even if the name is a static.
+        //
+		// We have to search w.r.t. the "this" type for the given class
+		// in order to set the "methodInType" result correctly.
+		TYPESYM *clsThisType;
+        clsThisType = compiler()->symmgr.GetThisType(cls->asAGGSYM());
+
+        rval = lookupClassMember(ident, clsThisType, false, false, true, 0, &methodInType);
+        isFoundInGeneric = methodInType && methodInType->isAggType() && methodInType->underlyingAggregate()->cTypeFormals;
+
         if (rval) {
             if (!(rval->mask() & mask)) {
                 goto BADKIND;
             }
-            storeInCache(name, name->pName, rval);
-METHORMEMBVAR:
+            if (!isFoundInGeneric) { 
+                storeInCache(name, name->pName, rval); 
+            }
+METHORMEMBVAR_CACHE_HIT:
             EXPR * thisExpr = bindThisImplicit(name);
 
+            // <REVIEW>What on earth is this doing?</REVIEW>
             if (rval->kind == SK_MEMBVARSYM) {
                 if (!rval->asMEMBVARSYM()->isStatic && (mask & MASK_AGGSYM)) {
                     if (!pMSym || (pMSym->isStatic || !this->thisPointer) || !canConvert(pParent->asAGGSYM(), rval->parent->asAGGSYM(), name, CONVERT_NOUDC)) {
@@ -1421,38 +1534,57 @@ METHORMEMBVAR:
                         }
                     }
                 }
-                expr = bindToField(name, thisExpr, rval->asMEMBVARSYM(), bindFlags );
+                expr = bindToField(name, thisExpr, rval->asMEMBVARSYM(), bindFlags, methodInType );
             } else if (rval->kind == SK_METHSYM) {
-                expr = newExpr(name, EK_CALL, rval->asMETHSYM()->retType);
+                TYPESYM *whereMethFound = methodInType;
+                expr = newExpr(name, EK_CALL, NULL);
+                if (name->kind == NK_GENERICNAME) {
+                    if (!compiler()->clsDeclRec.bindTypeList(name, name->asGENERICNAME()->pParams, (pMSym ? pMSym : pParent), 
+                                                             ((!pMSym || pMSym->isStatic) ? BTF_NOTYVARS : BTF_NONE),
+                                                              &(expr->asCALL()->ppMethTypeArgs), 
+                                                              &(expr->asCALL()->cMethTypeArgs), NULL)) {
+                        goto RETERROR;
+                    }
+				} else {
+					expr->asCALL()->ppMethTypeArgs = NULL;
+					expr->asCALL()->cMethTypeArgs = 0;
+				}
+                expr->asCALL()->type = compiler()->symmgr.SubstTypeUsingCallData(rval->asMETHSYM()->retType, whereMethFound, expr->asCALL()->cMethTypeArgs, expr->asCALL()->ppMethTypeArgs);
                 expr->asCALL()->method = rval->asMETHSYM();
                 expr->asCALL()->object = thisExpr;
+                expr->asCALL()->methodInType = whereMethFound;
                 expr->asCALL()->args = NULL;
+
             } else if (rval->kind == SK_PROPSYM) {
+                // <REVIEW>what on earth is this doing???? - GENERICS: TODO - see similar case above</REVIEW>
                 if (!rval->asPROPSYM()->isStatic && (mask & MASK_AGGSYM)) {
                     if (!pMSym || (pMSym->isStatic || !this->thisPointer) || !canConvert(pParent->asAGGSYM(), rval->parent->asAGGSYM(), name, CONVERT_NOUDC)) {
                         if (rval->asPROPSYM()->retType->name == ident) {
                             SYM * type = compiler()->clsDeclRec.bindSingleTypeName(name, pParent, BTF_NONE | btfFlags, NULL);
                             if (!type) return newError(name);
+                            // <REVIEW>GENERICS: TODO - substitute??? - see above.</REVIEW>
                             if (type == rval->asPROPSYM()->retType) {
                                 return newExpr(name, EK_CLASS, type->asTYPESYM());
                             }
                         }
                     }
                 }
-                expr = bindToProperty(name, thisExpr, rval->asPROPSYM(), bindFlags);
+                expr = bindToProperty(name, thisExpr, rval->asPROPSYM(), bindFlags, NULL, methodInType);
             } else if (rval->kind == SK_EVENTSYM) {
+                // <REVIEW>what on earth is this doing????</REVIEW>
                 if (!rval->asEVENTSYM()->isStatic && (mask & MASK_AGGSYM)) {
                     if (!pMSym || (pMSym->isStatic || !this->thisPointer) || !canConvert(pParent->asAGGSYM(), rval->parent->asAGGSYM(), name, CONVERT_NOUDC)) {
                         if (rval->asEVENTSYM()->type->name == ident) {
                             SYM * type = compiler()->clsDeclRec.bindSingleTypeName(name, pParent, BTF_NONE | btfFlags, NULL);
                             if (!type) return newError(name);
+                            // GENERICS: TODO - substitute??? - see above.
                             if (type == rval->asMEMBVARSYM()->type) {
                                 return newExpr(name, EK_CLASS, type->asTYPESYM());
                             }
                         }
                     }
                 }
-                expr = bindToEvent(name, thisExpr, rval->asEVENTSYM(), bindFlags);
+                expr = bindToEvent(name, thisExpr, rval->asEVENTSYM(), bindFlags, methodInType);
             }
             else 
                 goto CONSIDERCLASS;
@@ -1476,7 +1608,7 @@ METHORMEMBVAR:
 
             // maybe it exists but is inaccesible?
             cls = pParent;
-            while (cls->kind == SK_AGGSYM) {
+            while (cls->isAggParent()) {
                 // See if it is a field or method in the current class...
                 rval = lookupClassMember(ident, cls->asAGGSYM(), false, true, true);
                 if (rval) {
@@ -1499,21 +1631,22 @@ METHORMEMBVAR:
 
     if (rval) {
         if (!(rval->mask() & mask)) goto BADKIND;
-        storeInCache(name, name->pName, rval);
+        if (!isFoundInGeneric) { storeInCache(name, name->pName, rval); }
 CONSIDERCLASS:
         if (rval->kind == SK_AGGSYM) {
-AGG:
+AGG_CACHE_HIT:
             compiler()->symmgr.DeclareType(rval);
             expr = newExpr(name, EK_CLASS, rval->asTYPESYM());
         } else {
             ASSERT(rval->kind == SK_NSSYM);
-NS:
+NS_CACHE_HIT:
             expr = newExpr(name, EK_NSPACE, getVoidType());
             expr->asNSPACE()->nspace = rval->asNSSYM();
         }
         return expr;
     }
 
+RETERROR_CACHE_HIT:
 RETERROR:
     return newError(name);  // error already announced by bindSingleType...
 
@@ -1528,6 +1661,7 @@ unsigned __fastcall FUNCBREC::isThisPointer(EXPR * expr)
     return expr->kind == EK_LOCAL && expr->asLOCAL()->local == thisPointer;
 }
 
+
 // Return an expression that refers to the this pointer. Returns null
 // if no this is available. See bindThis is error reporting is required.
 EXPR * FUNCBREC::bindThisImplicit(PBASENODE tree)
@@ -1538,7 +1672,10 @@ EXPR * FUNCBREC::bindThisImplicit(PBASENODE tree)
 
     EXPR * thisExpr;
 
-    thisExpr = newExpr(tree, EK_LOCAL, pParent->asAGGSYM());
+    AGGSYM *root = pParent->asAGGSYM();
+    TYPESYM *this_typ = compiler()->symmgr.GetThisType(root);
+
+    thisExpr = newExpr(tree, EK_LOCAL, this_typ);
     thisExpr->asLOCAL()->local = thisPointer;
     thisExpr->flags |= EXF_IMPLICITTHIS | EXF_CANTBENULL;
     if (pParent->asAGGSYM()->isStruct) {
@@ -1793,10 +1930,13 @@ EXPR *FUNCBREC::bindEventAccessor(METHINFO * info)
             errorSymName(tree, ERR_MissingPredefinedMember, getPDT(PT_DELEGATE), memb);
             return newError( tree);
         }
-        SYM * verified = verifyMethodCall(tree, method, args, &obj, 0);
 
         // Create the call node for the call.
         EXPRCALL * call = newExpr(tree, EK_CALL, getPDT(PT_DELEGATE))->asCALL();
+	    call->methodInType = (obj? obj->type : NULL);
+	    call->ppMethTypeArgs = NULL;
+		call->cMethTypeArgs = 0;
+	    SYM * verified = verifyMethodCall(tree, method, args, &obj, NULL, call, NULL);
         call->object = obj;
         call->flags |= EXF_BOUNDCALL;
         call->method = verified->asMETHSYM();
@@ -1813,7 +1953,6 @@ EXPR *FUNCBREC::bindEventAccessor(METHINFO * info)
         else {
             lvalue = bindToProperty(tree, bindThisImplicit(tree), fieldOrProperty->asPROPSYM());
         }
-
         EXPR * assg = newExprBinop(tree, EK_ASSG, lvalue->type, lvalue, cast);
         assg->flags |= EXF_ASSGOP;
     
@@ -1886,15 +2025,21 @@ EXPR * FUNCBREC::bindIfaceImpl(METHINFO *info)
         newList(expr, &pargs);
     }
 
-    EXPRCALL * call = newExpr(NULL, EK_CALL, pMSym->retType)->asCALL();
+    EXPR *obj = bindThisImplicit(NULL);
+    TYPESYM *methodInType = (obj ? obj->type : NULL);
+    TYPESYM *rtyp = compiler()->symmgr.SubstTypeUsingType(pMSym->retType, methodInType);
+    EXPRCALL * call = newExpr(NULL, EK_CALL, rtyp)->asCALL();
     call->method = pMSym->asIFACEIMPLMETHSYM()->implMethod;
-    call->object = bindThisImplicit(NULL);
+    call->object = obj;
+    call->methodInType = methodInType;
     call->args = args;
     call->flags = EXF_BOUNDCALL | (hasRefParam ? EXF_HASREFPARAM : 0);
+    call->ppMethTypeArgs = NULL;
+    call->cMethTypeArgs = 0;
 
     // Wrap it all in a block, figure out the return statement
     EXPRBLOCK * block = newExprBlock(NULL);
-    if (pMSym->retType == getVoidType()) {
+    if (rtyp == getVoidType()) {
         block->statements = newExprStmtAs(NULL, call);
         block->flags |= EXF_NEEDSRET;       // implicit return statement
     } else {
@@ -2106,20 +2251,23 @@ EXPR * FUNCBREC::bindDestructor(METHINFO * info)
         return NULL;
     }
 
+    //
+    // call base class destructor if we have one
+    //
     SYM *baseDestructor = NULL;
-    AGGSYM *cls = pParent->asAGGSYM()->baseClass;
-    if (cls) {
+    TYPESYM *typ = pParent->asAGGSYM()->baseClass;
+    if (typ) {
         //
         // find a destructor in a base class, ignoring everything
         // which doesn't look like a destructor
         //
-        while ((baseDestructor = compiler()->clsDeclRec.findNextName(pMSym->name, cls, baseDestructor)) &&
+        while ((baseDestructor = compiler()->clsDeclRec.findNextName(pMSym->name, &typ, baseDestructor)) &&
                (baseDestructor->kind != SK_METHSYM ||
                 (baseDestructor->asMETHSYM()->access != ACC_PROTECTED && baseDestructor->asMETHSYM()->access != ACC_INTERNALPROTECTED) ||
                 baseDestructor->asMETHSYM()->params != NULL ||
                 baseDestructor->asMETHSYM()->retType != getPDT(PT_VOID))) 
         {
-            cls = baseDestructor->parent->asAGGSYM();
+            typ = baseDestructor->parent->asAGGSYM();  // GENERICS: TODO: see note above
         }
     }
 
@@ -2151,10 +2299,13 @@ EXPR * FUNCBREC::bindDestructor(METHINFO * info)
         EXPRCALL * baseCall;
         baseCall = newExpr(pTree, EK_CALL, getVoidType())->asCALL();
         baseCall->object = thisExpression;
+        baseCall->methodInType = (thisExpression ? thisExpression->type : NULL); // GENERICS: TODO: this does not look correct: I believe the method is normally found in a base type..  See notes above.
         baseCall->args = NULL;
         baseCall->method = baseDestructor->asMETHSYM();
         baseCall->flags |= EXF_BOUNDCALL | EXF_BASECALL;
 
+        baseCall->ppMethTypeArgs = NULL;
+        baseCall->cMethTypeArgs = 0;
 
         tryExpr->handlers = newExprBlock(NULL);
         tryExpr->handlers->asBLOCK()->statements = newExprStmtAs(pTree, baseCall);
@@ -2305,7 +2456,7 @@ AGAIN:
         errorN(tree, ERR_IllegalStatement);
         return newError(tree);
 
-    case NK_NAME: case NK_DOT: 
+    case NK_NAME: case NK_GENERICNAME: case NK_DOT: 
     case NK_OP: case NK_BINOP: case NK_UNOP:
     case NK_NEW:    
         rval = bindExpr(tree, BIND_RVALUEREQUIRED | BIND_STMTEXPRONLY);
@@ -2560,6 +2711,7 @@ void FUNCBREC::bindInitializers(bool isStatic, EXPR ***pLast)
                         op1->asFIELD()->object = 0;
                     else
                         op1->asFIELD()->object = bindThisImplicit(memb->getBaseExprTree()->asBINOP()->p1);
+                    op1->asFIELD()->methodInType = (op1->asFIELD()->object ? op1->asFIELD()->object->type : NULL);
                     op1->asFIELD()->field = memb;
                     op1->flags |= EXF_LVALUE;
 
@@ -2610,7 +2762,7 @@ void FUNCBREC::bindInitializers(bool isStatic, EXPR ***pLast)
 // does overload resolution and access checks on the constructor
 //
 // tree         - parse tree to do error reporting
-// cls          - class whose constructor we're calling
+// typ          - class whose constructor we're calling (GENERICS: perhaps an instantiated generic class)
 // arguments    - the constructor's argument list
 // isNew
 //      true    - generate a call for a new<type> expression
@@ -2618,11 +2770,14 @@ void FUNCBREC::bindInitializers(bool isStatic, EXPR ***pLast)
 //      false   - generate a call to the constructor only - no new
 //                return type is void
 //
-EXPR * FUNCBREC::createConstructorCall(BASENODE *tree, AGGSYM *cls, EXPR *thisExpression, EXPR *arguments, bool isNew)
+EXPR * FUNCBREC::createConstructorCall(BASENODE *tree, TYPESYM *typ, EXPR *thisExpression, EXPR *arguments, bool isNew)
 {
+    AGGSYM *cls = typ->underlyingAggregate();
+
     //
     // find any of that classes constructors
     //
+
     METHSYM * method;
     addDependancyOnType(cls);
     method = compiler()->symmgr.LookupGlobalSym(compiler()->namemgr->GetPredefName(PN_CTOR), cls, MASK_METHSYM)->asMETHSYM();
@@ -2637,18 +2792,23 @@ EXPR * FUNCBREC::createConstructorCall(BASENODE *tree, AGGSYM *cls, EXPR *thisEx
     // for explicit base constructor calls
     //
     EXPRCALL * expr;
-    expr = newExpr(tree, EK_CALL, (isNew ? cls : getVoidType()))->asCALL();
+    expr = newExpr(tree, EK_CALL, (isNew ? typ : getVoidType()))->asCALL();
     expr->object = thisExpression;
+    expr->methodInType = typ; // Nb. - NOT based off thisExpression, which might be NULL, and in any case we're calling our superclass, not ourselves,
+                             // so the inst. may be different.
     expr->args = arguments;
     if (isNew) {
         expr->flags |= EXF_NEWOBJCALL | EXF_CANTBENULL;
     }
     expr->flags |= EXF_BOUNDCALL;
+    expr->ppMethTypeArgs = NULL;
+    expr->cMethTypeArgs = 0;
 
     //
     // do the overload resolution and access checks
     //
-    expr->method = verifyMethodCall(tree, method, arguments, &thisExpression, (isNew ? EXF_NEWOBJCALL : 0))->asMETHSYM();
+    expr->method = 
+        verifyMethodCall(tree, method, arguments, &thisExpression, (isNew ? EXF_NEWOBJCALL : 0), expr, NULL)->asMETHSYM();
     if (expr->method) {
         verifyMethodArgs(expr);
     }
@@ -2659,6 +2819,7 @@ EXPR * FUNCBREC::createConstructorCall(BASENODE *tree, AGGSYM *cls, EXPR *thisEx
 
     return expr;
 }
+
 
 // synthetize a call to the constructor of our base class, if any...
 //
@@ -2672,11 +2833,11 @@ EXPR * FUNCBREC::createBaseConstructorCall(bool isThisCall)
     // the class to call the base constructor on is
     // either our base class, or our own class
     //
-    AGGSYM * classToCallConstructorOn;
+    TYPESYM * typeToCallConstructorOn;
     if (isThisCall) {
-        classToCallConstructorOn = pParent->asAGGSYM();
+        typeToCallConstructorOn = pParent->asAGGSYM();
     } else {
-        classToCallConstructorOn = pParent->asAGGSYM()->baseClass;
+        typeToCallConstructorOn = pParent->asAGGSYM()->baseClass;
     }
 
     //
@@ -2720,7 +2881,7 @@ EXPR * FUNCBREC::createBaseConstructorCall(bool isThisCall)
     //
     // create the constructor call. Doing overload resolution and access checks.
     //
-    EXPR *exprCall = createConstructorCall(pTree, classToCallConstructorOn, exprThis, arguments, false);
+    EXPR *exprCall = createConstructorCall(pTree, typeToCallConstructorOn, exprThis, arguments, false);
     if (isThisCall && pParent->asAGGSYM()->isStruct) {
         exprCall->flags |= EXF_NEWSTRUCTASSG;
     }
@@ -2865,11 +3026,12 @@ EXPR * FUNCBREC::bindExpr(BASENODE *tree, int bindFlags)
         ENDLOOP;
         break;
                   }
+    case NK_GENERICNAME:
     case NK_NAME:
         if (stmtExprOnly) 
             errorN(tree, ERR_IllegalStatement);
             
-        rval = bindName(tree->asNAME(), MASK_LOCVARSYM | MASK_MEMBVARSYM | MASK_PROPSYM, bindFlags);
+        rval = bindName(tree->asANYNAME(), MASK_LOCVARSYM | MASK_MEMBVARSYM | MASK_PROPSYM, bindFlags);
         // since we could have bound to a constant expression, we do not
         // mark this as an lvalue here, but rather let bindName do it...
         break;
@@ -2991,37 +3153,42 @@ EXPR * FUNCBREC::bindNull(BASENODE * tree)
 }
 
 
-EXPR * FUNCBREC::bindDelegateNew(AGGSYM * type, NEWNODE * tree)
+EXPR * FUNCBREC::bindDelegateNew(TYPESYM * type, NEWNODE * tree)
 {
 
-    // First, find the constructor:
+    AGGSYM *delegate = type->underlyingAggregate();
+    ASSERT(type->isDelegateType());
+
     METHSYM * method;
     BASENODE * ntree;
     METHSYM * invoke;
     EXPR * expr;
     EXPRCALL * call;
 
-    method = compiler()->symmgr.LookupGlobalSym(compiler()->namemgr->GetPredefName(PN_CTOR), type, MASK_METHSYM)->asMETHSYM();
+    // First, find the constructor being called:
+    method = compiler()->symmgr.LookupGlobalSym(compiler()->namemgr->GetPredefName(PN_CTOR), delegate, MASK_METHSYM)->asMETHSYM();
     while (method) {
         // The constructor has got to take an object and an uintptr...
         if (method->cParams == 2 && method->params[0]->isPredefType(PT_OBJECT) &&
             (method->params[1]->isPredefType(PT_UINTPTR) || method->params[1]->isPredefType(PT_INTPTR))) 
             break;
         
-        method = compiler()->symmgr.LookupNextSym(method, type, MASK_METHSYM)->asMETHSYM();
+        method = compiler()->symmgr.LookupNextSym(method, delegate, MASK_METHSYM)->asMETHSYM();
     }
 
     if (!method) {
-        errorSym(tree, ERR_BadDelegateConstructor, type);
+        errorSym(tree, ERR_BadDelegateConstructor, delegate);
         goto LERROR;
     }
 
-    invoke = compiler()->symmgr.LookupGlobalSym(compiler()->namemgr->GetPredefName(PN_INVOKE), type, MASK_METHSYM)->asMETHSYM();
+    // Now, find the invoke function on the delegate:
+    invoke = compiler()->symmgr.LookupGlobalSym(compiler()->namemgr->GetPredefName(PN_INVOKE), delegate, MASK_METHSYM)->asMETHSYM();
     if (!invoke) {
-        errorSym(tree, ERR_NoInvoke, type);
+        errorSym(tree, ERR_NoInvoke, delegate);
         goto LERROR;
     }
 
+    // Next, find the function we're taking the address of:
     ntree = tree->pArgs;
     ASSERT(ntree);
 
@@ -3030,8 +3197,11 @@ EXPR * FUNCBREC::bindDelegateNew(AGGSYM * type, NEWNODE * tree)
 
     call = expr->asCALL();
 
-    invoke = verifyMethodCall(ntree, call->method, NULL, &(call->object), expr->flags & EXF_BASECALL, invoke)->asMETHSYM();
+    // Next, verify that the function has a suitable type for the invoke method.  
+    invoke = verifyMethodCall(ntree, call->method, NULL, &(call->object), expr->flags & EXF_BASECALL, expr, invoke, type)->asMETHSYM(); 
     if (!invoke) goto LERROR;
+
+	//
 
     EXPRFUNCPTR * funcPtr;
     funcPtr = newExpr(tree->pArgs, EK_FUNCPTR, getVoidType())->asFUNCPTR();
@@ -3042,6 +3212,7 @@ EXPR * FUNCBREC::bindDelegateNew(AGGSYM * type, NEWNODE * tree)
         EXPR * obj;
         
         obj = funcPtr->object = call->object;
+        funcPtr->methodInType = call->methodInType;
 
         if (obj && obj->type->fundType() != FT_REF) {
             // Must box the object before creating a delegate to it.
@@ -3051,6 +3222,7 @@ EXPR * FUNCBREC::bindDelegateNew(AGGSYM * type, NEWNODE * tree)
         call->args = newExprBinop(NULL, EK_LIST, getVoidType(), obj, funcPtr);
     } else {
         funcPtr->object = NULL;
+        funcPtr->methodInType = NULL;
         call->args = newExprBinop(NULL, EK_LIST, getVoidType(), bindNull(NULL), funcPtr);
     }
     call->object = NULL;
@@ -3058,6 +3230,9 @@ EXPR * FUNCBREC::bindDelegateNew(AGGSYM * type, NEWNODE * tree)
     call->flags = EXF_NEWOBJCALL | EXF_BOUNDCALL | EXF_CANTBENULL;
     call->tree = tree;
     call->type = type;
+    call->methodInType = type;
+    call->ppMethTypeArgs = NULL;
+    call->cMethTypeArgs = 0;
 
     return call;
 
@@ -3069,6 +3244,7 @@ LERROR:
 EXPR * FUNCBREC::bindNew(NEWNODE * tree, bool stmtExprOnly)
 {
     EXPR * rval = NULL;
+    EXPR * args;
     TYPESYM * type = bindType(tree->pType);
     if (!type) return newError(tree);
     TYPESYM * coclassType = type;
@@ -3083,10 +3259,15 @@ EXPR * FUNCBREC::bindNew(NEWNODE * tree, bool stmtExprOnly)
         rval = bindArrayNew(type->asARRAYSYM(), tree);
         goto CHECKSTMTONLY;
     }
+    
+    if (type->kind == SK_TYVARSYM) {
+        errorSym(tree, ERR_NoNewTyvar, type); // GENERICS - TODO for constraints
+        goto LERROR;  
+    }
 
-    if (type->asAGGSYM()->isDelegate && tree->pArgs != NULL && tree->pArgs->kind != EK_LIST) {
+    if (type->isAggType() && type->isDelegateType() && tree->pArgs != NULL && tree->pArgs->kind != EK_LIST) {
         // this could be a special new which takes a func pointer:
-        rval = bindDelegateNew(type->asAGGSYM(), tree);
+        rval = bindDelegateNew(type, tree);
 CHECKSTMTONLY:
         if (stmtExprOnly) {
             errorN(tree, ERR_IllegalStatement);
@@ -3096,18 +3277,18 @@ CHECKSTMTONLY:
 
 
     // first the args...
-    EXPR * args = bindExpr(tree->pArgs, BIND_RVALUEREQUIRED | BIND_ARGUMENTS);
+    args = bindExpr(tree->pArgs, BIND_RVALUEREQUIRED | BIND_ARGUMENTS);
 
     // Parameterless struct constructor calls == zero init
     if (!args 
-        && (type->asAGGSYM()->isStruct || type->asAGGSYM()->isEnum) 
-        && (!type->asAGGSYM()->hasZeroParamConstructor || type->asAGGSYM()->isSimpleType())) {
+        && (type->underlyingAggregate()->isStruct || type->underlyingAggregate()->isEnum) 
+        && (!type->underlyingAggregate()->hasZeroParamConstructor || type->underlyingAggregate()->isSimpleType())) {
         return newExprZero(tree, type);
     }
 
-    if (type->asAGGSYM()->isAbstract) {
-        if (type->asAGGSYM()->isInterface && type->asAGGSYM()->comImportCoClass ) {
-            AGGSYM * agg = type->asAGGSYM();
+    if (type->underlyingAggregate()->isAbstract) {
+        if (type->underlyingAggregate()->isInterface && type->underlyingAggregate()->comImportCoClass ) {
+            AGGSYM * agg = type->underlyingAggregate();
             if (agg->underlyingType) {
                 // The coclass has already been resolved
                 if (agg->underlyingType == agg) {
@@ -3165,14 +3346,14 @@ CHECKSTMTONLY:
             }
         }
 
-        if (coclassType->asAGGSYM()->isAbstract) {
+        if (coclassType->underlyingAggregate()->isAbstract) {
             errorSym(tree, ERR_NoNewAbstract, type);
             goto LERROR;
         }
     }
 
     // now find any of that classes constructors
-    rval = createConstructorCall(tree, coclassType->asAGGSYM(), NULL, args, true);
+    rval = createConstructorCall(tree, coclassType, NULL, args, true);
     if (coclassType != type)
         rval = mustCast(rval, type, tree);
 
@@ -3695,20 +3876,25 @@ EXPR * FUNCBREC::bindSwitch(SWITCHSTMTNODE * tree, EXPR *** newLast)
     if (type->fundType() > FT_LASTINTEGRAL && type != stringType) {
         int matches = 0;
         TYPESYM * dest = NULL, * toType = NULL;
-        SYMLIST * listSrc = (type->kind == SK_AGGSYM) ? compiler()->clsDeclRec.getConversionList(type->asAGGSYM()) : NULL;
+        SYMLIST * listSrcMethodInType = NULL;
+        SYMLIST * listSrc = (type->kind == SK_AGGSYM) ? compiler()->clsDeclRec.getConversionList(type->asAGGSYM(), &listSrcMethodInType) : NULL;
         METHSYM * conversion;
+        TYPESYM * conversionMethodInType;
 
         while( listSrc) {
+            ASSERT(listSrcMethodInType);
             conversion = listSrc->sym->asMETHSYM();
+            conversionMethodInType = listSrcMethodInType->sym->asTYPESYM();
             ASSERT(conversion->cParams == 1);
             if (conversion->isImplicit) {
-                toType = conversion->retType;
+                toType = compiler()->symmgr.SubstTypeUsingType(conversion->retType, conversionMethodInType);
                 if ((toType->isNumericType() && toType->fundType() <= FT_LASTINTEGRAL) || toType == stringType) {
                     matches++;
                     dest = toType;
                 }
             }
             listSrc = listSrc->next;
+            listSrcMethodInType = listSrcMethodInType->next;
         }
         if (matches != 1) {
             errorN(tree->pExpr, ERR_IntegralTypeValueExpected);
@@ -3917,10 +4103,13 @@ EXPR * FUNCBREC::bindLock(LOOPSTMTNODE * tree, EXPR *** newLast)
     if (!exitM) return newError(tree);
 
     EXPRCALL * call = newExpr(tree, EK_CALL, exitM->retType)->asCALL();
+    call->methodInType = NULL;
     call->args = wrap;
     call->object = NULL;
     call->method = exitM;
     call->flags |= EXF_BOUNDCALL;
+    call->ppMethTypeArgs = NULL;
+    call->cMethTypeArgs = 0;
 
     EXPR * stmt = newExprStmtAs(NULL, call);
     stmt->flags |= EXF_NODEBUGINFO;  //                               don't emit debug info for the unlocking.
@@ -3934,9 +4123,12 @@ EXPR * FUNCBREC::bindLock(LOOPSTMTNODE * tree, EXPR *** newLast)
 
     call = newExpr(tree, EK_CALL, enterM->retType)->asCALL();
     call->args = arg;
+    call->methodInType = NULL;
     call->object = NULL;
     call->method = enterM;
     call->flags |= EXF_BOUNDCALL;
+    call->ppMethTypeArgs = NULL;
+    call->cMethTypeArgs = 0;
 
     EXPR * list = newExprStmtAs(tree, call);
     EXPR ** pList = &list;
@@ -4047,11 +4239,12 @@ EXPR * FUNCBREC::bindUsingDecls(FORSTMTNODE * tree, EXPR * first, EXPR * next)
         if (!iDispObject) return newError(tree);
 
         METHSYM * disposeM = NULL;
+		TYPESYM *disposeMMethodInType = NULL;
         if (isStruct) {
 
             // we have a struct which implements IDisposable, so let's use the method directly
             // instead of casting to an interface...
-            disposeM = findStructDisposeMethod(object->type->asAGGSYM());
+            disposeM = findStructDisposeMethod(object->type, &disposeMMethodInType);
             if (disposeM) {
                 iDispObject = object;
             }
@@ -4059,6 +4252,7 @@ EXPR * FUNCBREC::bindUsingDecls(FORSTMTNODE * tree, EXPR * first, EXPR * next)
         
         if (!disposeM) {
             disposeM = findMethod(tree, PN_DISPOSE, getPDT(PT_IDISPOSABLE)->asAGGSYM());
+			disposeMMethodInType = NULL;  // Non-generic
         }
         if (!disposeM) return newError(tree);
 
@@ -4067,6 +4261,11 @@ EXPR * FUNCBREC::bindUsingDecls(FORSTMTNODE * tree, EXPR * first, EXPR * next)
         call->object = iDispObject;
         call->method = disposeM;
         call->flags |= EXF_BOUNDCALL;
+		// GENERICS: if isStruct then the call may be to a polymorphic type.
+		// GENERICS: The method we're calling will not itself be generic
+		call->methodInType = disposeMMethodInType;
+		call->ppMethTypeArgs = NULL;
+		call->cMethTypeArgs = 0;
 
         EXPR * stmt = newExprStmtAs(NULL, call);
         stmt->flags |= EXF_NODEBUGINFO;  //                               don't emit debug info for the unlocking.
@@ -4085,22 +4284,25 @@ EXPR * FUNCBREC::bindUsingDecls(FORSTMTNODE * tree, EXPR * first, EXPR * next)
     return list;
 }
 
-METHSYM * FUNCBREC::findStructDisposeMethod(AGGSYM * cls)
+METHSYM * FUNCBREC::findStructDisposeMethod(TYPESYM * cls, TYPESYM **methodInType)
 {
 
-    if (cls->hasExplicitImpl) return NULL;
+    if (cls->underlyingAggregate()->hasExplicitImpl) return NULL;
 
     NAME * name = compiler()->namemgr->GetPredefName(PN_DISPOSE);
 
-    SYM * rval = NULL;
+    TYPESYM *whereToSearchAndMethodInType = cls;
+	SYM * rval = NULL;
 
     while (true) {
-        rval = compiler()->clsDeclRec.findNextAccessibleName(name, cls, pParent, rval, false, true);
+        rval = compiler()->clsDeclRec.findNextAccessibleName(name, &whereToSearchAndMethodInType, pParent, rval, false, true);
         if (rval) {
             if (rval->kind != SK_METHSYM) continue;
             if (rval->asMETHSYM()->cParams != 0) continue;
+            if (methodInType) { *methodInType = whereToSearchAndMethodInType; }
             return rval->asMETHSYM();
         } else {
+            if (methodInType) { *methodInType = NULL; }
             return NULL;
         }
     }
@@ -4358,15 +4560,17 @@ EXPR * FUNCBREC::bindForEachArray(FORSTMTNODE * tree, EXPR * array)
             getLimit = findMethod(tree, PN_GETUPPERBOUND, getPDT(PT_ARRAY)->asAGGSYM(), &oneIntArgList);
             ASSERT(getLimit);
 
-            EXPRCALL * callGetLimit;
-            callGetLimit = newExpr(tree, EK_CALL, NULL)->asCALL();
+            EXPRCALL * callGetLimit = newExpr(tree, EK_CALL, NULL)->asCALL();
             callGetLimit->method = getLimit;
             CONSTVAL cv;
             cv.iVal = curRank;
             callGetLimit->args = newExprConstant(NULL, intType, cv);
             callGetLimit->object = arrayTemp;
             callGetLimit->flags |= EXF_BOUNDCALL;
+            callGetLimit->methodInType = (arrayTemp ? arrayTemp->type : NULL);
             callGetLimit->type = intType;
+            callGetLimit->ppMethTypeArgs = NULL;
+            callGetLimit->cMethTypeArgs = 0;
 
             assignment = newExprBinop(tree, EK_ASSG, intType, limit, callGetLimit);
 
@@ -4401,7 +4605,10 @@ EXPR * FUNCBREC::bindForEachArray(FORSTMTNODE * tree, EXPR * array)
             callGetLimit->args = newExprConstant(NULL, intType, cv);
             callGetLimit->object = arrayTemp;
             callGetLimit->flags |= EXF_BOUNDCALL;
+            callGetLimit->methodInType = (arrayTemp ? arrayTemp->type : NULL);
             callGetLimit->type = intType;
+            callGetLimit->ppMethTypeArgs = NULL;
+            callGetLimit->cMethTypeArgs = 0;
 
             assignment = newExprBinop(tree, EK_ASSG, intType, current, callGetLimit);
 
@@ -4560,15 +4767,15 @@ EXPR * FUNCBREC::bindForEach(FORSTMTNODE * tree, EXPR *** newLast)
     EXPR ** pList = &list;
 
     
-    if (enumerator && enumerator->type->kind == SK_AGGSYM) {
+    if (enumerator && (enumerator->type->kind == SK_AGGSYM || enumerator->type->kind == SK_INSTAGGSYM)) {
 
         bool mustCheckAtRuntime = false;
         bool hasInterface = false;
         bool doesNotHaveInterface = false;
 
-        AGGSYM * typDisp = getPDT(PT_IDISPOSABLE)->asAGGSYM();
+        TYPESYM * typDisp = getPDT(PT_IDISPOSABLE);
 
-        bool isStruct = enumerator->type->asAGGSYM()->isStruct;
+        bool isStruct = enumerator->type->underlyingAggregate()->isStruct;
 
         if (enumerator->type == getPDT(PT_IENUMERATOR)) {
             mustCheckAtRuntime = true;
@@ -4590,12 +4797,13 @@ EXPR * FUNCBREC::bindForEach(FORSTMTNODE * tree, EXPR *** newLast)
             // we only need to cast to the interface, and make the call...
 
 CHECKNULL:
+			TYPESYM *dispMMethodInType = NULL;
             METHSYM * dispMethod = NULL;
             EXPRLABEL * label = NULL;
 
             if (isStruct) {
 
-                dispMethod = findStructDisposeMethod(enumerator->type->asAGGSYM());
+                dispMethod = findStructDisposeMethod(enumerator->type, &dispMMethodInType);
             } else {
                 // we also need to check for null before calling...
                 label = newExprLabel();
@@ -4611,7 +4819,7 @@ CHECKNULL:
 
             if (!dispMethod) {
                 dispObject = mustConvert(dispObject, typDisp, tree);
-                dispMethod = findMethod(tree, PN_DISPOSE, typDisp);
+                dispMethod = findMethod(tree, PN_DISPOSE, typDisp, NULL, true, &dispMMethodInType);
                 if (!dispMethod) return newError(tree);
             }
 
@@ -4620,6 +4828,9 @@ CHECKNULL:
             call->object = dispObject;
             call->method = dispMethod;
             call->flags |= EXF_BOUNDCALL;
+		    call->methodInType = dispMMethodInType; // The dispose method may be a member of a generic type
+			call->ppMethTypeArgs = NULL; // The dispose method itslef is not generic
+			call->cMethTypeArgs = 0;
 
             EXPR * stmt = newExprStmtAs(tree, call);
 
@@ -4693,11 +4904,11 @@ CHECKNULL:
 
 EXPR * FUNCBREC::bindForEachInner(FORSTMTNODE * tree, EXPR ** enumeratorExpr, EXPR ** initExpr)
 {
-    AGGSYM * collType = NULL;
     TYPESYM ** emptyArgList = NULL;
     EXPR * list = NULL;
     EXPR ** pList;
     pList = &list;
+    TYPESYM * collType = NULL;
 
     // Note that the caller has prepared a block and scope for us already, so we just fill in the
     // statements into that block
@@ -4714,23 +4925,26 @@ EXPR * FUNCBREC::bindForEachInner(FORSTMTNODE * tree, EXPR ** enumeratorExpr, EX
     }
 
     METHSYM * getEnum;
+
     bool hasInterface;
 
     hasInterface = canConvert(collection, getPDT(PT_IENUMERABLE), tree);
 
-    if (collection->type->kind != SK_AGGSYM) {
+    if (collection->type->kind != SK_AGGSYM && collection->type->kind != SK_INSTAGGSYM) {
         goto NOFOREACH;
     }
-    collType = collection->type->asAGGSYM();
-    getEnum = findMethod(tree, PN_GETENUMERATOR, collType, &emptyArgList, false);
+    collType = collection->type;
+    TYPESYM *getEnumMethodInType;
+    getEnum = findMethod(tree, PN_GETENUMERATOR, collType, &emptyArgList, false, &getEnumMethodInType);
     if (!getEnum || getEnum->access != ACC_PUBLIC) {
 NOFOREACH:
         if (hasInterface) {
 TRYINTERFACE:
             hasInterface = false; // to prevent looping
+			getEnumMethodInType = NULL;
             collType = getPDT(PT_IENUMERABLE)->asAGGSYM();
             collection = mustConvert(collection, collType, tree);
-            getEnum = findMethod(tree, PN_GETENUMERATOR, collType, &emptyArgList, false);
+            getEnum = findMethod(tree, PN_GETENUMERATOR, collType, &emptyArgList, false, &getEnumMethodInType);
         } else {
             errorSymSymPN(tree, ERR_ForEachMissingMember, collType, collType, PN_GETENUMERATOR);
             goto LERROR;
@@ -4739,13 +4953,16 @@ TRYINTERFACE:
 
     EXPRCALL * callGetEnum;
     callGetEnum = newExpr(tree, EK_CALL, NULL)->asCALL();
-    callGetEnum->method = verifyMethodCall(tree, getEnum, NULL, &collection, 0)->asMETHSYM();
+    callGetEnum->methodInType = getEnumMethodInType;
+    callGetEnum->ppMethTypeArgs = NULL;
+    callGetEnum->cMethTypeArgs = 0;
+    callGetEnum->method = verifyMethodCall(tree, getEnum, NULL, &collection, NULL, callGetEnum, NULL)->asMETHSYM(); 
     if (!callGetEnum->method) goto LERROR;
     callGetEnum->args = NULL;
     callGetEnum->object = collection;
     callGetEnum->flags |= EXF_BOUNDCALL;
-    callGetEnum->type = callGetEnum->method->retType;
-    if (callGetEnum->type->kind != SK_AGGSYM) {
+    callGetEnum->type = compiler()->symmgr.SubstTypeUsingCallExpr(callGetEnum->method->retType, callGetEnum);
+    if (!(callGetEnum->type->kind == SK_AGGSYM || callGetEnum->type->kind == SK_INSTAGGSYM)) {
         if (hasInterface) {
             goto TRYINTERFACE;
         }
@@ -4759,8 +4976,9 @@ TRYINTERFACE:
     }
 
     METHSYM * moveNext;
-    moveNext = findMethod(tree, PN_MOVENEXT, callGetEnum->type->asAGGSYM(), &emptyArgList, false);
-    if (!moveNext || moveNext->access != ACC_PUBLIC || moveNext->retType != getPDT(PT_BOOL)) {
+    TYPESYM *moveNextMethodInType;
+    moveNext = findMethod(tree, PN_MOVENEXT, callGetEnum->type, &emptyArgList, false, &moveNextMethodInType);
+    if (!moveNext) {
         if (hasInterface) {
             goto TRYINTERFACE;
         }
@@ -4769,7 +4987,8 @@ TRYINTERFACE:
     }
 
     SYM * current;
-    current = lookupClassMember(compiler()->namemgr->GetPredefName(PN_CURRENT), callGetEnum->type->asAGGSYM(), false, false, true);
+    TYPESYM *currentMethodInType;
+    current = lookupClassMember(compiler()->namemgr->GetPredefName(PN_CURRENT), callGetEnum->type, false, false, true, 0, &currentMethodInType);
     if (!current || current->kind != SK_PROPSYM || current->asPROPSYM()->methGet == NULL || current->access != ACC_PUBLIC) {
         if (hasInterface) {
             goto TRYINTERFACE;
@@ -4791,20 +5010,23 @@ TRYINTERFACE:
     init = bindVarDecls(tree->pInit->asDECLSTMT(), &initLast);
     ASSERT(!initLast);
 
-
     EXPRCALL * callMoveNext;
     callMoveNext = newExpr(tree, EK_CALL, NULL)->asCALL();
     callMoveNext->object = enumerator;
-    callMoveNext->method = verifyMethodCall(tree, moveNext, NULL, &(callMoveNext->object),0)->asMETHSYM();
+    callMoveNext->methodInType = moveNextMethodInType;
+    callMoveNext->ppMethTypeArgs = NULL;
+    callMoveNext->cMethTypeArgs = 0;
+    callMoveNext->method = verifyMethodCall(tree, moveNext, NULL, &(callMoveNext->object),NULL, callMoveNext)->asMETHSYM();
     if (!callMoveNext->method) goto LERROR;
     callMoveNext->args = NULL;
     callMoveNext->object = enumerator;
     callMoveNext->flags |= EXF_BOUNDCALL;
-    callMoveNext->type = callMoveNext->method->retType;
-
+    // GENERICS: actually, this subst should never do anything, because the return type should be "bool". I've
+    // included it for regularity.
+    callMoveNext->type = compiler()->symmgr.SubstTypeUsingCallExpr(callMoveNext->method->retType, callMoveNext); 
 
     EXPR * callCurrent;
-    callCurrent = bindToProperty(tree, enumerator, current->asPROPSYM());
+    callCurrent = bindToProperty(tree, enumerator, current->asPROPSYM(), BIND_RVALUEREQUIRED, NULL, currentMethodInType);
     RETBAD(callCurrent);
 
     if (init->kind != EK_DECL) goto LERROR;
@@ -5205,9 +5427,10 @@ EXPR * FUNCBREC::bindUDUnop(BASENODE * tree, EXPRKIND ek, EXPR * op)
     NAME * name = ekName(ek);
     ASSERT(name);
 
-    if (op->type->kind != SK_AGGSYM) return NULL;
+    if (!(op->type->kind == SK_AGGSYM || op->type->kind == SK_INSTAGGSYM)) return NULL;
 
-    SYM * sym = lookupClassMember(name, op->type->asAGGSYM(), false, false, false);
+    TYPESYM *methodInType;
+    SYM * sym = lookupClassMember(name, op->type, false, false, false, 0, &methodInType);
     if (!sym || sym->kind != SK_METHSYM || !sym->asMETHSYM()->isOperator) return NULL;
 
     if (checkBogus(sym)) {
@@ -5215,11 +5438,14 @@ EXPR * FUNCBREC::bindUDUnop(BASENODE * tree, EXPRKIND ek, EXPR * op)
         return newError(tree);
     }
 
-    EXPRCALL * call = newExpr(tree, EK_CALL, sym->asMETHSYM()->retType)->asCALL();
+    EXPRCALL * call = newExpr(tree, EK_CALL, compiler()->symmgr.SubstTypeUsingTypeAsMethInst(sym->asMETHSYM()->retType, methodInType))->asCALL();
     call->args = op;
     call->object = NULL;
+    call->methodInType = NULL;
     call->method = sym->asMETHSYM();
     call->flags |= EXF_BOUNDCALL;
+    call->ppMethTypeArgs = (methodInType->kind == SK_INSTAGGSYM) ? methodInType->asINSTAGGSYM()->ppArgs : NULL;
+    call->cMethTypeArgs =  (methodInType->kind == SK_INSTAGGSYM) ? methodInType->asINSTAGGSYM()->cArgs : 0;
 
     verifyMethodArgs(call);
 
@@ -5496,13 +5722,13 @@ EXPR * FUNCBREC::bindDelegateOp(BASENODE * tree, EXPRKIND kind, unsigned flags, 
 
     TYPESYM * delegateType = NULL;   // Type of the delegate.
 
-    if (op1->type->kind == SK_AGGSYM && op1->type->asAGGSYM()->isDelegate) {
+    if (op1->type->isDelegateType()) {
         delegateType = op1->type;
         op2 = tryConvert(op2, delegateType, tree, 0);
         if (! op2)
             return NULL;   // Couldn't converts op2 to the type of op1.
     }
-    else if (op2->type->kind == SK_AGGSYM && op2->type->asAGGSYM()->isDelegate) {
+    else if (op2->type->isDelegateType()) {
         delegateType = op2->type;
         op1 = tryConvert(op1, delegateType, tree, 0);
         if (! op1)
@@ -5510,7 +5736,7 @@ EXPR * FUNCBREC::bindDelegateOp(BASENODE * tree, EXPRKIND kind, unsigned flags, 
     }
 
     // Both operands are now of the same delegate type.
-    ASSERT(delegateType == op1->type && delegateType == op2->type && delegateType->asAGGSYM()->isDelegate);
+    ASSERT(delegateType == op1->type && delegateType == op2->type && delegateType->isDelegateType());
 
     // Construct argument list from the two delegates.
     EXPR * args = newExprBinop(NULL, EK_LIST, getVoidType(), op1, op2);
@@ -5524,10 +5750,19 @@ EXPR * FUNCBREC::bindDelegateOp(BASENODE * tree, EXPRKIND kind, unsigned flags, 
         errorSymName(tree, ERR_MissingPredefinedMember, getPDT(PT_DELEGATE), memb);
         return newError( tree);
     }
-    SYM * verified = verifyMethodCall(tree, method, args, &obj, 0);
+	// GENERICS: Create the call.  Like all the calls that use verifyMethodCall
+	// GENERICS: to deduce further information, we have to set "methodInType" and
+	// GENERICS: the method type arguments before we call verifyMethodCall.
+	// GENERICS: This is because the act of verifying the call and resolving
+	// GENERICS: overloading neds to know the instantiation context in which the call
+	// GENERICS: occurs, i.e. how to interpret type parameters.
+    EXPRCALL * call = newExpr(tree, EK_CALL, getPDT(PT_DELEGATE))->asCALL();
+    call->methodInType = NULL; // static call
+    call->ppMethTypeArgs = NULL;
+    call->cMethTypeArgs = 0;
+    SYM * verified = verifyMethodCall(tree, method, args, &obj, NULL, call, NULL);
 
     // Create the call node for the call.
-    EXPRCALL * call = newExpr(tree, EK_CALL, getPDT(PT_DELEGATE))->asCALL();
     call->object = obj;
     call->flags |= EXF_BOUNDCALL;
     call->method = verified->asMETHSYM();
@@ -6627,8 +6862,8 @@ EXPR * FUNCBREC::bindArithOp(BASENODE * tree, EXPRKIND kind, unsigned flags, EXP
 
     // Delegate type (+ and - only)?
     if ((kind == EK_ADD || kind == EK_SUB) && 
-        ((type1->kind == SK_AGGSYM && type1->asAGGSYM()->isDelegate) ||
-         (type2 && type2->kind == SK_AGGSYM && type2->asAGGSYM()->isDelegate)))
+        (type1->isDelegateType() ||
+         (type2 && type2->isDelegateType())))
     {
         rval = bindDelegateOp(tree, kind, flags, op1, op2);
         if (rval) {
@@ -6833,7 +7068,8 @@ EXPR * FUNCBREC::bindUserBoolOp(BASENODE * tree, EXPRKIND kind, EXPR * call)
     TYPESYM * retType = call->type;
 
     ASSERT(call->asCALL()->method->cParams == 2);
-    if (call->asCALL()->method->params[0] != retType || call->asCALL()->method->params[1] != retType) {
+    if (compiler()->symmgr.SubstTypeUsingTypeAsMethInst(call->asCALL()->method->params[0],retType) != retType || 
+        compiler()->symmgr.SubstTypeUsingTypeAsMethInst(call->asCALL()->method->params[1],retType) != retType) {
         errorSym(tree, ERR_BadBoolOp, call->asCALL()->method);
         return newError(tree);
     }
@@ -6969,8 +7205,8 @@ EXPR * FUNCBREC::bindEqualityOp(BASENODE * tree, EXPRKIND kind, EXPR * op1, EXPR
 
     // If we're comparing a delegate to null constant, skip the user-defined operator search and just
     // do a reference comparison.
-    if ((op1->type->kind == SK_NULLSYM && op2->type->kind == SK_AGGSYM && op2->type->asAGGSYM()->isDelegate) ||
-        (op2->type->kind == SK_NULLSYM && op1->type->kind == SK_AGGSYM && op1->type->asAGGSYM()->isDelegate))
+    if ((op1->type->kind == SK_NULLSYM && op2->type->kind == SK_AGGSYM && op2->type->isDelegateType()) ||
+        (op2->type->kind == SK_NULLSYM && op1->type->kind == SK_AGGSYM && op1->type->isDelegateType()))
     {
         noUserDefined = true;
     }
@@ -7555,15 +7791,16 @@ EXPR * FUNCBREC::bindIndexer(BASENODE * tree, EXPR * object, EXPR * args, int bi
     NAME * items;
     TYPESYM * type = object->type;
 
-    if (type->kind != SK_AGGSYM) goto LERROR;
+    if (type->kind != SK_AGGSYM && type->kind != SK_INSTAGGSYM)  goto LERROR;
 
     items = compiler()->namemgr->GetPredefName(PN_INDEXERINTERNAL);
 
-    prop = lookupClassMember(items, type->asAGGSYM(), 0 != (bindFlags & BIND_BASECALL), false, false);
+    TYPESYM *methodInType;
+    prop = lookupClassMember(items, type, 0 != (bindFlags & BIND_BASECALL), false, false, 0, &methodInType);
 
     if (!prop || prop->kind != SK_PROPSYM) goto LERROR;
 
-    return bindToProperty(tree, object, prop->asPROPSYM(), bindFlags, args);
+    return bindToProperty(tree, object, prop->asPROPSYM(), bindFlags, args, methodInType);
 
 LERROR:
 
@@ -7585,8 +7822,9 @@ EXPR * FUNCBREC::bindBase(BASENODE * tree)
         return newError(tree);
     } else {
         rval->flags &= ~EXF_IMPLICITTHIS;
-        if (rval->type->asAGGSYM()->baseClass) {
-            rval = tryConvert(rval, rval->type->asAGGSYM()->baseClass, tree);
+        if (rval->type->underlyingAggregate()->baseClass) {
+			TYPESYM *baseType = compiler()->symmgr.SubstTypeUsingType(rval->type->underlyingAggregate()->baseClass, rval->type);
+            rval = tryConvert(rval, baseType, tree);
             ASSERT(rval);
         } else {
             errorN(tree, ERR_NoBaseClass);
@@ -8033,8 +8271,11 @@ EXPR * FUNCBREC::bindEventAccess(BASENODE * tree, bool isAdd, EXPREVENT * exprEv
     EXPRCALL * call = newExpr(tree, EK_CALL, getVoidType())->asCALL();
     call->object = exprEvent->object;
     call->flags |= EXF_BOUNDCALL | (exprEvent->flags & EXF_BASECALL);
+    call->methodInType = (exprEvent->object ? exprEvent->object->type : NULL);
     call->method = accessor;
     call->args = exprRHS;
+    call->ppMethTypeArgs = NULL;
+    call->cMethTypeArgs = 0;
 
     return call;
 }
@@ -8084,8 +8325,8 @@ EXPR * FUNCBREC::bindBinop(BINOPNODE * tree, int bindFlags)
         // These are special if LHS is an event. Bind the LHS, but allow events. If we get an
         // event, then process specially, otherwise, bind +=, -= as usual.
         BASENODE * p1 = tree->p1;
-        if (p1->kind == NK_NAME) 
-            op1 = bindName(p1->asNAME(), MASK_EVENTSYM | MASK_MEMBVARSYM | MASK_LOCVARSYM | MASK_PROPSYM);
+        if (p1->IsAnyName()) 
+            op1 = bindName(p1->asANYNAME(), MASK_EVENTSYM | MASK_MEMBVARSYM | MASK_LOCVARSYM | MASK_PROPSYM);
         else if (p1->kind == NK_DOT) 
             op1 = bindDot(p1->asDOT(), MASK_EVENTSYM | MASK_MEMBVARSYM | MASK_PROPSYM);
         else
@@ -9031,10 +9272,10 @@ bool FUNCBREC::bindConstantCast(BASENODE * tree, EXPR * exprSrc, TYPESYM * typeD
 #pragma optimize("", on)  // restore default optimizations
 #endif // defined(_MSC_VER)
 
-void FUNCBREC::considerConversion(METHSYM * conversion, TYPESYM * desired, bool from, bool impl, bool * newPossibleWinner, bool * oldMethodsValid, SYMLIST ** newList, SYMLIST ** prevList, bool foundImplBefore)
+void FUNCBREC::considerConversion(METHSYM * conversion, TYPESYM *conversionMethodInType, TYPESYM * desired, bool from, bool impl, bool * newPossibleWinner, bool * oldMethodsValid, SYMLIST ** newList, SYMLIST ** prevList, bool foundImplBefore)
 {
     TYPESYM * prevType = *prevList ? prevList[0]->sym->asTYPESYM() : NULL;
-    TYPESYM * actualType = from ? conversion->params[0] : conversion->retType;
+    TYPESYM * actualType = compiler()->symmgr.SubstTypeUsingTypeAsMethInst(from ? conversion->params[0] : conversion->retType, conversionMethodInType);
 
     if (!prevType) {
 USENEW:
@@ -9128,13 +9369,46 @@ USETHIS:
  *    implicitOnly - only consider implicit conversions.
  *
  * This is a helper routine for bindImplicitConversion and bindExplicitConversion.
+ *
+ * It's non trivial to get this right in the presence of generics.  e.g.
+ *    class D<B,C> { operator D<B,C> << (D<B,C>, int) }
+ *    class E<A> : D<List<A>, A> { }
+ *
+ *     E<int> x;
+ *  Now call x << 3.
+ *
+ * The operator itself is a static generic method with signature
+ *     D<B,C> opName<B,C> (D<B,C>, int)
+ * Note that whenever we use these formal types, we might have to substitute through
+ * the "active" instantiation.  In this case the substitution in
+ *   B --> List<int>
+ *   C --> int
+ * which is the composition of 
+ *   B --> D<List<A>
+ *   C --> A
+ * and 
+ *   A --> int
+ * This explains why we have to apply _two_ substitutions to elements of the
+ * formal signature of a conversion.  In other places, e.g. bindUDBinop, these
+ * are already composed in the machinery used to find plausible methods, however
+ * in the code below they are not.  
+ *
+ * In addition, the formal elements of the signature of the operator are types w.r.t.
+ * the generic type variables of the _method_, not the _class_.  Thus B and C in the
+ * example above are TYVARSYM's whose parent is the operator itself.  This explains why
+ * we have to use SubstTypeUsingTypeAsMethInst - when we use the type D<List<A>, A> as the
+ * governing type for a substitution, we actually want to use this to instantiate _method_
+ * type parameters and note _class_ type parameters (which is more normal).
+ *
  */
 bool FUNCBREC::bindUserDefinedConversion(BASENODE * tree, EXPR * exprSrc, TYPESYM * typeSrc, TYPESYM * typeDest, EXPR * * pexprDest, bool implicitOnly)
 {
     if (!typeSrc || !typeDest) return false;
 
-    SYMLIST * listSrc = (typeSrc->kind == SK_AGGSYM) ? compiler()->clsDeclRec.getConversionList(typeSrc->asAGGSYM()) : NULL;
-    SYMLIST * listDest = (typeDest->kind == SK_AGGSYM) ? compiler()->clsDeclRec.getConversionList(typeDest->asAGGSYM()) : NULL;
+    SYMLIST * listSrcMethodInType = NULL;
+    SYMLIST * listSrc = (typeSrc->kind == SK_AGGSYM || typeSrc->kind == SK_INSTAGGSYM) ? compiler()->clsDeclRec.getConversionList(typeSrc->underlyingAggregate()->asAGGSYM(), &listSrcMethodInType) : NULL;
+    SYMLIST * listDestMethodInType = NULL;
+    SYMLIST * listDest = (typeDest->kind == SK_AGGSYM || typeDest->kind == SK_INSTAGGSYM) ? compiler()->clsDeclRec.getConversionList(typeDest->underlyingAggregate()->asAGGSYM(), &listDestMethodInType) : NULL;
 
     // optimization...
     if (!listSrc && !listDest) return false;
@@ -9142,6 +9416,8 @@ bool FUNCBREC::bindUserDefinedConversion(BASENODE * tree, EXPR * exprSrc, TYPESY
     SYMLIST * prevFrom, * prevTo, * newList;
 
     METHSYM * best = NULL;
+    TYPESYM *bestMethodInType = NULL;
+    TYPESYM *activeType = typeSrc;
     bool ambig = false;
 
     prevTo = prevFrom = newList = NULL;
@@ -9153,29 +9429,42 @@ bool FUNCBREC::bindUserDefinedConversion(BASENODE * tree, EXPR * exprSrc, TYPESY
         if (!listSrc) {
             if (listDest) {
                 listSrc = listDest;
+                listSrcMethodInType = listDestMethodInType;
+                activeType = typeDest;
                 listDest = NULL;
+                listDestMethodInType = NULL;
             } else {
                 break;
             }
         }
+        ASSERT(listSrc);
+        ASSERT(listSrcMethodInType);
         
         METHSYM * conversion = listSrc->sym->asMETHSYM();
+        TYPESYM * conversionMethodInType = listSrcMethodInType->sym->asTYPESYM();
         ASSERT(conversion->cParams == 1);
-
-        if (implicitOnly && !conversion->isImplicit) continue;
-
-        TYPESYM * fromType = conversion->params[0];
-        TYPESYM * toType = conversion->retType;
 
         bool implFrom = false;
         bool implTo = false;
+        bool oldMethodsValid = true;
+        bool newPossibleWinner = true;
+        TYPESYM * fromType;
+        TYPESYM * toType;
+
+        if (implicitOnly && !conversion->isImplicit) goto NEXT;
+
+        // GENERICS: we substitute - twice!  Once for the type of the argument, and once if the
+        // operator's been inherited via polymorphic inheritance....
+        fromType = compiler()->symmgr.SubstTypeUsingType(compiler()->symmgr.SubstTypeUsingTypeAsMethInst(conversion->params[0], conversionMethodInType), activeType);
+        toType = compiler()->symmgr.SubstTypeUsingType(compiler()->symmgr.SubstTypeUsingTypeAsMethInst(conversion->retType, conversionMethodInType), activeType);
+
         if (exprSrc) {
             implFrom = canConvert(exprSrc, fromType, NULL, CONVERT_STANDARD);
         } else {
             implFrom = canConvert(typeSrc, fromType, NULL, CONVERT_STANDARD);
         }
         if (!implFrom) {
-            if (implicitOnly || prevImplFrom) continue;
+            if (implicitOnly || prevImplFrom) goto NEXT;
             if (exprSrc) {
                 if (!canCast(exprSrc, fromType, NULL, CONVERT_STANDARD)) continue;
             } else {
@@ -9189,40 +9478,44 @@ bool FUNCBREC::bindUserDefinedConversion(BASENODE * tree, EXPR * exprSrc, TYPESY
             if (!canCast(toType, typeDest, NULL, CONVERT_STANDARD)) continue;
         }
 
-    
-        bool oldMethodsValid = true;
-        bool newPossibleWinner = true;
-
         if (!newList) newList = (SYMLIST*) _alloca(sizeof(SYMLIST));
 
-        considerConversion(conversion, typeSrc, true, implFrom, &newPossibleWinner, &oldMethodsValid, &newList, &prevFrom, prevImplFrom);
+        considerConversion(conversion, conversionMethodInType, typeSrc, true, implFrom, &newPossibleWinner, &oldMethodsValid, &newList, &prevFrom, prevImplFrom);
 
         prevImplFrom |= implFrom;
 
         if (!newList) newList = (SYMLIST*) _alloca(sizeof(SYMLIST));
 
-        considerConversion(conversion, typeDest, false, implTo, &newPossibleWinner, &oldMethodsValid, &newList, &prevTo, prevImplTo);
+        considerConversion(conversion, conversionMethodInType, typeDest, false, implTo, &newPossibleWinner, &oldMethodsValid, &newList, &prevTo, prevImplTo);
 
         prevImplTo |= implTo;
 
         if (newPossibleWinner) {
             if (oldMethodsValid) {
                 if (best) {
-                    ASSERT(conversion->retType == best->retType);
-                    ASSERT(conversion->params[0] == best->params[0]);
+                    //ASSERT(conversion->retType == best->retType);
+                    //ASSERT(conversion->params[0] == best->params[0]);
+                    ASSERT(toType == compiler()->symmgr.SubstTypeUsingTypeAsMethInst(best->retType, bestMethodInType));
+                    ASSERT(fromType == compiler()->symmgr.SubstTypeUsingTypeAsMethInst(best->params[0], bestMethodInType));
                     best = NULL;
+                    bestMethodInType = NULL;
                     ambig = true;
                 } else {
                     best = conversion;
+                    bestMethodInType = conversionMethodInType;
                 }
             } else {
                 best = conversion;
+                bestMethodInType = conversionMethodInType;
             }
         } else {
             if (!oldMethodsValid) {
                 best = NULL;
+                bestMethodInType = NULL;
             }
         }
+NEXT:
+        listSrcMethodInType = listSrcMethodInType->next;
 
     }
 
@@ -9245,13 +9538,16 @@ bool FUNCBREC::bindUserDefinedConversion(BASENODE * tree, EXPR * exprSrc, TYPESY
 //            checkUnsafe(tree, best->retType);
 //            checkUnsafe(tree, best->params[0]);
 //        }
-        EXPR * fromConv = tryCast(exprSrc, best->params[0], tree, CONVERT_NOUDC);
+        EXPR * fromConv = tryCast(exprSrc, compiler()->symmgr.SubstTypeUsingType(compiler()->symmgr.SubstTypeUsingTypeAsMethInst(best->params[0], bestMethodInType), activeType), tree, CONVERT_NOUDC);
         ASSERT(fromConv);
-        EXPRCALL * call = newExpr(tree, EK_CALL, best->retType)->asCALL();
+        EXPRCALL * call = newExpr(tree, EK_CALL, compiler()->symmgr.SubstTypeUsingType(compiler()->symmgr.SubstTypeUsingTypeAsMethInst(best->retType, bestMethodInType), activeType))->asCALL();
         call->flags |= EXF_BOUNDCALL;
-        call->args = fromConv;
+		call->args = fromConv;
         call->object = NULL;
+        call->methodInType = NULL;
         call->method = best;
+        call->ppMethTypeArgs = (bestMethodInType->kind == SK_INSTAGGSYM) ? compiler()->symmgr.SubstParamsUsingType(bestMethodInType->asINSTAGGSYM()->cArgs, bestMethodInType->asINSTAGGSYM()->ppArgs, activeType) : NULL;
+        call->cMethTypeArgs = (bestMethodInType->kind == SK_INSTAGGSYM) ? bestMethodInType->asINSTAGGSYM()->cArgs : 0;
         EXPR * toConv = tryCast(call, typeDest, tree, CONVERT_NOUDC);
         ASSERT(toConv);
         *pexprDest = toConv;
@@ -9265,7 +9561,7 @@ bool FUNCBREC::bindUserDefinedConversion(BASENODE * tree, EXPR * exprSrc, TYPESY
 /*
  * bindImplicitConversion
  *
- * This is a complex routine with complex parameter. Generally, this should
+ * This is a complex routine with complex parameters. Generally, this should
  * be called through one of the helper methods that insulates you
  * from the complexity of the interface. This routine handles all the logic
  * associated with implicit conversions.
@@ -9333,7 +9629,7 @@ bool FUNCBREC::bindImplicitConversion(BASENODE * tree, EXPR * exprSrc, TYPESYM *
         if (exprSrc->kind != EK_CONSTANT)
             return false;
         else {
-            if (ftDest == FT_REF || ftDest == FT_PTR) {
+            if (ftDest == FT_REF || ftDest == FT_PTR) { //  || ftDest == FT_VAR GENERICS: TODO - maybe have to insert some information to allow generation of ldnull.any/initobj??
                 return bindSimpleCast(tree, exprSrc, typeDest, pexprDest);
             }
         }
@@ -9385,14 +9681,30 @@ bool FUNCBREC::bindImplicitConversion(BASENODE * tree, EXPR * exprSrc, TYPESYM *
 
         break;
 
-    case SK_AGGSYM: {
-        AGGSYM * aggSrc = typeSrc->asAGGSYM();
+    case SK_TYVARSYM:
+        /* 
+         * Handle implicit conversions for type variables
+         *
+         * A type variable can be implicitly converted to its bound (perhaps by boxing - will use "box.any" instruction)
+         */
+        if (canConvert(typeSrc->asTYVARSYM()->bound, typeDest, tree, flags))
+            return bindSimpleCast(tree, exprSrc, typeDest, pexprDest, EXF_FORCE_BOX);
 
+        break;
+    
+	case SK_INSTAGGSYM:  
+    case SK_AGGSYM: {
+        // GENERICS: The case for constructed types is very similar to types with
+	    // no parameters.    The parameters are irrelevant for most of the conversions
+        // below.  They could be relevant if we had user-defined conversions on
+        // generic types.
+        AGGSYM * aggSrc = typeSrc->underlyingAggregate();
+        
         if (aggSrc->isEnum) {
-            /* 
-             * Handle enum conversions.
-             * An enum can convert to Object, Value, or Enum.
-             */
+        /* 
+        * Handle enum conversions.
+        * An enum can convert to Object, Value, or Enum.
+            */
             if (typeDest->kind == SK_AGGSYM && typeDest->asAGGSYM()->isPredefined &&
                 (typeDest->isPredefType(PT_OBJECT) || typeDest->isPredefType(PT_VALUE) || typeDest->isPredefType(PT_ENUM)))
                 return bindSimpleCast(tree, exprSrc, typeDest, pexprDest, EXF_BOX | EXF_CANTBENULL);
@@ -9481,8 +9793,8 @@ bool FUNCBREC::bindImplicitConversion(BASENODE * tree, EXPR * exprSrc, TYPESYM *
          * to a base class or interface. (Note the test against object is needed below
          * because object is NOT a base type of interfaces.)
          */
-        if (typeDest->kind == SK_AGGSYM &&
-            (typeDest->isPredefType(PT_OBJECT) || compiler()->symmgr.IsBaseType(aggSrc, typeDest->asAGGSYM())))
+        if ((typeDest->kind == SK_AGGSYM || typeDest->kind == SK_INSTAGGSYM) &&
+            (typeDest->isPredefType(PT_OBJECT) || compiler()->symmgr.IsBaseType(typeSrc, typeDest)))
         {
             if (aggSrc->isStruct && ftDest == FT_REF)
                 return bindSimpleCast(tree, exprSrc, typeDest, pexprDest, EXF_BOX | EXF_CANTBENULL);
@@ -9491,7 +9803,8 @@ bool FUNCBREC::bindImplicitConversion(BASENODE * tree, EXPR * exprSrc, TYPESYM *
         }
 
         break;
-    }}
+    }
+    }    
 
     // No built-in conversion was found. Maybe a user-defined conversion?
     if (! (flags & CONVERT_NOUDC)) {
@@ -9618,6 +9931,13 @@ bool FUNCBREC::bindExplicitConversion(BASENODE * tree, EXPR * exprSrc, TYPESYM *
     case SK_NULLSYM:
         return false;  // Can never convert TO the null type.
 
+    case SK_TYVARSYM:  
+        // There is an explicit, possibly unboxing conversion from Object to
+        // any type variable.  This will involve a type check and possibly an unbox.
+        if (typeSrc == getPDT(PT_OBJECT))
+            return bindSimpleCast(tree, exprSrc, typeDest, pexprDest, EXF_FORCE_UNBOX);
+        break;
+
     case SK_ARRAYSYM:
         /*
          * Handle conversions to arrays.
@@ -9665,8 +9985,9 @@ bool FUNCBREC::bindExplicitConversion(BASENODE * tree, EXPR * exprSrc, TYPESYM *
 
         break;
 
-    case SK_AGGSYM: {
-        AGGSYM * aggDest = typeDest->asAGGSYM();
+    case SK_INSTAGGSYM:
+	case SK_AGGSYM: {
+        AGGSYM * aggDest = typeDest->underlyingAggregate();
 
         if (typeSrc->kind == SK_AGGSYM && typeSrc->asAGGSYM()->isEnum) {
             /* 
@@ -9771,10 +10092,10 @@ bool FUNCBREC::bindExplicitConversion(BASENODE * tree, EXPR * exprSrc, TYPESYM *
          * to a derived class or interface. (Note the test against object is needed below
          * because object is NOT a base type of interfaces.)
          */
-        if (typeSrc->kind == SK_AGGSYM) {
-            AGGSYM * aggSrc = typeSrc->asAGGSYM();
+        if (typeSrc->kind == SK_AGGSYM || typeSrc->kind == SK_INSTAGGSYM) {
+            AGGSYM * aggSrc = typeSrc->underlyingAggregate();
 
-            if (aggSrc->isPredefType(PT_OBJECT) || compiler()->symmgr.IsBaseType(aggDest, aggSrc)) 
+            if (aggSrc->isPredefType(PT_OBJECT) || compiler()->symmgr.IsBaseType(typeDest, typeSrc)) 
             {
                 if (aggDest->isStruct && aggSrc->fundType() == FT_REF)
                     return bindSimpleCast(tree, exprSrc, typeDest, pexprDest, EXF_UNBOX);
@@ -9889,25 +10210,25 @@ EXPR * FUNCBREC::tryCast(EXPR * expr, TYPESYM * dest, BASENODE * tree, unsigned 
 
 
 // Bind the dot operator.  mask indicates allowed return values
-EXPR * FUNCBREC::bindDot(BINOPNODE * tree, int mask, int bindFlags)
+EXPR * FUNCBREC::bindDot(BINOPNODE * tree, symbmask_t mask, int bindFlags)
 {
     // The only valid masks are:
     // MASK_MEMBVARSYM where we want a field
     // MASK_PROPSYM where we want a property
     // MASK_METHSYM where we want a method name, and we return an EXPRCALL
-    // MASK_AGGSYN where we want a class name, and we return an EXPRCLASS
+    // MASK_AGGSYM where we want a class name, and we return an EXPRCLASS
     // MASK_NSSSYM where we want a namespace, and we return an EXPRNSPACE
 
     ASSERT(mask);
     ASSERT(!(mask & ~(MASK_EVENTSYM | MASK_METHSYM | MASK_AGGSYM | MASK_NSSYM | MASK_MEMBVARSYM | MASK_PROPSYM)));
 
     BASENODE * first = tree->p1;
-    NAMENODE * name = tree->p2->asNAME();
+    NAMENODE * name = tree->p2->asANYNAME();
     bool base = false;
 
     EXPR * left;
 
-    const int leftmask = MASK_AGGSYM | MASK_NSSYM | MASK_MEMBVARSYM | MASK_PROPSYM;
+    const symbmask_t leftmask = MASK_AGGSYM | MASK_NSSYM | MASK_MEMBVARSYM | MASK_PROPSYM;
     if (tree->kind == NK_ARROW) {
         left = bindExpr(tree->p1);
         RETBAD(left);
@@ -9923,9 +10244,9 @@ EXPR * FUNCBREC::bindDot(BINOPNODE * tree, int mask, int bindFlags)
     } else if (first->kind == NK_DOT) {
         // the left side is also a dot...
         left = bindDot(first->asDOT(), leftmask, BIND_RVALUEREQUIRED | bindFlags);
-    } else if (first->kind == NK_NAME) {
+    } else if (first->IsAnyName()) {
         // The left could be anything...
-        left = bindName(first->asNAME(), leftmask | MASK_LOCVARSYM, BIND_RVALUEREQUIRED | bindFlags);
+        left = bindName(first->asANYNAME(), leftmask | MASK_LOCVARSYM, BIND_RVALUEREQUIRED | bindFlags);
         left->flags |= EXF_NAMEEXPR;
     } else if (first->kind == NK_OP && first->Op() == OP_BASE) {
         left = bindBase(first);
@@ -9935,78 +10256,91 @@ EXPR * FUNCBREC::bindDot(BINOPNODE * tree, int mask, int bindFlags)
     }
     RETBAD(left);
 
-    PARENTSYM * parent;
+    PARENTSYM * left_parent;
 
     NAME * rIdent = name->pName;
     SYM * right;
     SYM * inaccessibleSym = NULL;
+    TYPESYM *left_parent_typ = NULL;
+    AGGSYM *left_parent_agg = NULL;
+    TYPESYM *rightMethodInType = NULL;
 
     if (left->kind == EK_NSPACE) {
         SYM * badSymKind = NULL;  // This can never get set since MASK_ALL is used below.
-        parent = left->asNSPACE()->nspace;
+        left_parent = left->asNSPACE()->nspace;
         //We need to check accessibility
-        right = compiler()->clsDeclRec.lookupIfAccessOk(rIdent, parent, MASK_ALL, pParent, true, &inaccessibleSym, &badSymKind);
+        right = compiler()->clsDeclRec.lookupIfAccessOk(rIdent, left_parent, MASK_ALL, pParent, true, &inaccessibleSym, &badSymKind);
     } else {
-        parent = left->type;
+        left_parent = left->type;
         if (!base) {
 
-            if (parent->kind == SK_ARRAYSYM) {
+            if (left_parent->kind == SK_ARRAYSYM) {
                 // Length property on rank 1 arrays is converted into the ldlen instruction.
-                if (rIdent == compiler()->namemgr->GetPredefName(PN_LENGTH) && parent->asARRAYSYM()->rank == 1 && left->kind != EK_CLASS) {
+                if (rIdent == compiler()->namemgr->GetPredefName(PN_LENGTH) && left_parent->asARRAYSYM()->rank == 1 && left->kind != EK_CLASS) {
                     EXPR * rval = newExprBinop(name, EK_ARRLEN, getPDT(PT_INT), left, NULL);
                     rval->flags |= EXF_ASSGOP;
                     return rval;
 
                 } else {
 
-                    parent = compiler()->symmgr.GetPredefType(PT_ARRAY, true);
+                    left_parent = compiler()->symmgr.GetPredefType(PT_ARRAY, true);
                 }
             }
         }
 
-        compiler()->symmgr.DeclareType(parent);
-        if (parent->kind != SK_AGGSYM) {
-            errorStrSym(tree, ERR_BadUnaryOp, L".", parent);
+        compiler()->symmgr.DeclareType(left_parent);
+        if (left_parent->kind == SK_AGGSYM || left_parent->kind == SK_INSTAGGSYM) {
+            left_parent_typ = left_parent->asTYPESYM();
+        } else if (left_parent->kind == SK_TYVARSYM) {  
+            left_parent_typ = left_parent->asTYVARSYM()->bound;
+        } else {
+            errorStrSym(tree, ERR_BadUnaryOp, L".", left_parent);
             return newError(tree);
         }
-        right = lookupClassMember(rIdent, parent->asAGGSYM(), base, false, true);
+
+
+        // Find the member, recording where it was found in "rightMethodInType".
+        right = lookupClassMember(rIdent, left_parent_typ, base, false, true, 0, &rightMethodInType);
 
 NEWRIGHT:
 
         // can only reference type names through their containing type
-        if (right && (right->kind == SK_AGGSYM) && (left->kind != EK_CLASS)) {
+        if (right && (right->kind == SK_AGGSYM || right->kind == SK_INSTAGGSYM) && (left->kind != EK_CLASS)){
             compiler()->clsDeclRec.errorNameRefStr(name, pParent, compiler()->ErrSym(right), ERR_BadTypeReference);
             return newError(name);
         }
         if (!right) {
             // For better error reporting, see if there was a symbol, but it was inaccessible.
-            inaccessibleSym = lookupClassMember(rIdent, parent->asAGGSYM(), true, true, true);
+            // Nb. we don't care at which type the thing gets found.
+            inaccessibleSym = lookupClassMember(rIdent, left_parent_typ, true, true, true);
         }
+        left_parent_agg = left_parent_typ->underlyingAggregate();
     }
+
 
     if (!right) {
         if (inaccessibleSym) {
             if (inaccessibleSym->isUserCallable()) {
                 if ((inaccessibleSym->access == ACC_PROTECTED || 
                      (inaccessibleSym->access == ACC_INTERNALPROTECTED && pParent->getAssemblyIndex() != inaccessibleSym->getAssemblyIndex())) && 
-                    !base && lookupClassMember(rIdent, parent->asAGGSYM(), true, false, true))
+                    !base && left_parent_agg && lookupClassMember(rIdent, left_parent_agg, true, false, true))
                 {
-                    errorSymNameName(tree, ERR_BadProtectedAccess, inaccessibleSym, parent->name, pParent->name);
+                    errorSymNameName(tree, ERR_BadProtectedAccess, inaccessibleSym, left_parent_agg->name, pParent->name);
                 }
                 else
                     errorSym(tree, ERR_BadAccess, inaccessibleSym);
             } else {
                 errorSym(tree, ERR_CantCallSpecialMethod, inaccessibleSym);
             }
-        } else if (parent->kind == SK_AGGSYM && parent->asAGGSYM()->isDelegate &&
+        } else if (left_parent_typ && left_parent_typ->isDelegateType() &&
                 rIdent == compiler()->namemgr->GetPredefName(PN_INVOKE)) {
             errorN(name, ERR_DontUseInvoke);
             return left;
         } else {
-            if (parent->kind == SK_NSSYM) 
-                errorNameSym(tree, ERR_TypeNameNotFound, name->pName, parent);
+            if (left_parent->kind == SK_NSSYM) 
+                errorNameSym(tree, ERR_TypeNameNotFound, name->pName, left_parent);
             else
-                errorSymName(tree, ERR_NoSuchMember, parent, name->pName);
+                errorSymName(tree, ERR_NoSuchMember, left_parent, name->pName);
         }
         return newError(tree);
     }
@@ -10015,12 +10349,14 @@ NEWRIGHT:
         // then we redo the search looking for the right type, and return that...
 
         // we will later catch the ambiguity (which is inevitable in this case) in verifymethodcall
-        if (parent->kind == SK_AGGSYM && parent->asAGGSYM()->isInterface) {
+        if (left_parent_agg && left_parent_agg->isInterface) {
             if (right->mask() & (MASK_METHSYM | MASK_PROPSYM)) {
                 if (mask & (MASK_METHSYM | MASK_PROPSYM)) {
-                    SYM * newRight = lookupClassMember(rIdent, parent->asAGGSYM(), base, false, true, mask & (MASK_PROPSYM | MASK_METHSYM));
+                    TYPESYM *newRightMethodInType;
+                    SYM * newRight = lookupClassMember(rIdent, left_parent_typ, base, false, true, mask & (MASK_PROPSYM | MASK_METHSYM), &newRightMethodInType);
                     if (newRight) {
                         right = newRight;
+                        rightMethodInType = newRightMethodInType;
                         goto NEWRIGHT;
                     }
                 }
@@ -10036,15 +10372,15 @@ NEWRIGHT:
     switch(right->kind) {
     case SK_MEMBVARSYM:
         ASSERT(left->kind != EK_NSPACE);
-        rval = bindToField(tree, object, right->asMEMBVARSYM(), bindFlags);
+        rval = bindToField(tree, object, right->asMEMBVARSYM(), bindFlags, rightMethodInType);
         break;
     case SK_PROPSYM:
         ASSERT(left->kind != EK_NSPACE);
-        rval = bindToProperty(tree, object, right->asPROPSYM(), base ? (bindFlags | BIND_BASECALL) : bindFlags);
+        rval = bindToProperty(tree, object, right->asPROPSYM(), base ? (bindFlags | BIND_BASECALL) : bindFlags, NULL, rightMethodInType);
         break;
     case SK_EVENTSYM:
         ASSERT(left->kind != EK_NSPACE);
-        rval = bindToEvent(tree, object, right->asEVENTSYM(), base ? (bindFlags | BIND_BASECALL) : bindFlags);
+        rval = bindToEvent(tree, object, right->asEVENTSYM(), base ? (bindFlags | BIND_BASECALL) : bindFlags, rightMethodInType);
         break;
     case SK_NSSYM:
         rval = newExpr(tree, EK_NSPACE, NULL);
@@ -10064,10 +10400,26 @@ NEWRIGHT:
         }
         break;
     case SK_METHSYM:
+        // GMETH
         rval = newExpr(tree, EK_CALL, NULL);
         rval->asCALL()->object = object;
+        rval->asCALL()->methodInType = (object ? rightMethodInType : NULL);
         rval->asCALL()->args = NULL;
         rval->asCALL()->method = right->asMETHSYM();
+        rval->asCALL()->ppMethTypeArgs = NULL;
+        rval->asCALL()->cMethTypeArgs = 0;
+
+        if (name->kind == NK_GENERICNAME) {
+            compiler()->clsDeclRec.bindTypeList(name, name->asGENERICNAME()->pParams, (pMSym ? pMSym : pParent), 
+                                                ((!pMSym || pMSym->isStatic) ? BTF_NOTYVARS : BTF_NONE),
+                                                &(rval->asCALL()->ppMethTypeArgs), 
+                                                &(rval->asCALL()->cMethTypeArgs), NULL);
+        } else {
+            rval->asCALL()->ppMethTypeArgs = NULL;
+            rval->asCALL()->cMethTypeArgs = 0;
+        }
+
+
         if (base) {
             rval->flags |= EXF_BASECALL;
         }
@@ -10083,13 +10435,15 @@ NEWRIGHT:
     return rval;
 }
 
-
+#ifdef _MSC_VER
+#pragma optimize("",off)
+#endif
 EXPR * FUNCBREC::bindMethodName(BASENODE * tree)
 {
     EXPRCALL * call;
     EXPR * expr;
-    if (tree->kind == NK_NAME) {
-        expr = bindName(tree->asNAME(), MASK_METHSYM | MASK_MEMBVARSYM | MASK_LOCVARSYM | MASK_PROPSYM);
+    if (tree->IsAnyName()) {
+        expr = bindName(tree->asANYNAME(), MASK_METHSYM | MASK_MEMBVARSYM | MASK_LOCVARSYM | MASK_PROPSYM);
     } else if (tree->kind == NK_DOT || tree->kind == NK_ARROW) {
         expr = bindDot((BINOPNODE*)tree, MASK_METHSYM | MASK_MEMBVARSYM | MASK_PROPSYM);
     } else {
@@ -10099,18 +10453,21 @@ EXPR * FUNCBREC::bindMethodName(BASENODE * tree)
     RETBAD(expr);
 
     if (expr->kind != EK_CALL || expr->flags & EXF_BOUNDCALL) {
-        if (expr->type->kind == SK_AGGSYM && expr->type->asAGGSYM()->isDelegate) {
-            METHSYM * invoke = compiler()->symmgr.LookupGlobalSym(compiler()->namemgr->GetPredefName(PN_INVOKE), expr->type->asAGGSYM(), MASK_METHSYM)->asMETHSYM();
+        if (expr->type->isDelegateType()) {
+            METHSYM * invoke = compiler()->symmgr.LookupGlobalSym(compiler()->namemgr->GetPredefName(PN_INVOKE), expr->type->behavioralType()->asAGGSYM(), MASK_METHSYM)->asMETHSYM();
             if (!invoke) goto LERROR;
             call = newExpr(tree, EK_CALL, NULL)->asCALL();
             call->object = expr;
+            call->methodInType = expr->type;
+            call->ppMethTypeArgs = NULL;
+            call->cMethTypeArgs = 0;
             call->method = invoke;
             call->args = NULL;
         } else {
             // Not a delegate, so to try to get a better error message, rebind, allowing only a method.
 
-            if (tree->kind == NK_NAME) {
-                expr = bindName(tree->asNAME(), MASK_METHSYM);
+            if (tree->IsAnyName()) {
+                expr = bindName(tree->asANYNAME(), MASK_METHSYM);
             } else if (tree->kind == NK_DOT) {
                 expr = bindDot(tree->asDOT(), MASK_METHSYM);
             } else {
@@ -10153,12 +10510,17 @@ EXPR * FUNCBREC::bindCall(BINOPNODE * tree, int bindFlags)
 
     EXPRCALL * call = expr->asCALL();
 
+	// GENERICS: When constructing most calls elsewhere in this file, we need to set the
+	// generic actual type parameters for the call site before we call verifyMethodCall.
+	// However, when the call has already been constructed, and because we are NOT yet
+	// inferring type parameters for callsites, we do not need to do that here.
+	//
     call->args = args;
-    call->method = verifyMethodCall(tree, call->method, args, &(call->object), call->flags & EXF_BASECALL)->asMETHSYM();
+    call->method = verifyMethodCall(tree, call->method, args, &(call->object), call->flags & EXF_BASECALL, call, NULL)->asMETHSYM();
     call->flags |= EXF_BOUNDCALL;
     if (call->method) {
         verifyMethodArgs(call);
-        call->type = call->method->asMETHSYM()->retType;
+        call->type = compiler()->symmgr.SubstTypeUsingCallExpr(call->method->asMETHSYM()->retType, call);
         NAMELIST *conditionalList = call->method->getBaseConditionalSymbols(& compiler()->symmgr );
         if (conditionalList) {
             do
@@ -10182,7 +10544,9 @@ EXPR * FUNCBREC::bindCall(BINOPNODE * tree, int bindFlags)
 
     return call;
 }
-
+#ifdef _MSC_VER
+#pragma optimize("",on)
+#endif
 
 // This table is used to implement the last set of 'better' conversion rules
 // when there are no implicit conversions between T1(down) and T2 (across)
@@ -10214,15 +10578,20 @@ static const unsigned char betterConversionTable[NUM_SIMPLE_TYPES + 1][NUM_SIMPL
 // 2) implicit conversion from argument to formal type
 // Because of user defined conversion opers this relation is nontransitive
 // returns 1 = m1, -1, m2, 0 neither
-int FUNCBREC::whichMethodIsBetter(METHPROPSYM * m1, METHPROPSYM * m2, EXPR * args)
+int FUNCBREC::whichMethodIsBetter(METHLIST * node1, METHLIST * node2, EXPR * args)
 {
 
     bool a2b, b2a;
     int better = 0;
     bool sameArgs = true;
 
+    METHPROPSYM *m1 = node1->sym;
+    METHPROPSYM *m2 = node2->sym;
     bool exp1 = m1->kind == SK_EXPANDEDPARAMSSYM;
     bool exp2 = m2->kind == SK_EXPANDEDPARAMSSYM;
+
+    if (m1->isDeprecated && !m2->isDeprecated) { return -1; }
+    if (!m1->isDeprecated && m2->isDeprecated) { return 1; }
 
     if (m1->parent->asAGGSYM()->isInterface) {
         ASSERT(m2->parent->asAGGSYM()->isInterface);
@@ -10237,8 +10606,8 @@ int FUNCBREC::whichMethodIsBetter(METHPROPSYM * m1, METHPROPSYM * m2, EXPR * arg
         }
     }
 
-    TYPESYM ** p1 = m1->params;
-    TYPESYM ** p2 = m2->params;
+    TYPESYM ** p1 = compiler()->symmgr.SubstParamsUsingCallData(m1->cParams, m1->params, node1->methodInType, node1->cMethTypeArgs, node1->ppMethTypeArgs);
+    TYPESYM ** p2 = compiler()->symmgr.SubstParamsUsingCallData(m2->cParams, m2->params, node2->methodInType, node2->cMethTypeArgs, node2->ppMethTypeArgs);
 
 //    unsigned argCount = __min(m1->cParams, m2->cParams);
 
@@ -10327,37 +10696,39 @@ EXPR * FUNCBREC::bindUDBinop(BASENODE * tree, EXPRKIND ek, EXPR * op1, EXPR * op
     METHLIST * bestSoFar = NULL;
 
     TYPESYM * type = op1->type;
-    AGGSYM * commonBase = AGGSYM::commonBase(type, op2->type);
+    AGGSYM * commonBase = AGGSYM::commonBase( ((type->kind == SK_INSTAGGSYM) ? type->underlyingAggregate() : type), 
+                                              ((op2->type->kind == SK_INSTAGGSYM) ? op2->type->underlyingAggregate() : op2->type));
     // if the types are the same, we skip op2 and proceed straight to op1...
     int typeCount = 0;
-    bool foundInType = false;
+    bool methodInType = false;
     do {
 NEXTARG:
-        if (!type || type->kind != SK_AGGSYM) {
+	if (!type || (type->kind != SK_AGGSYM && type->kind != SK_INSTAGGSYM)) {
             if (typeCount) break;
 
             typeCount = 1;
-            foundInType = false;
+            methodInType = false;
             type = op2->type;
             goto CHECKNEWTYPE;
         }
 
         SYM * sym;
-        sym = compiler()->symmgr.LookupGlobalSym(name, type, MASK_ALL);
-        if (type->kind == SK_AGGSYM) {
-            addDependancyOnType(type->asAGGSYM());
+        sym = compiler()->symmgr.LookupGlobalSym(name, type->underlyingAggregate(), MASK_ALL);
+	if (type->kind == SK_AGGSYM || type->kind == SK_INSTAGGSYM) {
+            addDependancyOnType(type->underlyingAggregate());
         }
 
 
+     // loop up the class heirarchy starting at "type" looking for a suitable binary operator
         while (true) {
             if (!sym) {
-                if (!foundInType) {
-                    type = type->asAGGSYM()->baseClass;
+                if (!methodInType) {
+                    type = compiler()->symmgr.SubstTypeUsingType(type->underlyingAggregate()->baseClass, type);
                     // if the next type is already covered int he other hierarchy,
                     // then let that other hierarchy deal w/ it...
                     if (typeCount) {
 CHECKNEWTYPE:
-                        if (type == commonBase) {
+                        if (type->underlyingAggregate() == commonBase) {
                             type = NULL;
                         }
                     }
@@ -10379,14 +10750,17 @@ CHECKNEWTYPE:
 
             ASSERT(sym->asMETHSYM()->cParams == 2);
 
-            if (canConvert(op1, sym->asMETHSYM()->params[0], NULL) &&
-                canConvert(op2, sym->asMETHSYM()->params[1], NULL)) {
-                foundInType = true;
+            if (canConvert(op1, compiler()->symmgr.SubstTypeUsingTypeAsMethInst(sym->asMETHSYM()->params[0], type), NULL) &&
+                canConvert(op2, compiler()->symmgr.SubstTypeUsingTypeAsMethInst(sym->asMETHSYM()->params[1], type), NULL)) {
+                methodInType = true;
                 METHLIST * newNode = (METHLIST *) _alloca(sizeof(METHLIST));
                 newNode->next = bestSoFar;
                 newNode->position = bestSoFar ? bestSoFar->position - 1 : 0;
                 newNode->sym = sym->asMETHSYM();
                 newNode->relevant = true;
+                newNode->methodInType = NULL;
+                newNode->ppMethTypeArgs = (type->kind == SK_INSTAGGSYM) ? type->asINSTAGGSYM()->ppArgs : NULL;
+                newNode->cMethTypeArgs =  (type->kind == SK_INSTAGGSYM) ? type->asINSTAGGSYM()->cArgs : 0;
                 bestSoFar = newNode;
             }
 LOOKNEXT:
@@ -10400,7 +10774,11 @@ LOOKNEXT:
     EXPR * argList = newExprBinop(NULL, EK_LIST, NULL, op1, op2);
 
     PMETHPROPSYM ambig1, ambig2;
-    METHSYM * best = findBestMethod(bestSoFar, argList, &ambig1, &ambig2)->asMETHSYM();
+
+    TYPESYM *bestMethodInType;
+    unsigned short cBestMethTypeArgs;
+    TYPESYM **ppBestMethTypeArgs;
+    METHSYM * best = findBestMethod(bestSoFar, argList, &ambig1, &ambig2, &bestMethodInType, &cBestMethTypeArgs, &ppBestMethTypeArgs)->asMETHSYM();
     if (!best) {
         // No winner, so its an ambigous call...
         errorSymSym(tree, ERR_AmbigCall, ambig1, ambig2);
@@ -10411,11 +10789,14 @@ LOOKNEXT:
         return newError(tree);
     }
 
-    EXPRCALL * call = newExpr(tree, EK_CALL, best->retType)->asCALL();
+    EXPRCALL * call = newExpr(tree, EK_CALL, compiler()->symmgr.SubstTypeUsingCallData(best->retType, bestMethodInType, cBestMethTypeArgs, ppBestMethTypeArgs))->asCALL();
     call->object = NULL;
+    call->methodInType = NULL;
     call->args = argList;
     call->method = best;
     call->flags |= EXF_BOUNDCALL;
+    call->ppMethTypeArgs = ppBestMethTypeArgs;
+    call->cMethTypeArgs =  cBestMethTypeArgs;
 
     verifyMethodArgs(call);
 
@@ -10425,7 +10806,8 @@ LOOKNEXT:
 
 // Determine best method for overload resolution. Returns NULL if no best method, in which
 // case two tying methods are returned for error reporting.
-METHPROPSYM * FUNCBREC::findBestMethod(METHLIST * list, EXPR * args, PMETHPROPSYM * ambigMeth1, PMETHPROPSYM * ambigMeth2)
+
+METHPROPSYM * FUNCBREC::findBestMethod(METHLIST * list, EXPR * args, PMETHPROPSYM * ambigMeth1, PMETHPROPSYM * ambigMeth2, TYPESYM **pMethodInType, unsigned short *pcMethTypeArgs, TYPESYM ***pppMethTypeArgs)
 {
     ASSERT(list && list->sym);
 
@@ -10446,7 +10828,8 @@ METHPROPSYM * FUNCBREC::findBestMethod(METHLIST * list, EXPR * args, PMETHPROPSY
     METHLIST * candidate;
     PMETHPROPSYM ambig1 = NULL, ambig2 = NULL;  // Record two method that are ambiguous for error reporting.
 
-    bool isInterface = list->sym->parent && list->sym->parent->kind == SK_AGGSYM && list->sym->parent->asAGGSYM()->isInterface;
+    bool isInterface = list->sym->parent && (list->sym->parent->kind == SK_AGGSYM || list->sym->parent->kind == SK_INSTAGGSYM) 
+                                         && list->sym->parent->asTYPESYM()->underlyingAggregate()->isInterface;
 
     SYM * parent = NULL;
 
@@ -10474,8 +10857,8 @@ METHPROPSYM * FUNCBREC::findBestMethod(METHLIST * list, EXPR * args, PMETHPROPSY
                 contender->relevant = false;
                 continue;
             }
-            int result = whichMethodIsBetter(candidate->sym, contender->sym, args);
-            if (result > 0) {
+            int result = whichMethodIsBetter(candidate, contender, args);
+            if (result > 0)  {
                 if (result == 2) {
                     contender->relevant = false;
                 }
@@ -10501,6 +10884,9 @@ METHPROPSYM * FUNCBREC::findBestMethod(METHLIST * list, EXPR * args, PMETHPROPSY
             goto NEXTCANDIDATE;
         }
         // Wow, we managed to loop all the way through, so we have a winner:
+        *pMethodInType = candidate->methodInType;
+        *pcMethTypeArgs = candidate->cMethTypeArgs;
+        *pppMethTypeArgs = candidate->ppMethTypeArgs;
         return candidate->sym;
 NEXTCANDIDATE:;
     }
@@ -10558,20 +10944,31 @@ EXPANDEDPARAMSSYM * FUNCBREC::getParamsMethod(METHPROPSYM * meth, unsigned count
 
 
 
-
-AGGSYM * FUNCBREC::pickNextInterface(AGGSYM * current, SYMLISTSTACK ** stack, bool * hideByNameMethodFound, SYMLISTSTACK ** newStackSlot)
+//Note: This function implements an iterator over the hierarchy of interfaces supported by an interface type.
+// The state of the iterator is stored in the given [out] parameters.  The caller is responsible for
+// allocating potential storage for the new stack slot, usually on the stack by using _alloca.
+//It is used when searching for the correct member to access when accessing an interface.
+TYPESYM * FUNCBREC::pickNextInterface(TYPESYM * current, SYMLISTSTACK ** stack, bool * hideByNameMethodFound, SYMLISTSTACK ** newStackSlot)
 {
 
-    SYMLIST * bases = current->ifaceList;
+    SYMLIST * bases = current->underlyingAggregate()->ifaceList;
+    TYPESYM * basesMethodInType = current;
+
+    // After the "if" below, these will contain the next candidate interface, including the instantiation 
+    // at which the interface is used.
+    TYPESYM * next;
+    TYPESYM * nextMethodInType;
 
     if (bases && (!*hideByNameMethodFound)) {
         // if we found a HBN method then we do not consider the bases of this interface...
-        current = bases->sym->asAGGSYM();
+        next = bases->sym->asTYPESYM();   
+        nextMethodInType = basesMethodInType;
         bases = bases->next;
         if (bases) {
             SYMLISTSTACK * newSlot = *newStackSlot;
             *newStackSlot = NULL;
             newSlot->syms = bases;
+            newSlot->methodInType = current;
             newSlot->next = stack[0];
             stack[0] = newSlot;
         }
@@ -10585,7 +10982,9 @@ AGAIN:
         // no candidate, so we need to go to the stack...
         if (stack[0]) {
             bases = stack[0]->syms;
-            current = bases->sym->asAGGSYM();
+            basesMethodInType = stack[0]->methodInType;
+            next = bases->sym->asTYPESYM();
+            nextMethodInType = basesMethodInType;
             bases = bases->next;
             if (bases) {
                 stack[0]->syms = bases;
@@ -10597,9 +10996,9 @@ AGAIN:
         }
     }
 
-    if (current->isPrecluded) goto AGAIN;
+    if (next->underlyingAggregate()->isPrecluded) goto AGAIN;
 
-    return current;
+    return compiler()->symmgr.SubstTypeUsingType(next, nextMethodInType);
 }
 
 
@@ -10607,10 +11006,10 @@ void FUNCBREC::cleanupInterfaces(SYMLIST * precludedList)
 {
 
     FOREACHSYMLIST(precludedList, elem)
-        ASSERT(elem->asAGGSYM()->hasCandidateMethod);
-        elem->asAGGSYM()->hasCandidateMethod = false;
-        FOREACHSYMLIST(elem->asAGGSYM()->allIfaceList, precluded)
-            precluded->asAGGSYM()->isPrecluded = false;
+        ASSERT(elem->asTYPESYM()->underlyingAggregate()->hasCandidateMethod);
+        elem->asTYPESYM()->underlyingAggregate()->hasCandidateMethod = false;
+        FOREACHSYMLIST(elem->asTYPESYM()->underlyingAggregate()->allIfaceList, precluded)
+            precluded->asTYPESYM()->underlyingAggregate()->isPrecluded = false;
         ENDFOREACHSYMLIST
     ENDFOREACHSYMLIST
 
@@ -10636,42 +11035,86 @@ bool FUNCBREC::isMethPropCallable(METHPROPSYM * sym, bool requireUC)
 // object   - the expression for the this pointer
 // flags
 //      EXF_NEWOBJCALL      - this is a new<type> expression
+// invoke   - this is set if we're doing a delegate construction, and we're jsut checking that
+//            the function we're taking the address of has a suitable type for the
+//            delegate we're constructing.
+// 
+// call - this contains data about the call being constructed.  Only three of the fields
+//        are used - "methodInType", and the "MethTypeArgs" fields.  Together these
+//        give all the necessary information about the instantiation of generic 
+//        parameters at the callsite, i.e. the instantiation of the class type parameters
+//        if the method resides in a generic class, and the instnatiation of the method's
+//        type parameters if the method is generic.
 //
-METHPROPSYM * FUNCBREC::verifyMethodCall(BASENODE * tree, METHPROPSYM * mp, EXPR * args, EXPR ** object, int flags, METHSYM * invoke)
+//        verifyMethodCall can "change" which method is called, according to the overloading
+//        rules.  This can change the information about the instantiation of generic type
+//        parameters.  Thus, call->methodInType and so on may be updated by this call, if
+//        necessary. 
+//
+//        The overloading rules will one day be changed to infer method type parameters where
+//        possible.  In this case the MethTypeArgs inputs will be NULL.  I've written the code
+//        below so that it is feasible to insert a routine to infer the parameters and record them
+//        in the METHLIST structure that records all possible mathces.
+// 
+           
+#ifdef _MSC_VER
+#pragma optimize ("", off)
+#endif
+METHPROPSYM * FUNCBREC::verifyMethodCall(BASENODE * tree, METHPROPSYM * mp, EXPR * args, EXPR ** object, int flags, EXPR *call, METHSYM * invoke, TYPESYM *invokeMethodInType)
 {
+    ASSERT(!mp || !call->getMethodInType() || mp->parent->kind != SK_AGGSYM || call->getMethodInType()->behavioralType() == mp->parent->asAGGSYM());
+    ASSERT(call);
+
     METHPROPSYM * unaccessAlt = NULL;
 
     METHPROPSYM * current = mp;
+    TYPESYM *currentMethodInType = call->getMethodInType();
+
+    TYPESYM **ppGivenMethTypeArgs;
+    unsigned short cGivenMethTypeArgs;
+    call->getMethTypeArgs(&ppGivenMethTypeArgs, &cGivenMethTypeArgs);
+
     METHPROPSYM * badArgsAlt = current;
     METHPROPSYM * badArgType = NULL;
+    TYPESYM *badArgTypeMethodInType = NULL;
+    TYPESYM **ppBadArgTypeMethTypeArgs = NULL;
+    unsigned short cBadArgTypeMethTypeArgs = 0;
 
-    METHLIST * bestSoFar = NULL;
-    METHLIST bestListItem;
+    METHLIST * bestSoFar = NULL;  // List of method matches
+    METHLIST bestListItem;        // First item of list (if any) allocated on the stack.
 
     SYMLIST * precludedInterfaces = NULL;
     SYMLISTSTACK * traversalStack = NULL;
     SYMLISTSTACK * newStackSlot = NULL;
 
-    TYPESYM * origObject = (object && object[0]) ? object[0]->type : NULL;
+    TYPESYM * origObject = (object && *object) ? (*object)->type : NULL;
 
     TYPESYM * qualifier = (flags & EXF_BASECALL) ? NULL : origObject;
 
-    int mask = current->mask();
+    symbmask_t mask = current->mask();
     int iGoodTypes = -1;
 
+    // <REVIEW> Nb. calls to methods on interfaces follow a substantially different code
+    // path below, for reasons that are beyond me.</REVIEW>
     bool isInterface = current->parent->asAGGSYM()->isInterface;
     bool forceUC = current->isUserCallable();
 
     bool hideByNameMethodFound = false;
 
+    // The call to checkStaticness will raise an error if no this pointer is
+    // required when one is needed.  It may also force any implicit cast
+    // necessary to convert from the type of the "this" pointer to the type
+    // expected by the caller.
+    //
     if (isInterface && !*object) {
         // this will do the blowing up for us:
-        checkStaticness(tree, mp, object);
+        checkStaticness(tree, mp, object, currentMethodInType);
         return NULL;
     }
 
-    ASSERT(!isInterface || (*object)->type->asAGGSYM()->isInterface);
-    AGGSYM * currentInterface = isInterface ? (*object)->type->asAGGSYM() : NULL;
+    ASSERT(!isInterface || (origObject->kind == SK_TYVARSYM && origObject->asTYVARSYM()->bound->underlyingAggregate()->isInterface) || 
+                           origObject->underlyingAggregate()->isInterface);
+    TYPESYM * currentInterface = isInterface ? (origObject->kind == SK_TYVARSYM ? origObject->asTYVARSYM()->bound : origObject) : NULL;
 
     bool UseDelegateErrors = false;
     int cActuals;
@@ -10706,6 +11149,7 @@ METHPROPSYM * FUNCBREC::verifyMethodCall(BASENODE * tree, METHPROPSYM * mp, EXPR
         goto FINDFIRSTINTERFACEMETHOD;
     }
 
+    // Big loop through candidate methods.
     do {
 
         // NOTE: If you change this code for checking the args,
@@ -10721,10 +11165,22 @@ METHPROPSYM * FUNCBREC::verifyMethodCall(BASENODE * tree, METHPROPSYM * mp, EXPR
         // If how many actuals we got is not what this
         // method expectes, bail to the next method...
         if (cFormals != cActuals) goto NEXT;
+        if (current->kind == SK_METHSYM && current->asMETHSYM()->cTypeFormals != cGivenMethTypeArgs) {
+            goto NEXT;
+        }
 
         if (invoke) {
             // We want a complete match, not implicit convertability...
-            if (invoke->params != current->params || invoke->retType != current->retType || invoke->isParamArray != current->isParamArray) {
+            // GENERICS: when the delegate type is generic, then we're still
+            // always creating a delegate of some particular type (i.e. invokeMethodInType).
+            // Similarly, the method we're taking the address of (i.e. current) may be
+            // in a generic context, so we have to substitute, much as we do below.
+            //
+            // The computations on invoke could be done outside the main loop but
+            // I'm sure it's no big deal.
+            if (compiler()->symmgr.SubstParamsUsingType(invoke->cParams,invoke->params,invokeMethodInType) != compiler()->symmgr.SubstParamsUsingCallData(current->cParams, current->params, currentMethodInType, cGivenMethTypeArgs, ppGivenMethTypeArgs) || 
+                compiler()->symmgr.SubstTypeUsingType(invoke->retType,invokeMethodInType)  != compiler()->symmgr.SubstTypeUsingCallData(current->retType, currentMethodInType, cGivenMethTypeArgs, ppGivenMethTypeArgs) || 
+                invoke->isParamArray != current->isParamArray) {
                 goto NEXT;
             }
         } else {
@@ -10744,16 +11200,24 @@ METHPROPSYM * FUNCBREC::verifyMethodCall(BASENODE * tree, METHPROPSYM * mp, EXPR
                         actual = actualList;
                         actualList = NULL;
                     }
-
-                    if (!canConvert(actual,*params, NULL)) {
+                    TYPESYM *param = compiler()->symmgr.SubstTypeUsingCallData(*params, currentMethodInType, cGivenMethTypeArgs, ppGivenMethTypeArgs);
+                    
+                    if (!canConvert(actual,param, NULL)) {
                         if ( iBestArgCount > iGoodTypes || badArgType == NULL) {
                             iGoodTypes = iBestArgCount;
                             badArgType = current;
+                            badArgTypeMethodInType = currentMethodInType;
+
+                            cBadArgTypeMethTypeArgs = cGivenMethTypeArgs;
+                            ppBadArgTypeMethTypeArgs = ppGivenMethTypeArgs;
                         } else if (iBestArgCount == iGoodTypes) {
                             TYPESYM * strippedActual = actual->type->kind == SK_PARAMMODSYM ? actual->type->asPARAMMODSYM()->paramType() : actual->type;
                             TYPESYM * strippedCurrent = params[0]->kind == SK_PARAMMODSYM ? params[0]->asPARAMMODSYM()->paramType() : params[0];
                             if (strippedActual == strippedCurrent && (strippedActual != actual->type || strippedCurrent != params[0])) {
                                 badArgType = current;
+                                badArgTypeMethodInType = currentMethodInType;
+                                cBadArgTypeMethTypeArgs = cGivenMethTypeArgs;
+                                ppBadArgTypeMethTypeArgs = ppGivenMethTypeArgs;
                             }
                         }
                         goto NEXT;
@@ -10766,7 +11230,7 @@ METHPROPSYM * FUNCBREC::verifyMethodCall(BASENODE * tree, METHPROPSYM * mp, EXPR
         }
 
         // We know we have the right number of arguments and they are all convertable
-        if (!compiler()->clsDeclRec.checkAccess(current, pParent, NULL, qualifier)) {
+        if (!compiler()->clsDeclRec.checkAccess(current, this->pParent, NULL, qualifier)) {
             // In case we never get an accesable method, this will allow us to give
             // a better error...
             unaccessAlt = current;
@@ -10779,10 +11243,10 @@ METHPROPSYM * FUNCBREC::verifyMethodCall(BASENODE * tree, METHPROPSYM * mp, EXPR
         // also, this interface should also be marked as having a candidate method...
 
         if (currentInterface) {
-            ASSERT(!currentInterface->isPrecluded);
-            currentInterface->hasCandidateMethod = true;
-            FOREACHSYMLIST(currentInterface->allIfaceList, elem)
-                elem->asAGGSYM()->isPrecluded = true;
+            ASSERT(!currentInterface->underlyingAggregate()->isPrecluded);
+            currentInterface->underlyingAggregate()->hasCandidateMethod = true;
+            FOREACHSYMLIST(currentInterface->underlyingAggregate()->allIfaceList, elem)
+                elem->asTYPESYM()->underlyingAggregate()->isPrecluded = true;
             ENDFOREACHSYMLIST
             if (!precludedInterfaces || precludedInterfaces->sym != currentInterface) {
                 SYMLIST * newList = (SYMLIST *)_alloca(sizeof(SYMLIST));
@@ -10796,6 +11260,9 @@ METHPROPSYM * FUNCBREC::verifyMethodCall(BASENODE * tree, METHPROPSYM * mp, EXPR
             // do a quickie for that single no override case...
             bestSoFar = &bestListItem;
             bestListItem.sym = current;
+            bestListItem.methodInType = currentMethodInType;
+            bestListItem.ppMethTypeArgs = ppGivenMethTypeArgs;
+            bestListItem.cMethTypeArgs = cGivenMethTypeArgs;
 
         //
         // don't add the incoming method more than once
@@ -10809,29 +11276,43 @@ METHPROPSYM * FUNCBREC::verifyMethodCall(BASENODE * tree, METHPROPSYM * mp, EXPR
             newNode->sym = current;
             newNode->position = bestSoFar->position - 1;
             newNode->relevant = true;
+            newNode->methodInType = currentMethodInType;
+            newNode->ppMethTypeArgs = ppGivenMethTypeArgs;
+            newNode->cMethTypeArgs = cGivenMethTypeArgs;
             bestSoFar = newNode;
         }
 
 NEXT:
+        //-------------------------------------------------------------------
+        // The whole purpose of the section that follows is to determine a 
+        // value for "next", and thus a new value for "current".  This will be the
+        // next method of the appropriate name in the same class as "current" or
+        // some superclass/interface.
+        //
 
+        
         if (current->isParamArray) {
             if (current->kind != SK_EXPANDEDPARAMSSYM) {
 				if (!bestSoFar || bestSoFar->sym != current) {
 					if (cActuals >= current->cParams - 1) {
 						current = getParamsMethod(current, cActuals);
+                        currentMethodInType = (current->parent->kind == SK_AGGSYM ? current->parent->asAGGSYM() : NULL);
 						continue;
 					}
 				}
             } else {
                 current = current->asEXPANDEDPARAMSSYM()->realMethod;
+                currentMethodInType = (current->parent->kind == SK_AGGSYM ? current->parent->asAGGSYM() : NULL);
             }
         }
 
         SYM * next;
+        TYPESYM *nextMethodInType;
+        nextMethodInType = currentMethodInType;
         next = current;
 
         if (current->name) {  
-            // get next non-override method or property
+            // First look in the current class.  Get next non-override method or property.
             while ((next = compiler()->symmgr.LookupNextSym(next, current->parent, mask)->asMETHPROPSYM())  &&
                    !isMethPropCallable(next->asMETHPROPSYM(), forceUC)) {
                 /*nothing */
@@ -10846,49 +11327,71 @@ NEXT:
 
         // go to the baseclass only if we found no plausible methods in the current
         // class and we aren't looking for a constructor
+        // Now either continue to search the interfaces or go to the superclass.
+        // Only do either if we found no plausible methods in the current
+        // class and we aren't looking for a constructor.
+        //
+        // In either case we must update the type at which the method is found, i.e. currentMethodInType via nextMethodInType
         if (!next && (!bestSoFar || isInterface) && (mp->kind == SK_PROPSYM || !mp->asMETHSYM()->isCtor) && current->name) {
-            AGGSYM * base;
+            TYPESYM * base;
             if (isInterface) {
+                // Iterate over the interfaces in calling order using the iterator implemented by
+                // "pickNextInterface", starting with "currentInterface" and storing the
+                // state of the iteration in "traversalStack".  The iteration returns the _actual_ interfaces
+                // supported, not the formal ones, i.e. the appropriate substitutions are performed throughout the
+                // inheritance chain.
+                //
+                // Exit the loop when either (a) we find a candidate, stored in next, when we jump to FOUNDONE
+                // or (b) when there are no more interfaces left. when we break and drop through to consider
+                // the methods on Object.
                 while (true) {
                     do  {
                         if (!newStackSlot) {
                             newStackSlot = (SYMLISTSTACK *)_alloca(sizeof(SYMLISTSTACK));
                         }
                         currentInterface = pickNextInterface(currentInterface, &traversalStack, &hideByNameMethodFound, &newStackSlot);
-                    } while (currentInterface && currentInterface->hasCandidateMethod);
+                    } while (currentInterface && currentInterface->underlyingAggregate()->hasCandidateMethod);
                     if (currentInterface) {
-                        ASSERT(!currentInterface->isPrecluded);
+                        ASSERT(!currentInterface->underlyingAggregate()->isPrecluded);
 FINDFIRSTINTERFACEMETHOD:
-                        addDependancyOnType(currentInterface);
-                        next = compiler()->symmgr.LookupGlobalSym(mp->name, currentInterface, MASK_PROPSYM | MASK_METHSYM);
+                        addDependancyOnType(currentInterface->underlyingAggregate());
+                        next = compiler()->symmgr.LookupGlobalSym(mp->name, currentInterface->behavioralType(), MASK_PROPSYM | MASK_METHSYM);
                         if (next) {
                             // first, we need to check if this matches the kind of things we are looking for:
                             if (next->kind != mp->kind) {
                                 errorSymSym(tree, ERR_AmbigMethProp, mp, next);
                                 goto ERRORL;
                             }
+                            nextMethodInType = currentInterface;
                             goto FOUNDONE;
                         }
+                        // Nb. if "next" is null, then we drop through to continue the search at further interfaces.
                     } else {
                         break;
                     }
                 }
-                // now, consider methods on object...
+                // Now, even for any interfaces,
+                // consider methods on object... But only if we haven't found a best method so far.
                 if (!bestSoFar) {
-                    base = getPDT(PT_OBJECT)->asAGGSYM();
+                    base = getPDT(PT_OBJECT)->asTYPESYM();
                     isInterface = false;
                     goto DOBASE;
                 }
 FOUNDONE:;
             } else if (!hideByNameMethodFound) {
-                base = current->parent->asAGGSYM()->baseClass;
+                // Next check the base class and above, iterating using findNextName....
+                // "base" gets set initially by either finding the
+                // base class (at the appropriate instantiation) or by being set to "Object" after
+                // searching all interfaces immediately above.
+
+                base = compiler()->symmgr.SubstTypeUsingType(current->parent->asAGGSYM()->baseClass, currentMethodInType);
 DOBASE:
                 //
-                // find next base member with this name
+                // Find next base member with this name
                 // which is not an override or a hidden member of the wrong type
                 //
                 next = NULL;
-                while ((next = compiler()->clsDeclRec.findNextName(current->name, base, next))) {
+                while ((next = compiler()->clsDeclRec.findNextName(current->name, &base, next))) {
                     if (!(next->mask() & mask)) {
                         // ignore inaccessible members of wrong type
                         if (compiler()->clsDeclRec.checkAccess(next, pParent, NULL, qualifier)) {
@@ -10907,27 +11410,46 @@ DOBASE:
 
                     // we never include overridden methods in overload resolution
                     // so keep looking
-                    base = next->parent->asAGGSYM();
                 }
+                nextMethodInType = base;
                 if (!next) {
                     goto REPORTERROR;
                 }
             }
         }
         current = next->asMETHPROPSYM();
+        currentMethodInType = nextMethodInType;
     } while (current);
 
+    //---------------------------------------------------------------
+    // This is the end of the first phase, where we've now collected
+    // plausible methods.
+    // The end result of the above is, among other things, a list of methods
+    // all of which are legal overloads.  Now pick the best...
+
     // Ok, we looked at all the evidence, and we come to render the verdict:
+
+    TYPESYM **ppCurrentMethTypeArgs;
+    unsigned short cCurrentMethTypeArgs;
 
     if (bestSoFar == &bestListItem) {
         // We found the singular best method to call:
         current = bestListItem.sym;
+        currentMethodInType = bestListItem.methodInType;
+        cCurrentMethTypeArgs = bestListItem.cMethTypeArgs;
+        ppCurrentMethTypeArgs = bestListItem.ppMethTypeArgs;
         goto CHECKRETURN;
     }
 
     if (bestSoFar) {
         PMETHPROPSYM ambig1, ambig2;
-        current = findBestMethod(bestSoFar, args, &ambig1, &ambig2);
+        TYPESYM *newMethodInType = NULL;
+        unsigned short cNewMethTypeArgs;
+        TYPESYM **ppNewMethTypeArgs;
+        current = findBestMethod(bestSoFar, args, &ambig1, &ambig2, &newMethodInType, &cNewMethTypeArgs, &ppNewMethTypeArgs);
+        currentMethodInType = newMethodInType;
+        cCurrentMethTypeArgs = cNewMethTypeArgs;
+        ppCurrentMethTypeArgs = ppNewMethTypeArgs;
 
         if (current) {
             goto CHECKRETURN;
@@ -11010,19 +11532,48 @@ REPORTERROR:
                 actual = actualList;
                 actualList = NULL;
             }
-            if (!canConvert(actual,*params, NULL)) {
-                errorIntSymSym(actual->tree, ERR_BadArgType, curActual, actual->type, *params);
+            TYPESYM *param = compiler()->symmgr.SubstTypeUsingCallData(*params, badArgTypeMethodInType, cBadArgTypeMethTypeArgs, ppBadArgTypeMethTypeArgs);
+            if (!canConvert(actual, param, NULL)) {
+                TYPESYM * strippedActual = actual->type->kind == SK_PARAMMODSYM ? actual->type->asPARAMMODSYM()->paramType() : actual->type;
+                TYPESYM * strippedCurrent = param->kind == SK_PARAMMODSYM ? param->asPARAMMODSYM()->paramType() : param;
+                if (strippedActual == strippedCurrent) {
+                    if (strippedCurrent != params[0]) {
+                        // the argument is undecorated, but needs a 'ref' or 'out'
+                        // or has the wrong PARAMMODSYM
+                        errorIntStr(actual->tree, ERR_BadArgRef, curActual,
+                            param->asPARAMMODSYM()->isOut ? L"out" : L"ref");
+                    } else {
+                        // the argument is decorated, but doesn't needs a 'ref' or 'out'
+                        errorIntStr(actual->tree, ERR_BadArgExtraRef, curActual,
+                            actual->type->asPARAMMODSYM()->isOut ? L"out" : L"ref");
+                    }
+                } else {
+                    errorIntSymSym(actual->tree, ERR_BadArgType, curActual, actual->type, param);
+                }
             }
             params++;
         }
     } else {
-        // The number of arguments must be wrong
         NAME *pName = ((!UseDelegateErrors && (mp->kind == SK_PROPSYM || !mp->asMETHSYM()->isCtor)) ? mp->name : mp->parent->name);
+
+		if (mp->kind == SK_METHSYM  && mp->asMETHSYM()->cTypeFormals || cGivenMethTypeArgs) {
+			unsigned int cFormals = mp->asMETHSYM()->cTypeFormals;
+			if (cFormals != cGivenMethTypeArgs) {
+				compiler()->clsDeclRec.errorFileSymbol(tree, 
+					pMSym->getInputFile(), 
+					(cFormals == 0 ? ERR_TypeParams : cFormals < cGivenMethTypeArgs ? ERR_TooManyTypeParams : ERR_TooFewTypeParams), 
+					mp); 
+			}
+		}
+
+        // The number of arguments must be wrong
         CError  *pError = make_errorNameInt(tree, UseDelegateErrors ? ERR_BadDelArgCount : ERR_BadArgCount,
             pName, cActuals);
         // Error: No overloaded method 'name' that takes cActuals arguments
-        // Report possible matches (same name and is accesible)
+        // Report possible matches (same name and is accesible), via the same horrible and grotesque
+        // search code that was used above....
         current = mp;
+        currentMethodInType = call->getMethodInType();
 
         hideByNameMethodFound = false;
 
@@ -11060,6 +11611,8 @@ ERR_NEXT:
 
             SYM * next;
             next = current;
+            TYPESYM *nextMethodInType;
+            nextMethodInType = currentMethodInType;
             // get next non-override method or property
             while ((next = compiler()->symmgr.LookupNextSym(next, current->parent, mask)->asMETHPROPSYM())  &&
                    !isMethPropCallable(next->asMETHPROPSYM(), forceUC)) {
@@ -11068,7 +11621,7 @@ ERR_NEXT:
             }
 
             if (!next && (mp->kind == SK_PROPSYM || !mp->asMETHSYM()->isCtor)) {
-                AGGSYM * base;
+                TYPESYM * base;
                 if (isInterface) {
                     while (true) {
                         if (!newStackSlot) {
@@ -11076,10 +11629,11 @@ ERR_NEXT:
                         }
                         currentInterface = pickNextInterface(currentInterface, &traversalStack, &hideByNameMethodFound, &newStackSlot);
                         if (currentInterface) {
-                            ASSERT(!currentInterface->isPrecluded);
+                            ASSERT(!currentInterface->underlyingAggregate()->isPrecluded);
 ERR_FINDFIRSTINTERFACEMETHOD:
-                            addDependancyOnType(currentInterface);
-                            next = compiler()->symmgr.LookupGlobalSym(mp->name, currentInterface, MASK_ALL);
+                            addDependancyOnType(currentInterface->underlyingAggregate());
+                            next = compiler()->symmgr.LookupGlobalSym(mp->name, currentInterface->behavioralType(), MASK_ALL);
+                            nextMethodInType = currentInterface;
                             if (next) goto ERR_FOUNDONE;
                         } else {
                             break;
@@ -11091,14 +11645,15 @@ ERR_FINDFIRSTINTERFACEMETHOD:
                     goto ERR_DOBASE;
 ERR_FOUNDONE:;
                 } else if (!hideByNameMethodFound) {
-                    base = current->parent->asAGGSYM()->baseClass;
+                    base = compiler()->symmgr.SubstTypeUsingType(current->parent->asAGGSYM()->baseClass, currentMethodInType);
 ERR_DOBASE:
+                    nextMethodInType = base;
                     //
                     // find next base member with this name
                     // which is not an override or a hidden member of the wrong type
                     //
                     next = NULL;
-                    while ((next = compiler()->clsDeclRec.findNextName(current->name, base, next))) {
+                    while ((next = compiler()->clsDeclRec.findNextName(current->name, &base, next))) {
                         if (!(next->mask() & mask)) {
                             // ignore inaccessible members of wrong type
                             ASSERT(!compiler()->clsDeclRec.checkAccess(next, pParent, NULL, qualifier));
@@ -11110,7 +11665,6 @@ ERR_DOBASE:
 
                         // we never include overridden methods in overload resolution
                         // so keep looking
-                        base = next->parent->asAGGSYM();
                     }
                     if (!next) {
                         // break out of the error loop
@@ -11119,6 +11673,7 @@ ERR_DOBASE:
                 }
             }
             current = next->asMETHPROPSYM();
+            currentMethodInType = nextMethodInType;
         } while (current);
 
         compiler()->SubmitError (pError);
@@ -11134,6 +11689,8 @@ ERRORL:
 
 CHECKRETURN:
 
+    //------------------------------------------------------------------
+    // This is the "success" exit path.  
     if (isInterface) {
         cleanupInterfaces(precludedInterfaces);
     }
@@ -11158,9 +11715,18 @@ CHECKRETURN:
         }
     }
 
-    METHPROPSYM * newCurrent = remapToOverride(current, origObject, flags & EXF_BASECALL);
+    // If it is virtual, find a remap of the method to something more specific.  This
+    // may alter where the method is found.
 
-    checkStaticness(tree, newCurrent, object);
+    // GENERICS: Note that it cannot alter the method type arguments.
+    TYPESYM *newMethodInType;
+    METHPROPSYM * newCurrent = remapToOverride(current, origObject, flags & EXF_BASECALL, currentMethodInType, &newMethodInType);
+    TYPESYM **ppNewCurrentMethTypeArgs = ppCurrentMethTypeArgs;
+    unsigned short cNewCurrentMethTypeArgs = cCurrentMethTypeArgs;
+
+    // This checks, amongst other things, that the object is sufficient to invoke this remapped
+    // method - this should never fail!
+    checkStaticness(tree, newCurrent, object, newMethodInType);
 
     if (object && *object && object[0]->kind == EK_FIELD) {
         checkFieldRef(object[0]->asFIELD(), false);
@@ -11226,6 +11792,8 @@ CHECKRETURN:
         }
     }
 
+    call->setMethodInType(newMethodInType);
+    call->setMethTypeArgs(ppNewCurrentMethTypeArgs, cNewCurrentMethTypeArgs);
     return newCurrent;
 }
 
@@ -11247,6 +11815,8 @@ bool FUNCBREC::checkBogus(SYM * sym, bool bNoError, bool * pbUndeclared)
     case SK_EXPANDEDPARAMSSYM:
     case SK_PROPSYM:
     case SK_METHSYM:
+    case SK_INSTMETHSYM:
+	case SK_INSTAGGINSTMETHSYM:
     case SK_FAKEPROPSYM:
     case SK_FAKEMETHSYM:
     case SK_INDEXERSYM:
@@ -11276,6 +11846,7 @@ bool FUNCBREC::checkBogus(SYM * sym, bool bNoError, bool * pbUndeclared)
         isBogus = checkBogus(sym->asEVENTSYM()->type, bNoError, &bUndeclared);
         break;
 
+	case SK_INSTAGGMEMBVARSYM: // GENERICS TODO: we need to search the type parameters here.
     case SK_MEMBVARSYM:
         isBogus = checkBogus(sym->asVARSYM()->type, bNoError, &bUndeclared);
         break;
@@ -11290,6 +11861,15 @@ bool FUNCBREC::checkBogus(SYM * sym, bool bNoError, bool * pbUndeclared)
     default:
         VSFAIL("FUNCBREC::checkBogus with invalid Symbol kind");
         // Fall-through
+
+    case SK_INSTAGGSYM:  
+        if (!sym->isPrepared && !bNoError)
+            compiler()->symmgr.DeclareType (sym);
+        bUndeclared = !sym->isPrepared;
+        isBogus = sym->isBogus;
+		break;
+
+    case SK_TYVARSYM:  
 
     case SK_VOIDSYM:
     case SK_NULLSYM:
@@ -11312,49 +11892,74 @@ bool FUNCBREC::checkBogus(SYM * sym, bool bNoError, bool * pbUndeclared)
 }
 
 
-METHPROPSYM * FUNCBREC::remapToOverride(METHPROPSYM * mp, TYPESYM * object, int baseCallOverride)
+// We want to invoke "mp", but sometimes we prefer to explicitly invoke any override version of this
+// method (this is primarily when a special keyword is used to say we defintely want to access 
+// a base class's version of the method - presumably then a "call" rather than a "callvirt"
+// will be issued.)
+// So we start searching from "object" up the superclass hierarchy until we find a method
+// with an exact signature match.  
+METHPROPSYM * FUNCBREC::remapToOverride(METHPROPSYM * mp, TYPESYM * object, int baseCallOverride, TYPESYM *methodInType, TYPESYM **remapMethodInType)
 {
+    
+    // Don't remap non-"Object" methods unless baseCallOverride is set.  
+    if (mp->parent != getPDO() && !baseCallOverride) {
+         *remapMethodInType = methodInType;
+         return mp;
+    }
 
-    if (mp->parent != getPDO() && !baseCallOverride) return mp;
+    // Don't remap static or interface methods
+    if (!object || (object->kind == SK_AGGSYM && object->asAGGSYM()->isInterface)
+                || (object->kind == SK_INSTAGGSYM && object->underlyingAggregate()->isInterface)) {
+         *remapMethodInType = methodInType;
+         return mp;
+    }
 
-    if (!object || (object->kind == SK_AGGSYM && object->asAGGSYM()->isInterface)) return mp;
-
+    // Don't remap non-virtual methods or properties.
     if (mp->kind == SK_METHSYM) {
-        if (!mp->asMETHSYM()->isVirtual) return mp;
+        if (!mp->asMETHSYM()->isVirtual) {
+            *remapMethodInType = methodInType;
+            return mp;
+        }
     } else {
         if ((mp->asPROPSYM()->methGet && !mp->asPROPSYM()->methGet->isVirtual) ||
             (mp->asPROPSYM()->methSet && !mp->asPROPSYM()->methSet->isVirtual)) {
-
+            *remapMethodInType = methodInType;
             return mp;
         }
     }
 
-    int mask = mp->mask();
+    symbmask_t mask = mp->mask();
 
     TYPESYM * qualifier = baseCallOverride ? NULL : object;
 
-    while (object && object != mp->parent) {
-        METHPROPSYM * remap = compiler()->symmgr.LookupGlobalSym(mp->name, object, mask)->asMETHPROPSYM();
+    TYPESYM *mpRet = compiler()->symmgr.SubstTypeUsingType(mp->retType, methodInType);
+	PTYPESYM *mpArgs = compiler()->symmgr.SubstParamsUsingType(mp->cParams, mp->params, methodInType);
+
+    // Search for an override version of the method.
+    while (object && object->behavioralType() != mp->parent) {
+        METHPROPSYM * remap = compiler()->symmgr.LookupGlobalSym(mp->name, object->behavioralType(), mask)->asMETHPROPSYM();
         while (remap) {
             if (remap->isOverride &&
-                remap->retType == mp->retType &&
-                remap->params == mp->params &&
+                compiler()->symmgr.SubstSigUsingTypeEqualsSig(remap, object, mpArgs, mpRet) &&
                 (remap->kind != SK_METHSYM || remap->asMETHSYM()->isUserCallable()) &&
                 compiler()->clsDeclRec.checkAccess(remap, pParent, NULL, qualifier)) {
+                *remapMethodInType = object;
                 return remap;
             }
-            remap = compiler()->symmgr.LookupNextSym(remap, object, mask)->asMETHPROPSYM();
+            remap = compiler()->symmgr.LookupNextSym(remap, object->behavioralType(), mask)->asMETHPROPSYM();
         }
-        if (object->kind != SK_AGGSYM)
+        if (object->behavioralType()->kind != SK_AGGSYM)
             break;
-        object = object->asAGGSYM()->baseClass;
+        object = compiler()->symmgr.SubstTypeUsingType(object->underlyingAggregate()->baseClass, object);
     }
 
+    *remapMethodInType = methodInType;
     return mp;
 
 }
-
-
+#ifdef _MSC_VER
+#pragma optimize ("", on)
+#endif
 EXPRBLOCK * FUNCBREC::newExprBlock(BASENODE * tree)
 {
     EXPRBLOCK * block = newExpr(tree, EK_BLOCK, NULL)->asBLOCK();
@@ -11490,7 +12095,7 @@ EXPRZEROINIT * FUNCBREC::newExprZero(BASENODE * tree, TYPESYM * type)
 {
 #if DEBUG
     if (type->kind != SK_ERRORSYM) {
-        ASSERT(type->kind == SK_AGGSYM && (type->asAGGSYM()->isStruct || type->asAGGSYM()->isEnum));
+        ASSERT((type->kind == SK_AGGSYM || type->kind == SK_INSTAGGSYM) && (type->underlyingAggregate()->isStruct || type->underlyingAggregate()->isEnum));
     }
 #endif
     EXPRZEROINIT * rval = newExpr(tree, EK_ZEROINIT, type)->asZEROINIT();

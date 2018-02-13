@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -91,6 +96,8 @@ void (jit_call *FJit_pHlpSetField32) (CORINFO_Object*, CORINFO_FIELD_HANDLE , __
 void (jit_call *FJit_pHlpSetField64) (CORINFO_Object*, CORINFO_FIELD_HANDLE , __int64 );
 void (jit_call *FJit_pHlpSetFieldObj) (CORINFO_Object*, CORINFO_FIELD_HANDLE , LPVOID);
 void* (jit_call *FJit_pHlpGetFieldAddress) (CORINFO_Object*, CORINFO_FIELD_HANDLE);
+CORINFO_GENERIC_HANDLE (jit_call *FJit_pHlpRuntimeHandle) (CORINFO_METHOD_HANDLE, unsigned, CORINFO_GENERIC_HANDLE*, CORINFO_CLASS_HANDLE);
+CORINFO_MethodPtr (jit_call *FJit_pHlpGenericVirtual) (CORINFO_METHOD_HANDLE, CORINFO_CLASS_HANDLE);
 
 void (jit_call *FJit_pHlpGetRefAny) (CORINFO_CLASS_HANDLE cls, void* refany);
 void (jit_call *FJit_pHlpEndCatch) ();
@@ -341,10 +348,18 @@ CorJitResult __stdcall FJitCompiler::compileMethod (
                 FJitResult FJitRet;
                 jitRetry = false; 
                 FJitRet = fjitData->jitCompile(&entryPoint,&actualCodeSize); 
-                // If we get a verification failed error, just map it to OK as
-                // it's already been dealt with.                              
                 if (FJitRet == FJIT_VERIFICATIONFAILED)
-                    ret = CORJIT_OK;
+                {
+                    if (!(flags & CORJIT_FLG_IMPORT_ONLY))
+                        // If we get a verification failed error, just map it to OK as
+                        // it's already been dealt with.                
+                        ret = CORJIT_OK;
+                    else 
+                        // if we are in "Import only" mode, we are actually verifying
+                        // generic code.  It's important that we don't return CORJIT_OK,
+                        // because we want to skip the code generation phase.
+                        ret = CORJIT_BADCODE;
+                }
                 else if (FJitRet == FJIT_JITAGAIN)
 		{
 		    jitRetry = true;
@@ -778,6 +793,14 @@ BOOL FJitCompiler::GetJitHelpers(ICorJitInfo* jitInfo) {
     FJit_pHlpAssign_Ref = (void (jit_call *)(CORINFO_Object** dst, CORINFO_Object* obj))
         (jitInfo->getHelperFtn(CORINFO_HELP_CHECKED_ASSIGN_REF));
     if (!FJit_pHlpAssign_Ref) return false;
+
+    FJit_pHlpRuntimeHandle = (CORINFO_GENERIC_HANDLE (jit_call *) (CORINFO_METHOD_HANDLE, unsigned, CORINFO_GENERIC_HANDLE*, CORINFO_CLASS_HANDLE))
+         (jitInfo->getHelperFtn(CORINFO_HELP_RUNTIMEHANDLE));
+    if (!FJit_pHlpRuntimeHandle) return false;
+    
+    FJit_pHlpGenericVirtual = (CORINFO_MethodPtr (jit_call *) (CORINFO_METHOD_HANDLE, CORINFO_CLASS_HANDLE))
+        (jitInfo->getHelperFtn(CORINFO_HELP_GENERICVIRTUAL));
+    if (!FJit_pHlpGenericVirtual) return false;
 
     FJit_HelpersInstalled = true;
     return true;

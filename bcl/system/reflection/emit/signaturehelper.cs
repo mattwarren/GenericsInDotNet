@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -47,8 +52,10 @@ namespace System.Reflection.Emit {
         
         internal const byte ELEMENT_TYPE_VALUETYPE      = 0x11;     // VALUETYPE <class Token> 
         internal const byte ELEMENT_TYPE_CLASS          = 0x12;     // CLASS <class Token>  
+        internal const byte ELEMENT_TYPE_VAR            = 0x13;     // VAR <U1>
         
         internal const byte ELEMENT_TYPE_ARRAY          = 0x14;     // MDARRAY <type> <rank> <bcount> <bound1> ... <lbcount> <lb1> ...  
+        internal const byte ELEMENT_TYPE_WITH           = 0x15;     // WITH <type> <ntypars> <type1> ... <typen> 
 
         internal const byte ELEMENT_TYPE_TYPEDBYREF     = 0x16;     // This is a simple type.       
 
@@ -57,11 +64,12 @@ namespace System.Reflection.Emit {
         internal const byte ELEMENT_TYPE_FNPTR          = 0x1B;     // FNPTR <complete sig for the function including calling convention>
         internal const byte ELEMENT_TYPE_OBJECT         = 0x1C;     // Shortcut for System.Object
         internal const byte ELEMENT_TYPE_SZARRAY        = 0x1D;     // SZARRAY <type> : Shortcut for single dimension zero lower bound array
+	internal const byte ELEMENT_TYPE_MVAR           = 0x1E;     // MVAR <U1>
                
         internal const byte ELEMENT_TYPE_CMOD_REQD      = 0x1F;     // required C modifier : E_T_CMOD_REQD <mdTypeRef/mdTypeDef>
         internal const byte ELEMENT_TYPE_CMOD_OPT       = 0x20;     // optional C modifier : E_T_CMOD_OPT <mdTypeRef/mdTypeDef>
 
-        internal const byte ELEMENT_TYPE_MAX            = 0x22;     // first invalid element type   
+        internal const byte ELEMENT_TYPE_MAX            = 0x23;     // first invalid element type   
 
         internal const byte ELEMENT_TYPE_SENTINEL       = 0x41;     // SENTINEL for vararg
 
@@ -76,10 +84,12 @@ namespace System.Reflection.Emit {
         internal const int IMAGE_CEE_CS_CALLCONV_LOCAL_SIG = 0x7;
         internal const int IMAGE_CEE_CS_CALLCONV_PROPERTY  = 0x8;
         internal const int IMAGE_CEE_CS_CALLCONV_UNMGD     = 0x9;
-        internal const int IMAGE_CEE_CS_CALLCONV_MAX       = 0x10;   // first invalid calling convention    
+        internal const int IMAGE_CEE_CS_CALLCONV_INSTANTIATION = 0x0a;
+        internal const int IMAGE_CEE_CS_CALLCONV_MAX       = 0x0b;   // first invalid calling convention    
             
         // The high bits of the calling convention convey additional info   
         internal const int IMAGE_CEE_CS_CALLCONV_MASK      = 0x0f;  // Calling convention is bottom 4 bits 
+        internal const int IMAGE_CEE_CS_CALLCONV_GENERIC   = 0x10;  // Generic method sig with explicit number of type parameters
         internal const int IMAGE_CEE_CS_CALLCONV_HASTHIS   = 0x20;  // Top bit indicates a 'this' parameter    
         internal const int IMAGE_CEE_CS_CALLCONV_RETPARAM  = 0x40;  // The first param in the sig is really the return value   
     
@@ -387,6 +397,18 @@ namespace System.Reflection.Emit {
                 if (clsArgument.IsArray || clsArgument.IsPointer)
                 {
                     AddArrayOrPointer(clsArgument);
+                    return;
+                }
+
+                if (clsArgument.HasGenericArguments)
+                {
+                    AddElementType(ELEMENT_TYPE_WITH);
+                    AddOneArgTypeHelper(clsArgument.GetGenericTypeDefinition());
+                    Type[] args = clsArgument.GetGenericArguments();
+                    AddData(args.Length);
+                    foreach (Type t in args) {
+                        AddOneArgTypeHelper(t);
+                    }
                     return;
                 }
     

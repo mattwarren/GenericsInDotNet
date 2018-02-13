@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -110,22 +115,26 @@ public:
     virtual void msg(const char* fmt, ...);
 	char *getLine(int lineNum) { return in->getLine(lineNum); };
 	bool Success() {return success; };
+    void SetOnUnicode(BOOL val) { m_bOnUnicode = val; };
 
     unsigned curLine;           // Line number (for error reporting)
 
 private:
-    BinStr* MakeSig(unsigned callConv, BinStr* retType, BinStr* args);
-    BinStr* MakeTypeClass(CorElementType kind, char* name);
-    BinStr* MakeTypeArray(BinStr* elemType, BinStr* bounds);
+    BinStr* MakeSig(unsigned callConv, BinStr* retType, BinStr* args, int ntyargs = 0);
+    BinStr* MakeTypeClass(CorElementType kind, mdToken tk);
+    BinStr* MakeTypeArray(CorElementType kind, BinStr* elemType, BinStr* bounds);
 
-    char* fillBuff(char* curPos);   // refill the input buffer 
+    char* fillBuff(char* curPos);   // refill the input buffer
+    DWORD IsItUnicode(CONST LPVOID pBuff, int cb, LPINT lpi);
 	HANDLE	hstdout;
 	HANDLE	hstderr;
+    BOOL    m_bOnUnicode;
 
 private:
 	friend void yyerror(char* str);
     friend int yyparse();
     friend int yylex();
+    friend int findKeyword(const char* name, size_t nameLen, Instr** value);
 
 	Assembler* assem;			// This does most of the semantic processing
 

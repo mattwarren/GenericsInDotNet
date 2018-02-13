@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -22,9 +27,45 @@
 #undef RIGHT_SIDE_ONLY
 #endif //UNDEFINE_RIGHT_SIDE_ONLY
 
+
 /* ------------------------------------------------------------------------- *
  * CordbValue class
  * ------------------------------------------------------------------------- */
+
+CordbValue::CordbValue(CordbAppDomain *appdomain,
+               CordbType *type,
+			   REMOTE_PTR remoteAddress,
+               void *localAddress,
+               RemoteAddress *remoteRegAddr,
+               bool isLiteral)
+    : CordbBase((ULONG)remoteAddress, enumCordbValue),
+      m_appdomain(appdomain),
+      m_type(type),
+      m_size(0),
+      m_localAddress(localAddress),
+      //m_sigCopied(false),
+      m_isLiteral(isLiteral),
+      m_pParent(NULL)
+    {
+        if (remoteRegAddr != NULL)
+        {
+            _ASSERTE(remoteAddress == NULL);
+            m_remoteRegAddr = *remoteRegAddr;
+        }
+        else
+            m_remoteRegAddr.kind = RAK_NONE;
+
+        if (m_appdomain)
+        {
+            m_process = m_appdomain->GetProcess();
+            m_process->AddRef();
+        }
+        else
+            m_process = NULL;
+        if (m_type) 
+			m_type->AddRef();
+    }
+
 
 //
 // Init for the base value class. All value class subclasses call this
@@ -33,61 +74,55 @@
 //
 HRESULT CordbValue::Init(void)
 {
-    if (m_cbSigBlob > 0 && m_sigCopied == false)
-    {
-        LOG((LF_CORDB,LL_INFO1000,"CV::I obj:0x%x has been inited\n", this));
-        
-        PCCOR_SIGNATURE origSig = m_pvSigBlob;
-        m_pvSigBlob = NULL;
-
-        BYTE *sigCopy = new BYTE[m_cbSigBlob];
-
-        if (sigCopy == NULL)
-            return E_OUTOFMEMORY;
-
-        memcpy(sigCopy, origSig, m_cbSigBlob);
-
-        m_pvSigBlob = (PCCOR_SIGNATURE) sigCopy;
-        m_sigCopied = true; 
-    }
+//  No longer copy signature blobs....
+//if ( /* m_type.m_cbSigBlob > 0 && */ m_sigCopied == false)
+//    {
+//        LOG((LF_CORDB,LL_INFO1000,"CV::I obj:0x%x has been inited\n", this));
+//        
+//        PCCOR_SIGNATURE origSig = m_type.m_pvSigBlob;
+//        m_type.m_pvSigBlob = NULL;
+//		ULONG sz = _skipTypeInSignature(origSig);
+//
+//        BYTE *sigCopy = new BYTE[sz];
+//
+//        if (sigCopy == NULL)
+//            return E_OUTOFMEMORY;
+//
+//        memcpy(sigCopy, origSig, sz);
+//
+//        m_type.m_pvSigBlob = (PCCOR_SIGNATURE) sigCopy;
+//        m_sigCopied = true; 
+//    }
 
     return S_OK;
 }
 
+
+
 //
 // Create the proper value object based on the given element type.
 //
+// GENERICS: cInst and ppInst give the instantiation needed to interpret the signature blob.
+// GENERICS: This need not be an "exact" instantiation - it need only
+// GENERICS: give the representations...
+//
 /*static*/ HRESULT CordbValue::CreateValueByType(CordbAppDomain *appdomain,
-                                                 CordbModule *module,
-                                                 ULONG cbSigBlob,
-                                                 PCCOR_SIGNATURE pvSigBlob,
-                                                 CordbClass *optionalClass,
+                                                 CordbType *type,
                                                  REMOTE_PTR remoteAddress,
                                                  void *localAddress,
                                                  bool objectRefsInHandles,
                                                  RemoteAddress *remoteRegAddr,
                                                  IUnknown *pParent,
-                                                 ICorDebugValue **ppValue)
+												 ICorDebugValue** ppValue)
 {
     HRESULT hr = S_OK;
     LOG((LF_CORDB,LL_INFO100000,"CV::CreateValueByType\n"));
 
     *ppValue = NULL;
 
-    // We don't care about the modifiers, but one of the created
-    // object might.
-    ULONG           cbSigBlobNoMod = cbSigBlob;
-    PCCOR_SIGNATURE pvSigBlobNoMod = pvSigBlob;
-
-    // If we've got some funky modifier, then remove it.
-    ULONG cb =_skipFunkyModifiersInSignature(pvSigBlobNoMod);
-    if( cb != 0)
-    {
-    	cbSigBlobNoMod -= cb;
-        pvSigBlobNoMod = &pvSigBlobNoMod[cb];
-    }
-
-    switch(*pvSigBlobNoMod)
+	CordbType *typeAfterFunky = type->SkipFunkyModifiers();
+	
+	switch(typeAfterFunky->m_elementType) 
     {
     case ELEMENT_TYPE_BOOLEAN:
     case ELEMENT_TYPE_CHAR:
@@ -104,10 +139,10 @@ HRESULT CordbValue::Init(void)
     case ELEMENT_TYPE_I:
     case ELEMENT_TYPE_U:
         {
-            LOG((LF_CORDB,LL_INFO100000,"CV::CreateValueByType CreateGenericValue\n", cb));
+            LOG((LF_CORDB,LL_INFO100000,"CV::CreateValueByType CreateGenericValue\n"));
 
             // A generic value
-            CordbGenericValue* pGenValue = new CordbGenericValue(appdomain, module, cbSigBlob, pvSigBlob,
+            CordbGenericValue* pGenValue = new CordbGenericValue(appdomain, type,
                                                                  remoteAddress, localAddress, remoteRegAddr);
 
             if (pGenValue != NULL)
@@ -139,10 +174,10 @@ HRESULT CordbValue::Init(void)
     case ELEMENT_TYPE_SZARRAY:
     case ELEMENT_TYPE_FNPTR:
         {
-            LOG((LF_CORDB,LL_INFO1000000,"CV::CreateValueByType Creating ReferenceValue\n", cb));
+            LOG((LF_CORDB,LL_INFO1000000,"CV::CreateValueByType Creating ReferenceValue\n"));
             // A reference, possibly to an object or value class
             // Weak by default
-            CordbReferenceValue* pRefValue = new CordbReferenceValue(appdomain, module, cbSigBlob, pvSigBlob,
+            CordbReferenceValue* pRefValue = new CordbReferenceValue(appdomain, type,
                                                                      remoteAddress, localAddress, objectRefsInHandles,
                                                                      remoteRegAddr);
 
@@ -169,8 +204,8 @@ HRESULT CordbValue::Init(void)
     case ELEMENT_TYPE_VALUETYPE:
         {
             // A value class object.
-            CordbVCObjectValue* pVCValue = new CordbVCObjectValue(appdomain, module, cbSigBlob, pvSigBlob,
-                                                                  remoteAddress, localAddress, optionalClass, remoteRegAddr);
+            CordbVCObjectValue* pVCValue = new CordbVCObjectValue(appdomain, type,
+                                                                  remoteAddress, localAddress, remoteRegAddr);
 
             if (pVCValue != NULL)
             {
@@ -295,7 +330,7 @@ HRESULT CordbValue::SetEnregisteredValue(void *pFrom)
     // Can't set an enregistered value unless the frame the value was
     // from is also the current leaf frame. This is because we don't
     // track where we get the registers from every frame from.
-    if (frame->GetID() != frame->m_thread->m_stackFrames[0]->GetID())
+    if (frame->m_id != frame->m_thread->m_stackFrames[0]->m_id)
         return CORDBG_E_SET_VALUE_NOT_ALLOWED_ON_NONLEAF_FRAME;
 
     if (FAILED(hr =
@@ -457,29 +492,23 @@ void CordbValue::GetRegisterInfo(DebuggerIPCE_FuncEvalArgData *pFEAD)
 // is enough to specify the location of a value.
 //
 CordbGenericValue::CordbGenericValue(CordbAppDomain *appdomain,
-                                     CordbModule *module,
-                                     ULONG cbSigBlob,
-                                     PCCOR_SIGNATURE pvSigBlob,
+                                     CordbType *type,
                                      REMOTE_PTR remoteAddress,
                                      void *localAddress,
                                      RemoteAddress *remoteRegAddr)
-    : CordbValue(appdomain, module, cbSigBlob, pvSigBlob, remoteAddress, localAddress, remoteRegAddr, false)
+    : CordbValue(appdomain, type, remoteAddress, localAddress, remoteRegAddr, false)
 {
     //Get rid of funky modifiers
-    ULONG cb = _skipFunkyModifiersInSignature(pvSigBlob);
-    if( cb != 0)
-    {
-        _ASSERTE( (int)cb > 0 );
-        cbSigBlob -= cb;
-        pvSigBlob = &pvSigBlob[cb];
-    }
+	CordbType *typeAfterFunky = type->SkipFunkyModifiers();
 
-    _ASSERTE(*pvSigBlob != ELEMENT_TYPE_END &&
-             *pvSigBlob != ELEMENT_TYPE_VOID &&
-             *pvSigBlob < ELEMENT_TYPE_MAX);
+    _ASSERTE(typeAfterFunky->m_elementType != ELEMENT_TYPE_END &&
+             typeAfterFunky->m_elementType != ELEMENT_TYPE_VOID &&
+             typeAfterFunky->m_elementType < ELEMENT_TYPE_MAX);
              
     // We can fill in the size now for generic values.
-    m_size = _sizeOfElementInstance(pvSigBlob);
+    HRESULT hr = typeAfterFunky->GetObjectSize(&m_size);
+	_ASSERTE (!FAILED(hr));
+
 }
 
 //
@@ -487,26 +516,18 @@ CordbGenericValue::CordbGenericValue(CordbAppDomain *appdomain,
 // halves of data. This is valid only for 64-bit values.
 //
 CordbGenericValue::CordbGenericValue(CordbAppDomain *appdomain,
-                                     CordbModule *module,
-                                     ULONG cbSigBlob,
-                                     PCCOR_SIGNATURE pvSigBlob,
+                                     CordbType *type,
                                      DWORD highWord,
                                      DWORD lowWord,
                                      RemoteAddress *remoteRegAddr)
-    : CordbValue(appdomain, module, cbSigBlob, pvSigBlob, NULL, NULL, remoteRegAddr, false)
+    : CordbValue(appdomain, type, NULL, NULL, remoteRegAddr, false)
 {
     //Get rid of funky modifiers
-    ULONG cb = _skipFunkyModifiersInSignature(pvSigBlob);
-    if( cb != 0)
-    {
-        _ASSERTE( (int)cb > 0 );
-        cbSigBlob -= cb;
-        pvSigBlob = &pvSigBlob[cb];
-    }
+	CorElementType et = type->SkipFunkyModifiers()->m_elementType;
     
-    _ASSERTE((*pvSigBlob == ELEMENT_TYPE_I8) ||
-             (*pvSigBlob == ELEMENT_TYPE_U8) ||
-             (*pvSigBlob == ELEMENT_TYPE_R8));
+    _ASSERTE((et == ELEMENT_TYPE_I8) ||
+             (et == ELEMENT_TYPE_U8) ||
+             (et == ELEMENT_TYPE_R8));
 
     // We know the size is always 64-bits for these types of values.
     // We can also go ahead and initialize the value right here, making
@@ -522,11 +543,13 @@ CordbGenericValue::CordbGenericValue(CordbAppDomain *appdomain,
 // from just an element type. Used for literal values for func evals
 // only.
 //
-CordbGenericValue::CordbGenericValue(ULONG cbSigBlob, PCCOR_SIGNATURE pvSigBlob)
-    : CordbValue(NULL, NULL, cbSigBlob, pvSigBlob, NULL, NULL, NULL, true)
+CordbGenericValue::CordbGenericValue(CordbType *type)
+    : CordbValue(NULL, type, NULL, NULL, NULL, true)
 {
     // The only purpose of a literal value is to hold a RS literal value.
-    m_size = _sizeOfElementInstance(pvSigBlob);
+	CordbType *typeAfterFunky = type->SkipFunkyModifiers();
+    HRESULT hr = typeAfterFunky->GetObjectSize(&m_size);
+	_ASSERTE (!FAILED(hr));
     memset(m_copyOfData, 0, sizeof(m_copyOfData));
 }
 
@@ -655,25 +678,28 @@ bool CordbGenericValue::CopyLiteralData(BYTE *pBuffer)
  * ------------------------------------------------------------------------- */
 
 CordbReferenceValue::CordbReferenceValue(CordbAppDomain *appdomain,
-                                         CordbModule *module,
-                                         ULONG cbSigBlob,
-                                         PCCOR_SIGNATURE pvSigBlob,
+                                         CordbType *type,
                                          REMOTE_PTR remoteAddress,
                                          void *localAddress,
                                          bool objectRefsInHandles,
                                          RemoteAddress *remoteRegAddr)
-    : CordbValue(appdomain, module, cbSigBlob, pvSigBlob, remoteAddress, localAddress, remoteRegAddr, false),
-      m_objectRefInHandle(objectRefsInHandles), m_specialReference(false),
-      m_class(NULL), m_objectStrong(NULL), m_objectWeak(NULL)
+    : CordbValue(appdomain, type, remoteAddress, localAddress, remoteRegAddr, false),
+      m_objectRefInHandle(objectRefsInHandles), 
+      m_specialReference(false),
+	  m_realTypeOfTypedByref(NULL),
+      m_objectStrong(NULL),
+      m_objectWeak(NULL)
 {
     LOG((LF_CORDB,LL_EVERYTHING,"CRV::CRV: this:0x%x\n",this));
     m_size = sizeof(void*);
 }
 
-CordbReferenceValue::CordbReferenceValue(ULONG cbSigBlob, PCCOR_SIGNATURE pvSigBlob)
-    : CordbValue(NULL, NULL, cbSigBlob, pvSigBlob, NULL, NULL, NULL, true),
-      m_objectRefInHandle(false), m_specialReference(false),
-      m_class(NULL), m_objectStrong(NULL), m_objectWeak(NULL)
+CordbReferenceValue::CordbReferenceValue(CordbType *type)
+    : CordbValue(NULL, type, NULL, NULL, NULL, true),
+      m_objectRefInHandle(false), 
+      m_specialReference(false),
+      m_objectStrong(NULL),
+      m_objectWeak(NULL)
 {
     // The only purpose of a literal value is to hold a RS literal value.
     m_size = sizeof(void*);
@@ -828,7 +854,7 @@ HRESULT CordbReferenceValue::SetValue(CORDB_ADDRESS pFrom)
             m_objectStrong = NULL;
         }
 
-        if (m_info.objectType == ELEMENT_TYPE_STRING)
+        if (m_info.objTypeData.elementType == ELEMENT_TYPE_STRING)
         {
             Init(fStrong);
         }
@@ -884,7 +910,7 @@ HRESULT CordbReferenceValue::DereferenceInternal(ICorDebugValue **ppValue, bool 
 {
     HRESULT hr = S_OK;
 
-    if (m_continueCounterLastSync != m_module->GetProcess()->m_continueCounter)
+    if (m_continueCounterLastSync != m_appdomain->GetProcess()->m_continueCounter)
         IfFailRet( Init(false) );
 
     // We may know ahead of time (depending on the reference type) if
@@ -892,20 +918,11 @@ HRESULT CordbReferenceValue::DereferenceInternal(ICorDebugValue **ppValue, bool 
     if ((m_info.objRefBad) || (m_info.objRef == NULL))
         return CORDBG_E_BAD_REFERENCE_VALUE;
 
-    PCCOR_SIGNATURE pvSigBlobNoMod = m_pvSigBlob;
-    ULONG           cbSigBlobNoMod = m_cbSigBlob;
-    
-    //Get rid of funky modifiers
-    ULONG cbNoMod = _skipFunkyModifiersInSignature(pvSigBlobNoMod);
-    if( cbNoMod != 0)
-    {
-        _ASSERTE( (int)cbNoMod > 0 );
-        cbSigBlobNoMod -= cbNoMod;
-        pvSigBlobNoMod = &pvSigBlobNoMod[cbNoMod];
-    }
+	CordbType *typeAfterFunky = m_type->SkipFunkyModifiers();
 
-    switch(*pvSigBlobNoMod)
-    {
+	switch(typeAfterFunky->m_elementType) 
+	{
+
     case ELEMENT_TYPE_CLASS:
     case ELEMENT_TYPE_OBJECT:
     case ELEMENT_TYPE_STRING:
@@ -916,9 +933,9 @@ HRESULT CordbReferenceValue::DereferenceInternal(ICorDebugValue **ppValue, bool 
             // of an object value.
             bool isValueClass = false;
 
-            if ((m_class != NULL) && (*pvSigBlobNoMod != ELEMENT_TYPE_STRING))
+            if ((m_type != NULL) && (m_type->m_class != NULL) && (typeAfterFunky->m_elementType != ELEMENT_TYPE_STRING))
             {
-                hr = m_class->IsValueClass(&isValueClass);
+                hr = m_type->m_class->IsValueClass(&isValueClass);
 
                 if (FAILED(hr))
                     return hr;
@@ -926,8 +943,8 @@ HRESULT CordbReferenceValue::DereferenceInternal(ICorDebugValue **ppValue, bool 
 
             if (isValueClass)
             {
-                CordbBoxValue* pBoxValue = new CordbBoxValue(m_appdomain, m_module, m_cbSigBlob, m_pvSigBlob,
-                                                             m_info.objRef, m_info.objSize, m_info.objOffsetToVars, m_class);
+                CordbBoxValue* pBoxValue = new CordbBoxValue(m_appdomain, m_type,
+                                                             m_info.objRef, m_info.objSize, m_info.objOffsetToVars);
 
                 if (pBoxValue != NULL)
                 {
@@ -956,11 +973,8 @@ HRESULT CordbReferenceValue::DereferenceInternal(ICorDebugValue **ppValue, bool 
                     if (SUCCEEDED(hr))
                     {
                         m_objectStrong = new CordbObjectValue(m_appdomain,
-                                                              m_module,
-                                                              m_cbSigBlob,
-                                                              m_pvSigBlob,
+                                                              m_type,
                                                               &m_info,
-                                                              m_class,
                                                               fStrong,
                                                               m_info.objToken);
                         if (m_objectStrong != NULL)
@@ -984,11 +998,8 @@ HRESULT CordbReferenceValue::DereferenceInternal(ICorDebugValue **ppValue, bool 
                     // Note: we call Init(bCrvWeak) by default when we create (or refresh) a reference value, so we
                     // never have to do it again.
                     m_objectWeak = new CordbObjectValue(m_appdomain,
-                                                        m_module,
-                                                        m_cbSigBlob,
-                                                        m_pvSigBlob,
+                                                        m_type,
                                                         &m_info,
-                                                        m_class,
                                                         fStrong,
                                                         m_info.objToken);
                     if (m_objectWeak != NULL)
@@ -1024,8 +1035,7 @@ HRESULT CordbReferenceValue::DereferenceInternal(ICorDebugValue **ppValue, bool 
     case ELEMENT_TYPE_ARRAY:
 	case ELEMENT_TYPE_SZARRAY:
         {
-            CordbArrayValue* pArrayValue = new CordbArrayValue(m_appdomain, m_module, m_cbSigBlob, m_pvSigBlob,
-                                                               &m_info, m_class);
+            CordbArrayValue* pArrayValue = new CordbArrayValue(m_appdomain, m_type, &m_info);
 
             if (pArrayValue != NULL)
             {
@@ -1048,42 +1058,21 @@ HRESULT CordbReferenceValue::DereferenceInternal(ICorDebugValue **ppValue, bool 
     case ELEMENT_TYPE_BYREF:
     case ELEMENT_TYPE_PTR:
         {
-            // Skip past the byref or ptr type in the signature.
-            PCCOR_SIGNATURE pvSigBlob = pvSigBlobNoMod;
-            UINT_PTR pvSigBlobEnd = (UINT_PTR)pvSigBlobNoMod + cbSigBlobNoMod;
-            
-            CorElementType et = CorSigUncompressElementType(pvSigBlob);
-            _ASSERTE((et == ELEMENT_TYPE_BYREF) ||
-                     (et == ELEMENT_TYPE_PTR));
+			CordbType *ptrType;
+			typeAfterFunky->DestUnaryType(&ptrType);
 
-            // Adjust the size of the signature.
-            DWORD cbSigBlob = pvSigBlobEnd - (UINT_PTR)pvSigBlob;
+            CorElementType et = ptrType->m_elementType;
 
-            // If we end up with an empty signature, then we can't
-            // finish the dereference.
-            if (cbSigBlob == 0)
-                return CORDBG_E_BAD_REFERENCE_VALUE;
-
-            // Do we have a ptr to something useful?
-            if (et == ELEMENT_TYPE_PTR)
-            {
-                PCCOR_SIGNATURE tmpSigPtr = pvSigBlob;
-                et = CorSigUncompressElementType(tmpSigPtr);
-
-                if (et == ELEMENT_TYPE_VOID)
-                {
-                    *ppValue = NULL;
-                    return CORDBG_S_VALUE_POINTS_TO_VOID;
-                }
-            }
+			if (et == ELEMENT_TYPE_VOID)
+			{
+				*ppValue = NULL;
+				return CORDBG_S_VALUE_POINTS_TO_VOID;
+			}
 
             // Create a value for what this reference points to. Note:
             // this could be almost any type of value.
             hr = CordbValue::CreateValueByType(m_appdomain,
-                                               m_module,
-                                               cbSigBlob,
-                                               pvSigBlob,
-                                               NULL,
+                                               ptrType,
                                                m_info.objRef,
                                                NULL,
                                                false,
@@ -1096,36 +1085,10 @@ HRESULT CordbReferenceValue::DereferenceInternal(ICorDebugValue **ppValue, bool 
 
     case ELEMENT_TYPE_TYPEDBYREF:
         {
-            // Build a partial signature for either a CLASS or
-            // VALUECLASS based on the type of m_class. The only
-            // reason there would be no class from the Left Side is
-            // that its an array class, which we treat just like a
-            // normal object reference anyway...
-            // For endianess issues, make sure we use one byte so that
-            // we pass in the correct value
-            COR_SIGNATURE et = ELEMENT_TYPE_CLASS;
-
-            if (m_class != NULL)
-            {
-                bool isValueClass = false;
-
-                hr = m_class->IsValueClass(&isValueClass);
-
-                if (FAILED(hr))
-                    return hr;
-
-                if (isValueClass)
-                    et = ELEMENT_TYPE_VALUETYPE;
-            }
-            
             // Create the value for what this reference points
-            // to. Note: this will only be pointing to a CLASS or a
-            // VALUECLASS.
+            // to. 
             hr = CordbValue::CreateValueByType(m_appdomain,
-                                               m_module,
-                                               1,
-                                               &et,
-                                               m_class,
+                                               m_realTypeOfTypedByref,
                                                m_info.objRef,
                                                NULL,
                                                false,
@@ -1166,18 +1129,20 @@ HRESULT CordbReferenceValue::Init(bool fStrong)
         return hr;
     }
 
-    m_continueCounterLastSync = m_module->GetProcess()->m_continueCounter;
+    m_continueCounterLastSync = m_appdomain->GetProcess()->m_continueCounter;
     
     // If we have a byref, ptr, or refany type then we go ahead and
     // get the true remote ptr now. All the other info we need to
     // dereference one of these is held in the base value class and in
     // the signature.
 
-    //Get rid of funky modifiers
-    ULONG cbMod = _skipFunkyModifiersInSignature(m_pvSigBlob);
-    
-    CorElementType type = (CorElementType) *(&m_pvSigBlob[cbMod]);
-    
+	//Get rid of funky modifiers
+	CordbType *typeAfterFunky = m_type->SkipFunkyModifiers();
+	CorElementType type = typeAfterFunky->m_elementType;
+    _ASSERTE (type != ELEMENT_TYPE_WITH);
+    _ASSERTE (type != ELEMENT_TYPE_VAR);
+	_ASSERTE (type != ELEMENT_TYPE_MVAR);
+
     if ((type == ELEMENT_TYPE_BYREF) ||
         (type == ELEMENT_TYPE_PTR))
     {
@@ -1207,12 +1172,17 @@ HRESULT CordbReferenceValue::Init(bool fStrong)
         {
             if (type == ELEMENT_TYPE_PTR)
             {
-                ULONG dataSize =
-                    _sizeOfElementInstance(&m_pvSigBlob[cbMod+1]);
+				CordbType *ptrType;
+				typeAfterFunky->DestUnaryType(&ptrType);
+				ULONG32 dataSize;
+				hr = ptrType->GetObjectSize(&dataSize);
+				if (FAILED(hr))
+					return hr;
                 if (dataSize == 0)
                     dataSize = 1; // Read at least one byte.
+				else if (dataSize >= 8)
+					dataSize = 8; // Read at most eight bytes
                 
-                _ASSERTE(dataSize <= 8);
                 BYTE dummy[8];
                     
                 BOOL succ = ReadProcessMemoryI(m_process->m_handle,
@@ -1277,61 +1247,39 @@ HRESULT CordbReferenceValue::Init(bool fStrong)
     // Save the results for later.
     m_info = event.GetObjectInfoResult;
     
-    // If the object type that we got back is different than the one
-    // we sent, then it means that we orignally had a CLASS and now
-    // have something more specific, like a SDARRAY, or
-    // STRING. Update our signature accordingly, which is okay since
-    // we always have a copy of our sig. This ensures that the
-    // reference's signature accuratley reflects what the Runtime
-    // knows its pointing to.
-    if (m_info.objectType != type)
-    {
-        _ASSERTE((m_info.objectType == ELEMENT_TYPE_ARRAY) ||
-				 (m_info.objectType == ELEMENT_TYPE_SZARRAY) ||
-				 (m_info.objectType == ELEMENT_TYPE_CLASS) ||
-				 (m_info.objectType == ELEMENT_TYPE_OBJECT) ||
-                 (m_info.objectType == ELEMENT_TYPE_STRING));
-        _ASSERTE(m_cbSigBlob-cbMod > 0);
-
-        *((BYTE*) &m_pvSigBlob[cbMod]) = (BYTE) m_info.objectType;
-    }
-
-    // Find the class that goes with this object. We'll remember
-    // it with the other object info for when this reference is
-    // dereferenced.
-    if (m_info.objClassMetadataToken != mdTypeDefNil)
-    {
-		// Iterate through each assembly looking for the given module
-		CordbModule* pClassModule = m_appdomain->LookupModule(m_info.objClassDebuggerModuleToken);
-#ifdef RIGHT_SIDE_ONLY
-        _ASSERTE(pClassModule != NULL);
-#else
-        // This case happens if inproc debugging is used from a ModuleLoadFinished
-        // callback for a module that hasn't been bound to an assembly yet.
-        if (pClassModule == NULL)
-            return (E_FAIL);
-#endif
-        
-        CordbClass* pClass = pClassModule->LookupClass(
-                                                m_info.objClassMetadataToken);
-
-        if (pClass == NULL)
-        {
-            hr = pClassModule->CreateClass(m_info.objClassMetadataToken,
-                                           &pClass);
-
-            if (!SUCCEEDED(hr))
-                return hr;
-        }
-                
-        _ASSERTE(pClass != NULL);
-        m_class = pClass;
-    }
-
     if (m_info.objRefBad)
     {
         return S_OK;
     }
+
+
+    // If the object type that we got back is different than the one
+    // we sent, then it means that we orignally had a CLASS and now
+    // have something more specific, like a SDARRAY, MDARRAY, or
+    // STRING or a constructed type. 
+    // Update our signature accordingly, which is okay since
+    // we always have a copy of our sig. This ensures that the
+    // reference's signature accuratley reflects what the Runtime
+    // knows its pointing to.
+    //
+	// GENERICS: do this for all types: for example, an array might have been
+	// discovered to be a more specific kind of array (String[] where an Object[] was
+	// expected).  
+	CordbType *newtype;
+
+	IfFailRet( CordbType::TypeDataToType(m_appdomain, &m_info.objTypeData, &newtype) );
+
+	newtype->AddRef();
+	m_type->Release();
+	m_type = newtype;
+
+	// For typed-byref's the act of dereferencing the object also reveals to us
+	// what the "real" type of the object is... 
+	if (m_info.objTypeData.elementType == ELEMENT_TYPE_TYPEDBYREF) 
+	{
+		IfFailRet( CordbType::TypeDataToType(m_appdomain, &m_info.typedByrefInfo.typedByrefType, 
+			                                 &m_realTypeOfTypedByref) );
+	}
 
     return hr;
 }
@@ -1358,23 +1306,20 @@ HRESULT CordbReferenceValue::Init(bool fStrong)
 #endif
 
 CordbObjectValue::CordbObjectValue(CordbAppDomain *appdomain,
-                                   CordbModule *module,
-                                   ULONG cbSigBlob,
-                                   PCCOR_SIGNATURE pvSigBlob,
+                                   CordbType *type,
                                    DebuggerIPCE_ObjectData *pObjectData,
-                                   CordbClass *objectClass,
                                    bool fStrong,
                                    void *token)
-    : CordbValue(appdomain, module, cbSigBlob, pvSigBlob, pObjectData->objRef, NULL, NULL, false),
-      m_info(*pObjectData), m_objectCopy(NULL), m_objectLocalVars(NULL),
-      m_stringBuffer(NULL), m_class(objectClass),
+    : CordbValue(appdomain, type, pObjectData->objRef, NULL, NULL, false),
+      m_info(*pObjectData),
+      m_objectCopy(NULL), m_objectLocalVars(NULL), m_stringBuffer(NULL),
       m_fIsValid(true), m_fStrong(fStrong), m_objectToken(token)
 {
-    _ASSERTE(module != NULL);
+    _ASSERTE(appdomain != NULL);
     
     m_size = m_info.objSize;
 
-    m_mostRecentlySynched = module->GetProcess()->m_continueCounter;
+    m_mostRecentlySynched = appdomain->GetProcess()->m_continueCounter;
 
     LOG((LF_CORDB,LL_EVERYTHING,"COV::COV:This:0x%x  token:0x%x"
         "  strong:0x%x  continue count:0x%x\n",this, m_objectToken,
@@ -1390,7 +1335,7 @@ CordbObjectValue::~CordbObjectValue()
     if (m_objectCopy != NULL)
         delete [] m_objectCopy;
 
-    if (m_objectToken != NULL && m_info.objClassMetadataToken != mdTypeDefNil)
+    if (m_objectToken != NULL)
         DiscardObject(m_objectToken, m_fStrong);
 }
 
@@ -1430,7 +1375,7 @@ HRESULT CordbObjectValue::QueryInterface(REFIID id, void **pInterface)
     else if (id == IID_ICorDebugHeapValue)
 		*pInterface = (ICorDebugHeapValue*)this;
     else if ((id == IID_ICorDebugStringValue) &&
-             (m_info.objectType == ELEMENT_TYPE_STRING))
+             (m_info.objTypeData.elementType == ELEMENT_TYPE_STRING))
 		*pInterface = (ICorDebugStringValue*)this;
     else if (id == IID_IUnknown)
 		*pInterface = (IUnknown*)(ICorDebugObjectValue*)this;
@@ -1493,9 +1438,11 @@ HRESULT CordbObjectValue::IsValid(BOOL *pbValid)
         return S_OK;
     }
 
-	HRESULT hr = S_OK;
+    HRESULT hr = S_OK;
 
-    if (m_mostRecentlySynched == m_class->GetModule()->GetProcess()->m_continueCounter)
+    _ASSERTE(m_type != NULL);
+
+    if (m_mostRecentlySynched == m_type->m_appdomain->GetProcess()->m_continueCounter)
     {
         LOG((LF_CORDB,LL_INFO1000,"COV::IsValid: object is N'Sync!\n"));
         
@@ -1509,7 +1456,7 @@ HRESULT CordbObjectValue::IsValid(BOOL *pbValid)
         LOG((LF_CORDB,LL_INFO1000,"COV::IsValid object now "
             "synched up fine!\n"));
             
-        m_mostRecentlySynched = m_class->GetModule()->GetProcess()->m_continueCounter;
+        m_mostRecentlySynched = m_type->m_appdomain->GetProcess()->m_continueCounter;
         (*pbValid)=TRUE;
     }
     else
@@ -1540,7 +1487,7 @@ bool CordbObjectValue::SyncObject(void)
     LOG((LF_CORDB,LL_INFO1000,"COV::SO\n"));
     
     DebuggerIPCEvent event;
-    CordbProcess *process = m_class->GetModule()->GetProcess();
+    CordbProcess *process = m_appdomain->GetProcess();
     _ASSERTE(process != NULL);
 
     process->InitIPCEvent(&event, 
@@ -1548,7 +1495,7 @@ bool CordbObjectValue::SyncObject(void)
                           true,
                           (void *)m_appdomain->m_id);
     event.ValidateObject.objectToken = m_objectToken;
-    event.ValidateObject.objectType  = m_info.objectType;
+    event.ValidateObject.objectType  = m_info.objTypeData.elementType;
     
     // Note: two-way event here...
     HRESULT hr = process->m_cordb->SendIPCEvent(process, &event,
@@ -1602,7 +1549,8 @@ HRESULT CordbObjectValue::GetClass(ICorDebugClass **ppClass)
 {
     VALIDATE_POINTER_TO_OBJECT(ppClass, ICorDebugClass **);
     
-    *ppClass = (ICorDebugClass*) m_class;
+    _ASSERTE(m_type->m_class);
+	*ppClass = (ICorDebugClass*) m_type->m_class;
     
     if (*ppClass != NULL)
         (*ppClass)->AddRef();
@@ -1610,28 +1558,40 @@ HRESULT CordbObjectValue::GetClass(ICorDebugClass **ppClass)
     return S_OK;
 }
 
-HRESULT CordbObjectValue::GetFieldValue(ICorDebugClass *pClass,
+HRESULT CordbObjectValue::GetExactType(ICorDebugType **ppType)
+{
+    VALIDATE_POINTER_TO_OBJECT(ppType, ICorDebugType **);
+    
+    *ppType = (ICorDebugType*) m_type;
+    
+    if (*ppType != NULL)
+        (*ppType)->AddRef();
+
+    return S_OK;
+}
+
+HRESULT CordbObjectValue::GetFieldValueForType(ICorDebugType *pType,
                                         mdFieldDef fieldDef,
                                         ICorDebugValue **ppValue)
 {
-    VALIDATE_POINTER_TO_OBJECT(pClass, ICorDebugClass *);
+    VALIDATE_POINTER_TO_OBJECT(pType, ICorDebugType *);
     VALIDATE_POINTER_TO_OBJECT(ppValue, ICorDebugValue **);
 
     COV_VALIDATE_OBJECT();
 
-    CordbClass *c;
+    CordbType *typ;
 	HRESULT hr = S_OK;
     BOOL fSyncBlockField = FALSE;
     
     //
     //
-    if (pClass == NULL)
-        c = m_class;
+    if (pType == NULL)
+        typ = m_type;
     else
-        c = (CordbClass*)pClass;
+        typ = (CordbType*)pType;
     
     // Validate the token.
-    if (!c->GetModule()->m_pIMImport->IsValidToken(fieldDef))
+    if (typ->m_class == NULL || !typ->m_class->GetModule()->m_pIMImport->IsValidToken(fieldDef))
     {
     	hr = E_INVALIDARG;
     	goto LExit;
@@ -1643,11 +1603,11 @@ HRESULT CordbObjectValue::GetFieldValue(ICorDebugClass *pClass,
     pFieldData = NULL;
 #endif
     
-    hr = c->GetFieldInfo(fieldDef, &pFieldData);
+    hr = typ->GetFieldInfo(fieldDef, &pFieldData);
 
     if (hr == CORDBG_E_ENC_HANGING_FIELD)
     {
-        hr = m_class->GetSyncBlockField(fieldDef, 
+        hr = m_type->m_class->GetSyncBlockField(fieldDef, 
                                         &pFieldData,
                                         this);
             
@@ -1662,10 +1622,11 @@ HRESULT CordbObjectValue::GetFieldValue(ICorDebugClass *pClass,
         // Compute the remote address, too, so that SetValue will work.
         DWORD ra = m_id + m_info.objOffsetToVars + pFieldData->fldOffset;
         
-        hr = CordbValue::CreateValueByType(m_appdomain,
-                                           c->GetModule(),
-                                           pFieldData->fldFullSigSize, pFieldData->fldFullSig,
-                                           NULL,
+        CordbType *fldtyp;
+		IfFailRet( CordbType::SigToType(typ->m_class->GetModule(), pFieldData->fldFullSig,typ->m_inst, &fldtyp) );
+
+		hr = CordbValue::CreateValueByType(m_appdomain,
+                                           fldtyp,
                                            (void*)ra,
                                            (!fSyncBlockField ? &(m_objectLocalVars[pFieldData->fldOffset])
                                             : NULL), // don't claim we have a local addr if we don'td
@@ -1676,10 +1637,26 @@ HRESULT CordbObjectValue::GetFieldValue(ICorDebugClass *pClass,
     }
     
     // If we can't get it b/c it's a constant, then say so.
-    hr = CordbClass::PostProcessUnavailableHRESULT(hr, c->GetModule()->m_pIMImport, fieldDef);
+    hr = CordbClass::PostProcessUnavailableHRESULT(hr, typ->m_class->GetModule()->m_pIMImport, fieldDef);
 
 LExit:
     return hr;
+}
+
+HRESULT CordbObjectValue::GetFieldValue(ICorDebugClass *pClass,
+                                        mdFieldDef fieldDef,
+                                        ICorDebugValue **ppValue)
+{
+    VALIDATE_POINTER_TO_OBJECT(pClass, ICorDebugClass *);
+    VALIDATE_POINTER_TO_OBJECT(ppValue, ICorDebugValue **);
+
+    COV_VALIDATE_OBJECT();
+
+	CordbType *type;
+	HRESULT hr;
+	IfFailRet( CordbType::MkNaturalNonGenericType(m_type->m_appdomain, (CordbClass *) pClass, &type) );
+
+	return GetFieldValueForType(type, fieldDef, ppValue);
 }
 
 HRESULT CordbObjectValue::GetVirtualMethod(mdMemberRef memberRef,
@@ -1755,7 +1732,7 @@ HRESULT CordbObjectValue::GetLength(ULONG32 *pcchString)
 {
     VALIDATE_POINTER_TO_OBJECT(pcchString, SIZE_T *);
     
-    _ASSERTE(m_info.objectType == ELEMENT_TYPE_STRING);
+    _ASSERTE(m_info.objTypeData.elementType == ELEMENT_TYPE_STRING);
 
     COV_VALIDATE_OBJECT();
 
@@ -1770,7 +1747,7 @@ HRESULT CordbObjectValue::GetString(ULONG32 cchString,
     VALIDATE_POINTER_TO_OBJECT_ARRAY(szString, WCHAR, cchString, true, true);
     VALIDATE_POINTER_TO_OBJECT(pcchString, SIZE_T *);
 
-    _ASSERTE(m_info.objectType == ELEMENT_TYPE_STRING);
+    _ASSERTE(m_info.objTypeData.elementType == ELEMENT_TYPE_STRING);
 
     COV_VALIDATE_OBJECT();
 
@@ -1802,7 +1779,11 @@ HRESULT CordbObjectValue::Init(void)
         
     SIZE_T nstructSize = 0;
 
-    if (m_info.objectType == ELEMENT_TYPE_CLASS)
+    _ASSERTE (m_info.objTypeData.elementType != ELEMENT_TYPE_WITH);
+	_ASSERTE (m_info.objTypeData.elementType != ELEMENT_TYPE_VAR);
+	_ASSERTE (m_info.objTypeData.elementType != ELEMENT_TYPE_MVAR);
+
+    if (m_info.objTypeData.elementType == ELEMENT_TYPE_CLASS)
         nstructSize = m_info.nstructInfo.size;
     
     // Copy the entire object over to this process.
@@ -1840,7 +1821,7 @@ HRESULT CordbObjectValue::Init(void)
     // string object.
     m_objectLocalVars = m_objectCopy + m_info.objOffsetToVars;
 
-    if (m_info.objectType == ELEMENT_TYPE_STRING)
+    if (m_info.objTypeData.elementType == ELEMENT_TYPE_STRING)
         m_stringBuffer = m_objectCopy + m_info.stringInfo.offsetToStringBase;
     
     return hr;
@@ -1851,15 +1832,12 @@ HRESULT CordbObjectValue::Init(void)
  * ------------------------------------------------------------------------- */
 
 CordbVCObjectValue::CordbVCObjectValue(CordbAppDomain *appdomain,
-                                       CordbModule *module,
-                                       ULONG cbSigBlob,
-                                       PCCOR_SIGNATURE pvSigBlob,
+                                       CordbType *type,
                                        REMOTE_PTR remoteAddress,
                                        void *localAddress,
-                                       CordbClass *objectClass,
                                        RemoteAddress *remoteRegAddr)
-    : CordbValue(appdomain, module, cbSigBlob, pvSigBlob, remoteAddress, localAddress, remoteRegAddr, false),
-      m_objectCopy(NULL), m_class(objectClass)
+    : CordbValue(appdomain, type, remoteAddress, localAddress, remoteRegAddr, false),
+      m_objectCopy(NULL)
 {
 }
 
@@ -1892,7 +1870,7 @@ HRESULT CordbVCObjectValue::QueryInterface(REFIID id, void **pInterface)
 
 HRESULT CordbVCObjectValue::GetClass(ICorDebugClass **ppClass)
 {
-    *ppClass = (ICorDebugClass*) m_class;
+	*ppClass = (ICorDebugClass*) GetClass();
 
     if (*ppClass != NULL)
         (*ppClass)->AddRef();
@@ -1900,22 +1878,42 @@ HRESULT CordbVCObjectValue::GetClass(ICorDebugClass **ppClass)
     return S_OK;
 }
 
-HRESULT CordbVCObjectValue::GetFieldValue(ICorDebugClass *pClass,
+HRESULT CordbVCObjectValue::GetExactType(ICorDebugType **ppType)
+{
+    VALIDATE_POINTER_TO_OBJECT(ppType, ICorDebugType **);
+    
+    *ppType = (ICorDebugType*) m_type;
+    
+    if (*ppType != NULL)
+        (*ppType)->AddRef();
+
+    return S_OK;
+}
+
+CordbClass *CordbVCObjectValue::GetClass()
+{
+    CordbClass *tycon;
+	Instantiation inst;
+	m_type->DestConstructedType(&tycon, &inst);
+	return tycon;
+}
+
+HRESULT CordbVCObjectValue::GetFieldValueForType(ICorDebugType *pType,
                                           mdFieldDef fieldDef,
                                           ICorDebugValue **ppValue)
 {
     // Validate the token.
-    if (!m_class->GetModule()->m_pIMImport->IsValidToken(fieldDef))
+    if (m_type->m_class == NULL || !m_type->m_class->GetModule()->m_pIMImport->IsValidToken(fieldDef))
         return E_INVALIDARG;
 
-    CordbClass *c;
+    CordbType *type;
 
     //
     //
-    if (pClass == NULL)
-        c = m_class;
+    if (pType == NULL)
+        type = m_type;
     else
-        c = (CordbClass*) pClass;
+        type = (CordbType*) pType;
 
     DebuggerIPCE_FieldData *pFieldData;
 
@@ -1923,11 +1921,11 @@ HRESULT CordbVCObjectValue::GetFieldValue(ICorDebugClass *pClass,
     pFieldData = NULL;
 #endif
     
-    HRESULT hr = c->GetFieldInfo(fieldDef, &pFieldData);
+    HRESULT hr = type->GetFieldInfo(fieldDef, &pFieldData);
 
     _ASSERTE(hr != CORDBG_E_ENC_HANGING_FIELD);
     // If we get back CORDBG_E_ENC_HANGING_FIELD we'll just fail - 
-    // value classes should be able to add fields once they're loaded,
+    // value classes should not be able to add fields once they're loaded,
     // since the new fields _can't_ be contiguous with the old fields,
     // and having all the fields contiguous is kinda the point of a V.C.
 
@@ -1950,11 +1948,12 @@ HRESULT CordbVCObjectValue::GetFieldValue(ICorDebugClass *pClass,
             // Remote register address is the same as the parent.
             pra = &m_remoteRegAddr;
         }
+
+        CordbType *fldtyp;
+		IfFailRet( CordbType::SigToType(type->m_class->GetModule(), pFieldData->fldFullSig,type->m_inst, &fldtyp) );
         
         hr = CordbValue::CreateValueByType(m_appdomain,
-                                           c->GetModule(),
-                                           pFieldData->fldFullSigSize, pFieldData->fldFullSig,
-                                           NULL,
+										   fldtyp,
                                            (void*)ra,
                                            &(m_objectCopy[pFieldData->fldOffset]),
                                            false,
@@ -1964,6 +1963,20 @@ HRESULT CordbVCObjectValue::GetFieldValue(ICorDebugClass *pClass,
     }
 
 	return hr;
+}
+
+HRESULT CordbVCObjectValue::GetFieldValue(ICorDebugClass *pClass,
+                                        mdFieldDef fieldDef,
+                                        ICorDebugValue **ppValue)
+{
+    VALIDATE_POINTER_TO_OBJECT(pClass, ICorDebugClass *);
+    VALIDATE_POINTER_TO_OBJECT(ppValue, ICorDebugValue **);
+
+	CordbType *type;
+	HRESULT hr;
+	IfFailRet( CordbType::MkNaturalNonGenericType(m_type->m_appdomain, (CordbClass *) pClass, &type) );
+
+	return GetFieldValueForType(type, fieldDef, ppValue);
 }
 
 HRESULT CordbVCObjectValue::GetValue(void *pTo)
@@ -2031,8 +2044,7 @@ HRESULT CordbVCObjectValue::SetValue(void *pFrom)
         m_process->InitIPCEvent(&event, DB_IPCE_SET_VALUE_CLASS, true, (void *)m_appdomain->m_id);
         event.SetValueClass.oldData = (void*)m_id;
         event.SetValueClass.newData = buffer;
-        event.SetValueClass.classMetadataToken = m_class->m_id;
-        event.SetValueClass.classDebuggerModuleToken = m_class->GetModule()->m_debuggerModuleToken;
+        m_type->TypeToTypeData(&event.SetValueClass.type);
     
         // Note: two-way event here...
         hr = m_process->m_cordb->SendIPCEvent(m_process, &event, sizeof(DebuggerIPCEvent));
@@ -2089,43 +2101,50 @@ HRESULT CordbVCObjectValue::GetManagedCopy(IUnknown **ppObject)
 #ifndef RIGHT_SIDE_ONLY
     return CORDBG_E_INPROC_NOT_IMPL;
 #else
+
+    HRESULT hr = S_OK;
     ICorDBPrivHelper *pHelper = NULL;
 
-    HRESULT hr = m_process->m_cordb->GetCorDBPrivHelper(&pHelper);
+    if (FAILED(hr = GetClass()->Init(FALSE)))
+        return hr;
 
-    if (SUCCEEDED(hr))
+    if (GetClass()->m_typarCount != 0) 
     {
-        // Grab the module name...
-        WCHAR *moduleName = m_class->GetModule()->GetModuleName();
-
-        // Gotta have a module name...
-        if ((moduleName == NULL) || (wcslen(moduleName) == 0))
-        {
-            hr = E_INVALIDARG;
-            goto ErrExit;
-        }
-
-        // Grab the assembly name...
-        WCHAR *assemblyName;
-        assemblyName =
-            m_class->GetModule()->GetCordbAssembly()->m_szAssemblyName;
-
-        // Again, gotta have an assembly name...
-        if ((assemblyName == NULL) || (wcslen(assemblyName) == 0))
-        {
-            hr = E_INVALIDARG;
-            goto ErrExit;
-        }
-
-        // Groovy... go get a managed copy of this object.
-        hr = pHelper->CreateManagedObject(assemblyName,
-                                          moduleName,
-                                          (mdTypeDef)m_class->m_id,
-                                          m_objectCopy,
-                                          ppObject);
-
+        hr = CORDBG_E_OBJECT_IS_NOT_COPYABLE_VALUE_CLASS;
+        return hr;
     }
-    
+
+    if (FAILED (hr = m_process->m_cordb->GetCorDBPrivHelper(&pHelper)))
+        return hr;
+
+    // Grab the module name...
+    WCHAR *moduleName = GetClass()->GetModule()->GetModuleName();
+
+    // Gotta have a module name...
+    if ((moduleName == NULL) || (wcslen(moduleName) == 0))
+    {
+        hr = E_INVALIDARG;
+        goto ErrExit;
+    }
+
+    // Grab the assembly name...
+    WCHAR *assemblyName;
+    assemblyName =
+        GetClass()->GetModule()->GetCordbAssembly()->m_szAssemblyName;
+
+    // Again, gotta have an assembly name...
+    if ((assemblyName == NULL) || (wcslen(assemblyName) == 0))
+    {
+        hr = E_INVALIDARG;
+        goto ErrExit;
+    }
+
+    // Groovy... go get a managed copy of this object.
+    hr = pHelper->CreateManagedObject(assemblyName,
+                                      moduleName,
+                                      (mdTypeDef)GetClass()->m_id,
+                                      m_objectCopy,
+                                      ppObject);
 ErrExit:
     // Release the helper.
     if (pHelper)
@@ -2196,39 +2215,10 @@ HRESULT CordbVCObjectValue::Init(void)
 {
     HRESULT hr = S_OK;
 
-    hr = CordbValue::Init();
-
-    if (FAILED(hr))
-        return hr;
-        
-    // If we don't have the class, look it up using the signature
-    if (m_class == NULL)
-    {
-        hr = ResolveValueClass();
-        
-        if (FAILED(hr))
-            return hr;
-
-        _ASSERTE(m_class != NULL);
-    }
-
-#ifdef _DEBUG
-    // Make sure we've got a value class.
-    bool isValueClass;
-
-    hr = m_class->IsValueClass(&isValueClass);
-
-    if (FAILED(hr))
-        return hr;
-    
-    _ASSERTE(isValueClass);
-#endif    
+    IfFailRet( CordbValue::Init() );
 
     // Get the object size from the class
-    hr = m_class->GetObjectSize(&m_size);
-
-    if (FAILED(hr))
-        return hr;
+    IfFailRet( m_type->GetObjectSize(&m_size) );
     
     // Copy the entire object over to this process.
     m_objectCopy = new BYTE[m_size];
@@ -2285,60 +2275,23 @@ HRESULT CordbVCObjectValue::Init(void)
     return hr;
 }
 
-HRESULT CordbVCObjectValue::ResolveValueClass(void)
-{
-    HRESULT hr = S_OK;
+//HRESULT CordbVCObjectValue::ResolveValueClass(void)
+//{
+//	return m_type.SkipFunkyModifiers().GetAsClass(&m_class);
+//}
 
-    _ASSERTE(m_pvSigBlob != NULL);
-
-    // Skip the element type in the signature.
-    PCCOR_SIGNATURE sigBlob = m_pvSigBlob;
-    
-    //Get rid of funky modifiers
-    ULONG cb = _skipFunkyModifiersInSignature(sigBlob);
-    if( cb != 0)
-    {
-        sigBlob = &sigBlob[cb];
-    }
-#ifdef _DEBUG
-    CorElementType et =
-#endif
-    CorSigUncompressElementType(sigBlob);
-    _ASSERTE(et == ELEMENT_TYPE_VALUETYPE);
-    
-    // Grab the class token out of the signature.
-    mdToken tok = CorSigUncompressToken(sigBlob);
-    
-    // If this is a typedef then we're done.
-    if (TypeFromToken(tok) == mdtTypeDef)
-        return m_module->LookupClassByToken(tok, &m_class);
-    else
-    {
-        _ASSERTE(TypeFromToken(tok) == mdtTypeRef);
-
-        // We have a TypeRef that could refer to a class in any loaded
-        // module. It must refer to a class in a loaded module since
-        // otherwise the Runtime could not have created the object.
-        return m_module->ResolveTypeRef(tok, &m_class);
-    }
-    
-    return hr;
-}
 
 /* ------------------------------------------------------------------------- *
  * Box Value class
  * ------------------------------------------------------------------------- */
 
 CordbBoxValue::CordbBoxValue(CordbAppDomain *appdomain,
-                             CordbModule *module,
-                             ULONG cbSigBlob,
-                             PCCOR_SIGNATURE pvSigBlob,
+                             CordbType *type,
                              REMOTE_PTR remoteAddress,
                              SIZE_T objectSize,
-                             SIZE_T offsetToVars,
-                             CordbClass *objectClass)
-    : CordbValue(appdomain, module, cbSigBlob, pvSigBlob, remoteAddress, NULL, NULL, false),
-      m_offsetToVars(offsetToVars), m_class(objectClass)
+                             SIZE_T offsetToVars)
+    : CordbValue(appdomain, type, remoteAddress, NULL, NULL, false),
+       m_offsetToVars(offsetToVars)
 {
     m_size = objectSize;
 }
@@ -2411,8 +2364,8 @@ HRESULT CordbBoxValue::GetObject(ICorDebugObjectValue **ppObject)
     HRESULT hr = S_OK;
     
     CordbVCObjectValue* pVCValue =
-        new CordbVCObjectValue(m_appdomain, m_module, m_cbSigBlob, m_pvSigBlob,
-                               (REMOTE_PTR)((BYTE*)m_id + m_offsetToVars), NULL, m_class, NULL);
+        new CordbVCObjectValue(m_appdomain, m_type,
+                               (REMOTE_PTR)((BYTE*)m_id + m_offsetToVars), NULL, NULL);
 
     if (pVCValue != NULL)
     {
@@ -2465,16 +2418,15 @@ HRESULT CordbBoxValue::Init(void)
 
 
 CordbArrayValue::CordbArrayValue(CordbAppDomain *appdomain,
-                                 CordbModule *module,
-                                 ULONG cbSigBlob,
-                                 PCCOR_SIGNATURE pvSigBlob,
-                                 DebuggerIPCE_ObjectData *pObjectInfo,
-                                 CordbClass *elementClass)
-    : CordbValue(appdomain, module, cbSigBlob, pvSigBlob, pObjectInfo->objRef, NULL, NULL, false),
-      m_info(*pObjectInfo), m_class(elementClass),
+                                 CordbType *type,
+                                 DebuggerIPCE_ObjectData *pObjectInfo)
+    : CordbValue(appdomain, type, pObjectInfo->objRef, NULL, NULL, false),
+      m_info(*pObjectInfo),
       m_objectCopy(NULL)
 {
     m_size = m_info.objSize;
+
+	type->DestUnaryType(&m_elemtype);
 
 // Set range to illegal values to force a load on first access
     m_idxLower = m_idxUpper = (unsigned int) -1;
@@ -2513,7 +2465,7 @@ HRESULT CordbArrayValue::GetElementType(CorElementType *pType)
 {
     VALIDATE_POINTER_TO_OBJECT(pType, CorElementType *);
     
-    *pType = m_info.arrayInfo.elementType;
+	*pType = m_elemtype->m_elementType;
     return S_OK;
 }
 
@@ -2521,7 +2473,9 @@ HRESULT CordbArrayValue::GetRank(ULONG32 *pnRank)
 {
     VALIDATE_POINTER_TO_OBJECT(pnRank, SIZE_T *);
     
-    *pnRank = m_info.arrayInfo.rank;
+    // Rank info is duplicated for sanity checking - double check it here.
+	_ASSERTE(m_info.arrayInfo.rank == m_type->m_rank);
+	*pnRank = m_type->m_rank;
     return S_OK;
 }
 
@@ -2537,7 +2491,9 @@ HRESULT CordbArrayValue::GetDimensions(ULONG32 cdim, ULONG32 dims[])
 {
     VALIDATE_POINTER_TO_OBJECT_ARRAY(dims, SIZE_T, cdim, true, true);
 
-    if (cdim != m_info.arrayInfo.rank)
+    // Rank info is duplicated for sanity checking - double check it here.
+	_ASSERTE(m_info.arrayInfo.rank == m_type->m_rank);
+	if (cdim != m_type->m_rank)
         return E_INVALIDARG;
 
     // SDArrays don't have bounds info, so return the component count.
@@ -2569,7 +2525,9 @@ HRESULT CordbArrayValue::GetBaseIndicies(ULONG32 cdim, ULONG32 indicies[])
 {
     VALIDATE_POINTER_TO_OBJECT_ARRAY(indicies, SIZE_T, cdim, true, true);
 
-    if ((cdim != m_info.arrayInfo.rank) || 
+    // Rank info is duplicated for sanity checking - double check it here.
+	_ASSERTE(m_info.arrayInfo.rank == m_type->m_rank);
+	if ((cdim != m_type->m_rank) || 
         (m_info.arrayInfo.offsetToLowerBounds == 0))
         return E_INVALIDARG;
 
@@ -2585,42 +2543,15 @@ HRESULT CordbArrayValue::CreateElementValue(void *remoteElementPtr,
                                             void *localElementPtr,
                                             ICorDebugValue **ppValue)
 {
-    HRESULT hr = S_OK;
-
-    COR_SIGNATURE elementType = m_info.arrayInfo.elementType;
-
-    if (m_info.arrayInfo.elementType == ELEMENT_TYPE_VALUETYPE)
-    {
-        _ASSERTE(m_class != NULL);
-        
-        hr = CordbValue::CreateValueByType(m_appdomain,
-                                           m_module,
-                                           1,
-                                           &elementType,
-                                           m_class,
-                                           remoteElementPtr,
-                                           localElementPtr,
-                                           false,
-                                           NULL,
-                                           NULL,
-                                           ppValue);
-    }
-    else
-
-        hr = CordbValue::CreateValueByType(m_appdomain,
-                                           m_module,
-                                           1,
-                                           &elementType,
-                                           NULL,
-                                           remoteElementPtr,
-                                           localElementPtr,
-                                           false,
-                                           NULL,
-                                           NULL,
-                                           ppValue);
-    
-	return hr;
-    
+	return CordbValue::CreateValueByType(m_appdomain,
+		m_elemtype,
+		remoteElementPtr,
+		localElementPtr,
+		false,
+		NULL,
+		NULL,
+		ppValue);
+   
 }
 
 HRESULT CordbArrayValue::GetElement(ULONG32 cdim, ULONG32 indicies[],
@@ -2631,7 +2562,9 @@ HRESULT CordbArrayValue::GetElement(ULONG32 cdim, ULONG32 indicies[],
 
     *ppValue = NULL;
     
-    if ((cdim != m_info.arrayInfo.rank) || (indicies == NULL))
+    // Rank info is duplicated for sanity checking - double check it here.
+	_ASSERTE(m_info.arrayInfo.rank == m_type->m_rank);
+	if ((cdim != m_type->m_rank) || (indicies == NULL))
         return E_INVALIDARG;
 
     // If the array has lower bounds, adjust the indicies.
@@ -2689,7 +2622,9 @@ HRESULT CordbArrayValue::GetElementAtPosition(ULONG32 nPosition,
         return E_INVALIDARG;
     }
 
-    const int cbHeader = 2 * m_info.arrayInfo.rank * sizeof(DWORD);
+    // Rank info is duplicated for sanity checking - double check it here.
+	_ASSERTE(m_info.arrayInfo.rank == m_type->m_rank);
+	const int cbHeader = 2 * m_type->m_rank * sizeof(DWORD);
 
     // Ensure that the proper subset is in the cache
     if (nPosition < m_idxLower || nPosition >= m_idxUpper) 

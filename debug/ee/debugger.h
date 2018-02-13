@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -394,7 +399,7 @@ public:
 
 
 /* ------------------------------------------------------------------------ *
- * Debugger JIT Info struct and hash table
+ * Debugger Method Info struct and hash table
  * ------------------------------------------------------------------------ */
 
 //  struct DebuggerOldILToNewILMap:   Holds the old IL to new il offset map
@@ -409,35 +414,13 @@ struct DebuggerOldILToNewILMap
     BOOL    fAccurate;
 };
 
-// class DebuggerJitInfo:  Struct to hold all the JIT information 
+// class DebuggerMethodInfo:  Struct to hold all the information 
 // necessary for a given function.
 //
-// MethodDesc* m_fd:  MethodDesc of the method that this DJI applies to
+
+// m_module, m_token:  Method that this DMI applies to
 //
-// CORDB_ADDRESS m_addrOfCode:  Address of the code.  This will be read by
-//		the right side (via ReadProcessMemory) to grab the actual  native start
-//		address of the jitted method.
 //
-// SIZE_T m_sizeOfCode:  Pseudo-private variable: use the GetSkzeOfCode
-//		method to get this value.  
-//
-// bool m_codePitched:  Set to true if the code is, in fact,
-// 		no longer there, but the DJI will be valid once
-// 		the method is reJITted.
-//
-// bool m_jitComplete:  Set to true once JITComplete has been called.
-//
-// DebuggerILToNativeMap* m_sequenceMap:  This is the sequence map, which
-//		is actually a collection of IL-Native pairs, where each IL corresponds
-//		to a line of source code.  Each pair is refered to as a sequence map point.
-//
-// unsigned int m_sequenceMapCount:  Count of the DebuggerILToNativeMaps
-//		in m_sequenceMap.
-//
-// bool m_sequenceMapSorted:  Set to true once m_sequenceMapSorted is sorted
-//		into ascending IL order (Debugger::setBoundaries, SortMap).
-//
-// SIZE_T m_lastIL:  last nonEPILOG instruction
 //
 // COR_IL_MAP m_rgInstrumentedILMap:  The profiler may instrument the 
 //      code. This is done by modifying the IL code that gets handed to the 
@@ -455,132 +438,113 @@ struct DebuggerOldILToNewILMap
 const bool bOriginalToInstrumented = true;
 const bool bInstrumentedToOriginal = false;
 
-class DebuggerJitInfo
+class DebuggerMethodInfo
 {
 public:
-    //DJI_VERSION:  Holds special constants for use in refering
+    //DMI_VERSION:  Holds special constants for use in refering
     //      to versions of DJI for a method.
-    //DJI_VERSION_MOST_RECENTLY_JITTED:  Note that there is a dependency
+    //DMI_VERSION_MOST_RECENTLY_JITTED:  Note that there is a dependency
     //      between this constant and the 
-    //      CordbFunction::DJI_VERSION_MOST_RECENTLY_JITTED constant in
+    //      CordbFunction::DMI_VERSION_MOST_RECENTLY_JITTED constant in
     //      cordb.h
-    //DJI_VERSION_FIRST_VALID:  First value to be assigned to an
+    //DMI_VERSION_FIRST_VALID:  First value to be assigned to an
     //      actual DJI.
     //      *** WARNING *** WARNING *** WARNING ***
-    //          DebuggerJitInfo::DJI_VERSION_FIRST_VALID MUST be equal to 
+    //          DebuggerMethodInfo::DMI_VERSION_FIRST_VALID MUST be equal to 
     //          FIRST_VALID_VERSION_NUMBER (in debug\inc\dbgipcevents.h)
 
     enum {
-        DJI_VERSION_INVALID = 0,
-        DJI_VERSION_MOST_RECENTLY_JITTED = 1,
-        DJI_VERSION_MOST_RECENTLY_EnCED = 2,
-        DJI_VERSION_FIRST_VALID = 3,
-    } DJI_VERSION;
+        DMI_VERSION_INVALID = 0,
+        DMI_VERSION_MOST_RECENTLY_JITTED = 1,
+        DMI_VERSION_MOST_RECENTLY_EnCED = 2,
+        DMI_VERSION_FIRST_VALID = 3,
+    } DMI_VERSION;
 
+    // If this is true, then we've plastered the method w/ EnC patches,
+    // and the method has been EnC'd
+    bool                     m_encBreakpointsApplied;
 
-    MethodDesc              *m_fd;
-    bool				     m_codePitched; 
-    bool                     m_jitComplete;
+    Module             *m_module;
+    mdMethodDef         m_token;
 
+    DebuggerMethodInfo         *m_prevMethodInfo; 
+    DebuggerMethodInfo			*m_nextMethodInfo; 
 
-    // If the variable layout of this method changes from this version
-    // to the next, then it's illegal to move from this version to the next.
-    // The caller is responsible for ensuring that local variable layout
-    // only changes when there are no frames in any stack that are executing
-    // this method.
-    // In a debug build, we'll assert if we try to make this EnC transition,
-    // in a free/retail build we'll silently fail to make the transition.
-    BOOL                     m_illegalToTransitionFrom;
+	// The linked list of JIT's of this version of the method.   This will ALWAYS
+	// contain one element except for code in generic classes or generic methods,
+	// which may get JITted more than once under different type instantiations.
+	// 
+	// We find the appropriate JitInfo by searching the list (nearly always this
+	// will return the first element of course).
+	//
+	// The JitInfos contain back pointers to this MethodInfo.  They should never be associated
+	// with any other MethodInfo.
+	//
+	DebuggerJitInfo    *m_latestJitInfo; 
     
     DebuggerControllerQueue *m_pDcq;
     
-    CORDB_ADDRESS			 m_addrOfCode;
-	SIZE_T					 m_sizeOfCode;
-	
-    DebuggerJitInfo         *m_prevJitInfo; 
-    DebuggerJitInfo			*m_nextJitInfo; 
-    
     SIZE_T					 m_nVersion;
     
-    DebuggerILToNativeMap   *m_sequenceMap;
-    unsigned int             m_sequenceMapCount;
-    bool                     m_sequenceMapSorted;
-   
-    ICorJitInfo::NativeVarInfo *m_varNativeInfo;
-    unsigned int             m_varNativeInfoCount;
-	bool					 m_varNeedsDelete;
-	
 	DebuggerOldILToNewILMap	*m_OldILToNewIL;
 	SIZE_T					 m_cOldILToNewIL;
-    SIZE_T                   m_lastIL;
     
     SIZE_T                   m_cInstrumentedILMap;
     COR_IL_MAP               *m_rgInstrumentedILMap;
 
-    DebuggerJitInfo(MethodDesc *fd) : m_fd(fd), m_codePitched(false),
-        m_jitComplete(false), 
-        m_illegalToTransitionFrom(FALSE),
+    DebuggerMethodInfo(Module *module, mdMethodDef token) : 
+        m_encBreakpointsApplied(false), 
+        m_module(module),
+        m_token(token),
+        m_prevMethodInfo(NULL),
+        m_nextMethodInfo(NULL), 
+        m_latestJitInfo(NULL),
         m_pDcq(NULL),
-        m_addrOfCode(NULL),
-        m_sizeOfCode(0), m_prevJitInfo(NULL), m_nextJitInfo(NULL),
-        m_nVersion(DJI_VERSION_INVALID), m_sequenceMap(NULL),
-        m_sequenceMapCount(0), m_sequenceMapSorted(false),
-        m_varNativeInfo(NULL), m_varNativeInfoCount(0),m_OldILToNewIL(NULL),
-        m_cOldILToNewIL(0), m_lastIL(0),
-        m_cInstrumentedILMap(0), m_rgInstrumentedILMap(NULL)
+        m_nVersion(DMI_VERSION_INVALID),
+        m_OldILToNewIL(NULL),
+        m_cOldILToNewIL(0), 
+        m_cInstrumentedILMap(0),
+        m_rgInstrumentedILMap(NULL)
      {
-        LOG((LF_CORDB,LL_EVERYTHING, "DJI::DJI : created at 0x%x\n", this));
+        LOG((LF_CORDB,LL_EVERYTHING, "DMI::DMI : created at 0x%x\n", this));
      }
 
-    ~DebuggerJitInfo();
-
-    // Invoking SortMap will ensure that  the native
-    //      ranges (which are infered by sorting the DebuggerILToNativeMaps into
-    //      ascending native order, then assuming that there are no gaps in the native
-    //      code) are properly set up, as well.  
-    void SortMap();
-
-    DebuggerILToNativeMap *MapILOffsetToMapEntry(SIZE_T ilOffset, BOOL *exact=NULL);
-    void MapILRangeToMapEntryRange(SIZE_T ilStartOffset, SIZE_T ilEndOffset,
-                                   DebuggerILToNativeMap **start,
-                                   DebuggerILToNativeMap **end);
-    SIZE_T MapILOffsetToNative(SIZE_T ilOffset, BOOL *exact=NULL);
-
-    // MapSpecialToNative maps a CordDebugMappingResult to a native
-    //      offset so that we can get the address of the prolog & epilog. which
-    //      determines which epilog or prolog, if there's more than one.
-    SIZE_T MapSpecialToNative(CorDebugMappingResult mapping, 
-                              SIZE_T which,
-                              BOOL *pfAccurate);
-
-    // MapNativeOffsetToIL Takes a given nativeOffset, and maps it back
-    //      to the corresponding IL offset, which it returns.  If mapping indicates
-    //      that a the native offset corresponds to a special region of code (for 
-    //      example, the epilog), then the return value will be specified by 
-    //      ICorDebugILFrame::GetIP (see cordebug.idl)
-    DWORD MapNativeOffsetToIL(DWORD nativeOffset, 
-                              CorDebugMappingResult *mapping,
-                              DWORD *which);
-
-    DebuggerJitInfo *GetJitInfoByVersionNumber(SIZE_T nVer,
-                                               SIZE_T nVerMostRecentlyEnC);
-
-    DebuggerJitInfo *GetJitInfoByAddress( const BYTE *pbAddr );
-
-    // This will copy over the map for the use of the DebuggerJitInfo
-    HRESULT LoadEnCILMap(UnorderedILMap *ilMap);
+    ~DebuggerMethodInfo();
 
     // TranslateToInstIL will take offOrig, and translate it to the 
     //      correct IL offset if this code happens to be instrumented (i.e.,
     //      if m_rgInstrumentedILMap != NULL && m_cInstrumentedILMap > 0)
     SIZE_T TranslateToInstIL(SIZE_T offOrig, bool fOrigToInst);
 
-    void SetVars(ULONG32 cVars, ICorDebugInfo::NativeVarInfo *pVars, bool fDelete);
-    HRESULT SetBoundaries(ULONG32 cMap, ICorDebugInfo::OffsetMapping *pMap);
+    DebuggerMethodInfo *GetMethodInfoByVersionNumber(SIZE_T nVer,
+                                               SIZE_T nVerMostRecentlyEnC);
+
+    // This will copy over the map for the use of the DebuggerMethodInfo
+    HRESULT LoadEnCILMap(UnorderedILMap *ilMap);
+
+    // UpdateDeferedBreakpoints will DoDeferedPatch on any controllers
+    // for which the user tried to add them after the EnC, but before we had
+    // actually moved to the new version.
+    // We only move steppers that are active for this thread & frame, in
+    // case EnC fails in another thread and/or frame.
+    HRESULT UpdateDeferedBreakpoints(DebuggerJitInfo *pDji,
+                                     Thread *pThread,
+                                     void *fp);
+
+    HRESULT AddToDeferedQueue(DebuggerController *dc);
+    HRESULT RemoveFromDeferedQueue(DebuggerController *dc);
 
 
-    ICorDebugInfo::SourceTypes GetSrcTypeFromILOffset(SIZE_T ilOffset);
 };
+
+// DebuggerMethodInfoKey|Key for each of the method info hash table entries.
+// Module *m_pModule: This and m_token make up the key
+// mdMethodDef  m_token: This and m_pModule make up the key
+struct DebuggerMethodInfoKey
+{
+    Module             *pModule;
+    mdMethodDef         token;
+} ;
 
 
 /* ------------------------------------------------------------------------ *
@@ -602,6 +566,619 @@ public:
 private:
     gmallocHeap      *m_heap;
     CRITICAL_SECTION  m_cs;
+};
+
+
+// struct DebuggerMethodInfoEntry: Entry for the JIT info hash table.
+// FREEHASHENTRY entry: Needed for use by the hash table
+// DebuggerMethodInfo *ji: The actual DebuggerMethodInfo to
+//          hash.  Note that DMI's will be hashed by MethodDesc.
+struct DebuggerMethodInfoEntry
+{
+    FREEHASHENTRY       entry;
+    DebuggerMethodInfoKey  key;
+    SIZE_T					 nVersion;
+    SIZE_T                   nVersionLastRemapped;
+    DebuggerMethodInfo    *mi;
+};
+
+// CNewZeroData is the allocator used by the all the hash tables that the helper thread could possibly alter. It uses
+// the interop safe allocator.
+class CNewZeroData
+{
+public:
+    static BYTE *Alloc(int iSize, int iMaxSize);
+    static void Free(BYTE *pPtr, int iSize);
+    static BYTE *Grow(BYTE *&pPtr, int iCurSize);
+    static int RoundSize(int iSize);
+    static int GrowSize();
+};
+
+// class DebuggerMethodInfoTable: Hash table to hold all the non-JIT related
+// info for each method we see.  The JIT infos live in a seperate table
+// keyed by MethodDescs - there may be multiple
+// JITted realizations of each MethodDef, e.g. under different generic
+// assumptions.  Hangs off of the Debugger object.
+// INVARIANT: There is only one DebuggerMethodInfo per method
+// in the table. Note that DMI's will be hashed by MethodDesc.
+//
+class DebuggerMethodInfoTable : private CHashTableAndData<CNewZeroData>
+{
+  private:
+
+    BOOL Cmp(const BYTE *pc1, const HASHENTRY *pc2)
+    {   
+        DebuggerMethodInfoKey *pDjik = (DebuggerMethodInfoKey*)pc1;
+        DebuggerMethodInfoEntry*pDjie = (DebuggerMethodInfoEntry*)pc2;
+        
+        return pDjik->pModule != pDjie->key.pModule ||
+               pDjik->token != pDjie->key.token;
+    }
+
+    USHORT HASH(DebuggerMethodInfoKey* pDjik)
+    { 
+        DWORD base = (DWORD)pDjik->pModule + (DWORD)pDjik->token;
+        return (USHORT) (base ^ (base>>16)); 
+    }
+
+    BYTE *KEY(DebuggerMethodInfoKey* djik)
+    { 
+        return (BYTE *) djik; 
+    }
+
+//#define _DEBUG_DMI_TABLE
+
+#ifdef _DEBUG_DMI_TABLE
+    ULONG CheckDmiTable();
+
+#define CHECK_DMI_TABLE (CheckDmiTable())
+#define CHECK_DMI_TABLE_DEBUGGER (m_pMethodInfos->CheckDmiTable())
+
+#define CHECK_DMI_TABLE
+#define CHECK_DMI_TABLE_DEBUGGER
+
+#endif // _DEBUG_DMI_TABLE
+
+  public:
+
+
+    DebuggerMethodInfoTable() : CHashTableAndData<CNewZeroData>(101)
+    { 
+        NewInit(101, sizeof(DebuggerMethodInfoEntry), 101); 
+    }
+
+    HRESULT AddMethodInfo(Module *pModule, 
+                       mdMethodDef token, 
+                       DebuggerMethodInfo *mi, 
+                       SIZE_T nVersion)
+    {
+       LOG((LF_CORDB, LL_INFO1000, "DMIT::AMI Adding dmi:0x%x Mod:0x%x tok:"
+            "0x%x nVer:0x%x\n", mi, pModule, token, nVersion));
+
+       _ASSERTE(mi != NULL);
+
+       HRESULT hr = OverwriteMethodInfo(pModule, token, mi, TRUE);
+        if (hr == S_OK)
+            return hr;
+
+        DebuggerMethodInfoKey dmik;
+        dmik.pModule = pModule;
+        dmik.token = token;
+
+        DebuggerMethodInfoEntry *dmie = 
+            (DebuggerMethodInfoEntry *) Add(HASH(&dmik));
+          
+        if (dmie != NULL)
+        {
+            dmie->key.pModule = pModule;
+            dmie->key.token = token;
+            dmie->mi = mi; 
+            
+            if (nVersion >= DebuggerMethodInfo::DMI_VERSION_FIRST_VALID)
+                dmie->mi->m_nVersion = nVersion;
+
+            // We haven't sent the remap event for this yet.  Of course,
+            // we might not need to, if we're adding the first version
+
+            dmie->nVersionLastRemapped = max(dmie->mi->m_nVersion-1, 
+                                   DebuggerMethodInfo::DMI_VERSION_FIRST_VALID);
+
+            LOG((LF_CORDB, LL_INFO1000, "DMIT::AJI: mod:0x%x tok:0%x "
+                "remap nVer:0x%x\n", pModule, token, 
+                dmie->nVersionLastRemapped));
+            return S_OK;
+        }
+
+        return E_OUTOFMEMORY;
+    }
+
+    HRESULT OverwriteMethodInfo(Module *pModule, 
+                             mdMethodDef token, 
+                             DebuggerMethodInfo *mi, 
+                             BOOL fOnlyIfNull)
+    { 
+		LOG((LF_CORDB, LL_INFO1000, "DMIT::OJI: dmi:0x%x mod:0x%x tok:0x%x\n", mi, 
+            pModule, token));
+
+        DebuggerMethodInfoKey dmik;
+        dmik.pModule = pModule;
+        dmik.token = token;
+
+        DebuggerMethodInfoEntry *entry 
+          = (DebuggerMethodInfoEntry *) Find(HASH(&dmik), KEY(&dmik)); 
+		if (entry != NULL)
+		{
+			if ( (fOnlyIfNull &&
+				  entry->mi == NULL) ||
+				 !fOnlyIfNull)
+            {
+                entry->mi = mi;
+                
+                LOG((LF_CORDB, LL_INFO1000, "DMIT::OJI: mod:0x%x tok:0x%x remap"
+                    "nVer:0x%x\n", pModule, token, entry->nVersionLastRemapped));
+                return S_OK;
+            }
+        }
+
+        return E_FAIL;
+    }
+
+    DebuggerMethodInfo *GetMethodInfo(Module *pModule, 
+                             mdMethodDef token, int nVersion = 0,
+									bool fByVersion = false)
+    { 
+//        CHECK_DMI_TABLE;
+        
+		// <REVIEW> GENERICS:  One of the BVTs causes this to be called before the table is initialized
+		// In particular, the changes to BREAKPOINT_ADD mean that this table is now consulted
+		// to determine if we have ever seen the method, rather than a call to LookupMethodDesc,
+		// which would have just returned NULL.  In general it seems OK to consult this table 
+		// when it is empty, so I've added this....</REVIEW>
+		if (this == NULL)
+			return NULL;
+
+        DebuggerMethodInfoKey dmik;
+        dmik.pModule = pModule;
+        dmik.token = token;
+
+        DebuggerMethodInfoEntry *entry 
+          = (DebuggerMethodInfoEntry *) Find(HASH(&dmik), KEY(&dmik)); 
+        if (entry == NULL )
+            return NULL;
+        else
+        {
+			LOG((LF_CORDB, LL_INFO1000, "DMI::GMI: for methodDef 0x%x, got 0x%x prev:0x%x\n",
+				token, entry->mi, (entry->mi?entry->mi->m_prevMethodInfo:0)));
+			if (fByVersion)
+				return entry->mi->GetMethodInfoByVersionNumber(nVersion, GetVersionNumber(pModule, token));
+			else
+				return entry->mi; // May be NULL if only version
+                                  // number is set.
+        }
+    }
+
+
+     DebuggerMethodInfo *GetFirstMethodInfo(HASHFIND *info)
+    { 
+        DebuggerMethodInfoEntry *entry 
+          = (DebuggerMethodInfoEntry *) FindFirstEntry(info);
+        if (entry == NULL)
+            return NULL;
+        else
+            return entry->mi;
+    }
+
+    DebuggerMethodInfo *GetNextMethodInfo(HASHFIND *info)
+    { 
+        DebuggerMethodInfoEntry *entry = 
+        	(DebuggerMethodInfoEntry *) FindNextEntry(info);
+
+		// We may have incremented the version number
+		// for methods that never got JITted, so we should
+		// pretend like they don't exist here.
+        while (entry != NULL &&
+        	   entry->mi == NULL)
+        {
+         	entry = (DebuggerMethodInfoEntry *) FindNextEntry(info);
+		}
+          
+        if (entry == NULL)
+            return NULL;
+        else
+            return entry->mi;
+    }
+
+    // pModule is being unloaded - remove any entries that belong to it.  Why?
+    // (a) Correctness: the module can be reloaded at the same address, 
+    //      which will cause accidental matches with our hashtable (indexed by
+    //      {Module*,mdMethodDef}
+    // (b) Perf: don't waste the memory!
+    void ClearMethodsOfModule(Module *pModule)
+    {
+        LOG((LF_CORDB, LL_INFO1000000, "CMOM:mod:0x%x (%S)\n", pModule
+            ,pModule->GetFileName()));
+    
+        HASHFIND info;
+    
+        DebuggerMethodInfoEntry *entry 
+          = (DebuggerMethodInfoEntry *) FindFirstEntry(&info);
+        while(entry != NULL)
+        {
+            Module *pMod = entry->key.pModule ;
+            if (pMod == pModule)
+            {
+                // This method actually got mitted, at least
+                // once - remove all version info.
+                while(entry->mi != NULL)
+                {
+                    DeleteEntryDMI(entry);
+                }
+
+                Delete(HASH(&(entry->key)), (HASHENTRY*)entry);
+            }
+        
+            entry = (DebuggerMethodInfoEntry *) FindNextEntry(&info);
+        }
+    }
+
+    void RemoveMethodInfo(Module *pModule, mdMethodDef token)
+    {
+//        CHECK_DMI_TABLE;
+        LOG((LF_CORDB, LL_INFO1000000, "RMI:removing mod:0x%x tok:0x%x\n", pModule, token));
+
+        DebuggerMethodInfoKey dmik;
+        dmik.pModule = pModule;
+        dmik.token = token;
+
+        DebuggerMethodInfoEntry *entry 
+          = (DebuggerMethodInfoEntry *) Find(HASH(&dmik), KEY(&dmik)); 
+
+        _ASSERTE(entry != NULL); // it had better be in there!
+
+//        LOG((LF_CORDB,LL_INFO1000000, "Remove entry 0x%x for %s::%s\n",
+//            entry, fd->m_pszDebugClassName, fd->m_pszDebugMethodName));
+        
+        if (entry != NULL) // if its not, we fail gracefully in a free build
+        {
+			LOG((LF_CORDB, LL_INFO1000000, "DMI::RMI: for got 0x%x prev:0x%x\n",
+				entry->mi, (entry->mi?entry->mi->m_prevMethodInfo:0)));
+        
+            // If we remove the hash table entry, we'll lose
+            // the version number info, which would be bad.
+            // Also, since this is called to undo a failed JIT operation,we
+            // shouldn't mess with the version number.
+            DeleteEntryDMI(entry);
+        }
+
+//        CHECK_DMI_TABLE;
+    }
+
+    void DeleteEntryDMI(DebuggerMethodInfoEntry *entry)
+    {
+        DebuggerMethodInfo *dmiPrev = entry->mi->m_prevMethodInfo;
+        TRACE_FREE(entry->mi);
+        DeleteInteropSafe(entry->mi);
+        entry->mi = dmiPrev;
+        if ( dmiPrev != NULL )
+            dmiPrev->m_nextMethodInfo = NULL;
+    }
+
+    // Methods that deal with version numbers use the {Module, mdMethodDef} key
+    // since we may set/increment the version number way before the method
+    // gets JITted (if it ever does).
+
+    // SIZE_T DebuggerMethodInfoTable::GetVersionNumberLastRemapped: This
+    // will look for the given method's version number that has
+    // had an EnC 'Remap' event sent for it.
+    SIZE_T GetVersionNumberLastRemapped(Module *pModule, mdMethodDef token)
+    {
+        LOG((LF_CORDB, LL_INFO1000, "DMIT::GVNLR: Mod:0x%x (%S) tok:0x%x\n",
+            pModule, pModule->GetFileName(), token));
+
+        DebuggerMethodInfoKey dmik;
+        dmik.pModule = pModule;
+        dmik.token = token;
+
+        DebuggerMethodInfoEntry *entry 
+          = (DebuggerMethodInfoEntry *) Find(HASH(&dmik), KEY(&dmik)); 
+         
+        if (entry == NULL)
+        {
+            LOG((LF_CORDB, LL_INFO100000, "DMIT::GVNLR mod:0x%x tok:0%x is "
+                "DMI_VERSION_INVALID (0x%x)\n",
+                pModule, token, DebuggerMethodInfo::DMI_VERSION_INVALID));
+                
+            return DebuggerMethodInfo::DMI_VERSION_INVALID;
+        }
+        else
+        {
+            LOG((LF_CORDB, LL_INFO100000, "DMIT::GVNLR mod:0x%x tok:0x%x is "
+                " 0x%x\n", pModule, token, entry->nVersionLastRemapped));
+                
+            return entry->nVersionLastRemapped;
+        }
+    }
+
+    // SIZE_T DebuggerMethodInfoTable::SetVersionNumberLastRemapped: This
+    // will look for the given method's version number that has
+    // had an EnC 'Remap' event sent for it.
+    void SetVersionNumberLastRemapped(Module *pModule, 
+                                      mdMethodDef token, 
+                                      SIZE_T nVersionRemapped)
+    {
+        LOG((LF_CORDB, LL_INFO1000, "DMIT::SVNLR: Mod:0x%x (%S) tok:0x%x to remap"
+            "V:0x%x\n", pModule, pModule->GetFileName(), token, nVersionRemapped));
+
+        DebuggerMethodInfoKey dmik;
+        dmik.pModule = pModule;
+        dmik.token = token;
+
+        DebuggerMethodInfoEntry *entry 
+          = (DebuggerMethodInfoEntry *) Find(HASH(&dmik), KEY(&dmik)); 
+
+        if (entry == NULL)
+        {
+            HRESULT hr = AddMethodInfo(pModule,
+                                    token, 
+                                    NULL, 
+                                    DebuggerMethodInfo::DMI_VERSION_FIRST_VALID);
+            if (FAILED(hr))
+                return;
+                
+            entry = (DebuggerMethodInfoEntry *) Find(HASH(&dmik), KEY(&dmik)); 
+            _ASSERTE(entry != NULL);
+            entry->nVersionLastRemapped = nVersionRemapped;
+        }
+        else
+        {
+            
+            // Shouldn't ever bump this down.
+            if( nVersionRemapped > entry->nVersionLastRemapped )
+                entry->nVersionLastRemapped = nVersionRemapped;
+        }
+            
+        LOG((LF_CORDB, LL_INFO100000, "DMIT::SVNLR set mod:0x%x tok:0x%x to 0x%x\n",
+            pModule, token, entry->nVersionLastRemapped));
+    }
+
+    // SIZE_T DebuggerMethodInfoTable::EnCRemapSentForThisVersion:
+    // Returns TRUE if the most current version of the function 
+    // has had an EnC remap event sent.
+    BOOL EnCRemapSentForThisVersion(Module *pModule, 
+                                    mdMethodDef token, 
+                                    SIZE_T nVersion)
+    {
+        SIZE_T lastRemapped = GetVersionNumberLastRemapped(pModule, 
+                                                           token);
+
+        LOG((LF_CORDB, LL_INFO10000, "DMIT::EnCRSFTV: Mod:0x%x (%S) tok:0x%x "
+            "lastSent:0x%x nVer Query:0x%x\n", pModule, pModule->GetFileName(), token, 
+            lastRemapped, nVersion));
+
+        LOG((LF_CORDB, LL_INFO10000, "DMIT::EnCRSFTV: last:0x%x nVersion:0x%x\n",
+            lastRemapped, nVersion));
+
+        if (lastRemapped < nVersion)
+            return FALSE;
+        else
+            return TRUE;
+    }
+
+    // SIZE_T DebuggerMethodInfoTable::GetVersionNumber: This
+    // will look for the given method's most recent version
+    // number (the number of the version that either has been
+    // jitted, or will be jitted (ie and EnC operation has 'bumped
+    // up' the version number)).  It will return the DMI_VERSION_FIRST_VALID
+    // if it fails to find any version.
+    SIZE_T GetVersionNumber(Module *pModule, mdMethodDef token)
+    {
+        DebuggerMethodInfoKey dmik;
+        dmik.pModule = pModule;
+        dmik.token = token;
+
+        DebuggerMethodInfoEntry *entry 
+          = (DebuggerMethodInfoEntry *) Find(HASH(&dmik), KEY(&dmik)); 
+
+        if (entry == NULL)
+        {
+            LOG((LF_CORDB, LL_INFO1000, "DMIT::GVN: Mod:0x%x (%S) tok:0x%x V:0x%x FIRST\n",
+                pModule, pModule->GetFileName(), token, DebuggerMethodInfo::DMI_VERSION_FIRST_VALID));
+                
+            return DebuggerMethodInfo::DMI_VERSION_FIRST_VALID;
+        }
+        else
+        {
+           _ASSERTE(entry->mi != NULL);
+            LOG((LF_CORDB, LL_INFO1000, "DMIT::GVN: Mod:0x%x (%S) tok: 0x%x V:0x%x\n",
+                pModule, pModule->GetFileName(), token, entry->mi->m_nVersion));
+                
+            return entry->mi->m_nVersion;
+        }
+    }
+
+    // SIZE_T DebuggerMethodInfoTable::SetVersionNumber: This
+    void SetVersionNumber(Module *pModule, mdMethodDef token, SIZE_T nVersion)
+    {
+        LOG((LF_CORDB, LL_INFO1000, "DMIT::SVN: Mod:0x%x (%S) tok:0x%x Setting to 0x%x\n",
+            pModule, pModule->GetFileName(), token, nVersion));
+    
+        DebuggerMethodInfoKey dmik;
+        dmik.pModule = pModule;
+        dmik.token = token;
+
+        DebuggerMethodInfoEntry *entry 
+          = (DebuggerMethodInfoEntry *) Find(HASH(&dmik), KEY(&dmik)); 
+
+        if (entry == NULL)
+        {
+            AddMethodInfo( pModule, token, NULL, nVersion );
+        }
+        else
+        {
+            entry->mi->m_nVersion = nVersion;
+        }
+    }
+    
+    // SIZE_T DebuggerMethodInfoTable::IncrementVersionNumber: This
+    // will increment the version number if there exists at least one
+    // <t DebuggerMethodInfo> for the given method, otherwise
+    HRESULT IncrementVersionNumber(Module *pModule, mdMethodDef token)
+    {
+        LOG((LF_CORDB, LL_INFO1000, "DMIT::IVN: Mod:0x%x (%S) tok:0x%x\n",
+            pModule, pModule->GetFileName(), token));
+
+        DebuggerMethodInfoKey dmik;
+        dmik.pModule = pModule;
+        dmik.token = token;
+
+        DebuggerMethodInfoEntry *entry 
+          = (DebuggerMethodInfoEntry *) Find(HASH(&dmik), KEY(&dmik)); 
+          
+        if (entry == NULL)
+        {
+            return AddMethodInfo(pModule, 
+                              token, 
+                              NULL, 
+                              DebuggerMethodInfo::DMI_VERSION_FIRST_VALID+1);
+        }
+        else
+        {
+           _ASSERTE(entry->mi != NULL);
+            entry->mi->m_nVersion++;
+            return S_OK;
+        }
+    }
+};
+
+
+/* ------------------------------------------------------------------------ *
+ * Debugger JIT Info struct 
+ * ------------------------------------------------------------------------ */
+
+// DebuggerJitInfo: Struct to hold all the JIT information 
+// necessary for a given function.
+//
+// MethodDesc* m_fd: MethodDesc of the method that this DJI applies to
+//
+// CORDB_ADDRESS m_addrOfCode: Address of the code.  This will be read by
+//		the right side (via ReadProcessMemory) to grab the actual  native start
+//		address of the jitted method.
+//
+// SIZE_T m_sizeOfCode: Pseudo-private variable: use the GetSkzeOfCode
+//		method to get this value.  
+//
+// bool m_codePitched: Set to true if the code is, in fact,
+// 		no longer there, but the DJI will be valid once
+// 		the method is reJITted.
+//
+// bool m_jitComplete: Set to true once JITComplete has been called.
+//
+// DebuggerILToNativeMap *m_sequenceMap: This is the sequence map, which
+//		is actually a collection of IL-Native pairs, where each IL corresponds
+//		to a line of source code.  Each pair is refered to as a sequence map point.
+//
+// SIZE_T m_lastIL: last nonEPILOG instruction
+//
+// unsigned int m_sequenceMapCount: Count of the <t DebuggerILToNativeMap>s
+//		in m_sequenceMap.
+//
+// bool m_sequenceMapSorted: Set to true once m_sequenceMapSorted is sorted
+//		into ascending IL order (Debugger::setBoundaries, SortMap).
+class DebuggerJitInfo
+{
+public:
+    enum {
+        DJI_INVALID = 0,
+    } DJI_SPECIAL;
+
+    MethodDesc              *m_fd;
+    bool				     m_codePitched; 
+    bool                     m_jitComplete;
+
+
+    // If the variable layout of this method changes from this version
+    // to the next, then it's illegal to move from this version to the next.
+    // The caller is responsible for ensuring that local variable layout
+    // only changes when there are no frames in any stack that are executing
+    // this method.
+    // In a debug build, we'll assert if we try to make this EnC transition,
+    // in a free/retail build we'll silently fail to make the transition.
+    BOOL                     m_illegalToTransitionFrom;
+
+    DebuggerMethodInfo      *m_methodInfo;
+
+    CORDB_ADDRESS			 m_addrOfCode;
+	SIZE_T					 m_sizeOfCode;
+	
+    DebuggerJitInfo         *m_prevJitInfo; 
+    DebuggerJitInfo			*m_nextJitInfo; 
+    
+    SIZE_T                   m_lastIL;
+    DebuggerILToNativeMap   *m_sequenceMap;
+    unsigned int             m_sequenceMapCount;
+    bool                     m_sequenceMapSorted;
+   
+    ICorJitInfo::NativeVarInfo *m_varNativeInfo;
+    unsigned int             m_varNativeInfoCount;
+	bool					 m_varNeedsDelete;
+	
+    DebuggerJitInfo(DebuggerMethodInfo *minfo, MethodDesc *fd) :
+        m_fd(fd),
+        m_codePitched(false),
+        m_jitComplete(false), 
+        m_illegalToTransitionFrom(FALSE),
+        m_methodInfo(minfo),
+        m_addrOfCode(NULL),
+        m_sizeOfCode(0),
+        m_prevJitInfo(NULL),
+        m_nextJitInfo(NULL), 
+        m_lastIL(0),
+        m_sequenceMap(NULL), 
+        m_sequenceMapCount(0),
+        m_sequenceMapSorted(false),
+        m_varNativeInfo(NULL),
+        m_varNativeInfoCount(0)
+    {
+        LOG((LF_CORDB,LL_EVERYTHING, "DJI::DJI : created at 0x%x\n", this));
+     }
+
+    ~DebuggerJitInfo();
+
+    // Invoking SortMap will ensure that the native
+    //      ranges (which are infered by sorting the <t DebuggerILToNativeMap>s into
+    //      ascending native order, then assuming that there are no gaps in the native
+    //      code) are properly set up, as well.  
+    void SortMap();
+
+    DebuggerILToNativeMap *MapILOffsetToMapEntry(SIZE_T ilOffset, BOOL *exact=NULL);
+    void MapILRangeToMapEntryRange(SIZE_T ilStartOffset, SIZE_T ilEndOffset,
+                                   DebuggerILToNativeMap **start,
+                                   DebuggerILToNativeMap **end);
+    SIZE_T MapILOffsetToNative(SIZE_T ilOffset, BOOL *exact=NULL);
+
+    // MapSpecialToNative maps a <t CordDebugMappingResult> to a native
+    //      offset so that we can get the address of the prolog & epilog. which
+    //      determines which epilog or prolog, if there's more than one.
+    SIZE_T MapSpecialToNative(CorDebugMappingResult mapping, 
+                              SIZE_T which,
+                              BOOL *pfAccurate);
+
+    // MapNativeOffsetToIL Takes a given nativeOffset, and maps it back
+    //      to the corresponding IL offset, which it returns.  If mapping indicates
+    //      that a the native offset corresponds to a special region of code (for 
+    //      example, the epilog), then the return value will be specified by 
+    //      ICorDebugILFrame::GetIP (see cordebug.idl)
+    DWORD MapNativeOffsetToIL(DWORD nativeOffset, 
+                              CorDebugMappingResult *mapping,
+                              DWORD *which);
+
+    DebuggerJitInfo *GetJitInfoByAddress( const BYTE *pbAddr );
+
+    void SetVars(ULONG32 cVars, ICorDebugInfo::NativeVarInfo *pVars, bool fDelete);
+    HRESULT SetBoundaries(ULONG32 cMap, ICorDebugInfo::OffsetMapping *pMap);
+
+
+    ICorDebugInfo::SourceTypes GetSrcTypeFromILOffset(SIZE_T ilOffset);
 };
 
 
@@ -635,7 +1212,7 @@ public:
     ~Debugger();
 
     // Checks if the JitInfos table has been allocated, and if not does so.
-    HRESULT inline CheckInitJitInfoTable();
+    HRESULT inline CheckInitMethodInfoTable();
     HRESULT inline CheckInitModuleTable();
     HRESULT inline CheckInitPendingFuncEvalTable();
 
@@ -731,7 +1308,8 @@ public:
 
     void FuncEvalComplete(Thread *pThread, DebuggerEval *pDE);
     
-    DebuggerJitInfo *CreateJitInfo(MethodDesc* fd);
+    DebuggerMethodInfo *CreateMethodInfo(Module *module, mdMethodDef md);
+    DebuggerJitInfo *CreateJitInfo(DebuggerMethodInfo *dmi,MethodDesc* fd);
     void JITBeginning(MethodDesc* fd, bool trackJITInfo);
     void JITComplete(MethodDesc* fd, BYTE* newAddress, SIZE_T sizeOfCode, bool trackJITInfo);
 
@@ -759,8 +1337,11 @@ public:
     void __stdcall setVars(CORINFO_METHOD_HANDLE ftn,
                            ULONG32 cVars, NativeVarInfo *vars);
 
-    DebuggerJitInfo *GetJitInfo(MethodDesc *fd, const BYTE *pbAddr,
+    DebuggerMethodInfo *GetMethodInfo(Module *pModule, mdMethodDef token, SIZE_T version = 0,
 									bool fByVersion = false);
+
+    DebuggerJitInfo *GetJitInfo(MethodDesc *fd, const BYTE *pbAddr, DebuggerMethodInfo **pMethInfo = NULL);
+
 
     HRESULT GetILToNativeMapping(MethodDesc *pMD, ULONG32 cMap, ULONG32 *pcMap,
                                  COR_DEBUG_IL_TO_NATIVE_MAP map[]);
@@ -808,10 +1389,8 @@ public:
 	    IpcTarget iWhich
 	);
 
-    HRESULT GetAndSendSyncBlockFieldInfo(void *debuggerModuleToken,
-                                         mdTypeDef classMetadataToken,
-                                         Object *pObject,
-                                         CorElementType objectType,
+    HRESULT GetAndSendSyncBlockFieldInfo(Object *pObject,
+                                         DebuggerIPCE_BasicTypeData *objectType,
                                          SIZE_T offsetToVars,
                                          mdFieldDef fldToken,
                                          BYTE *staticVarBase,
@@ -823,6 +1402,15 @@ public:
                                    void* functionModuleToken,
                                    SIZE_T nVersion,
                                    IpcTarget iWhich);
+    //HRESULT GetAndSendJITFunctionData(DebuggerRCThread* rcThread,
+    //                               mdMethodDef methodToken,
+    //                               void* functionModuleToken,
+    //                               IpcTarget iWhich);
+    HRESULT GetFuncData(mdMethodDef funcMetadataToken,
+                        DebuggerModule* pDebuggerModule,
+                        SIZE_T nVersion,
+                        DebuggerIPCE_FuncData *data);
+
 
     HRESULT GetAndSendObjectInfo(DebuggerRCThread* rcThread,
                                  AppDomain *pAppDomain,
@@ -835,11 +1423,41 @@ public:
                                  IpcTarget iWhich);
                                        
     HRESULT GetAndSendClassInfo(DebuggerRCThread* rcThread,
-                                 void* classDebuggerModuleToken,
-                                 mdTypeDef classMetadataToken,
+                                EEClass *pClass,
+							    BOOL fInstantiatedType, // false when getting fields for a constructed type
                                  AppDomain *pAppDomain,
                                  mdFieldDef fldToken, // for special use by GASSBFI, above
                                  FieldDesc **pFD, //OUT
+                                 IpcTarget iWhich);
+
+    HRESULT GetAndSendTypeHandleParams(DebuggerRCThread* rcThread,
+                                 AppDomain *pAppDomain,
+                                 void *typeHandle, 
+                                 IpcTarget iWhich);
+
+    HRESULT GetAndSendExpandedTypeInfo(DebuggerRCThread* rcThread,
+									 AppDomain *pAppDomain,
+									 void *typeHandle, 
+									 IpcTarget iWhich);
+
+    HRESULT GetAndSendTypeHandle(DebuggerRCThread* rcThread,
+                                 AppDomain *pAppDomain,
+                                 DebuggerIPCE_ExpandedTypeData* typeData,
+                                 unsigned int typarCount,
+								 DebuggerIPCE_BasicTypeData *typarData,
+								 IpcTarget iWhich);
+
+	// The following four functions convert between type handles and the data that is
+	// shipped for types to and from the right-side.
+	static HRESULT ExpandedTypeInfoToTypeHandle(bool canLoad,DebuggerIPCE_ExpandedTypeData *data, unsigned int typarCount, DebuggerIPCE_BasicTypeData *typars, TypeHandle *pRes);
+    static HRESULT BasicTypeInfoToTypeHandle(bool canLoad,DebuggerIPCE_BasicTypeData *data, TypeHandle *pRes);
+	void TypeHandleToBasicTypeInfo(AppDomain *pAppDomain, TypeHandle th, DebuggerIPCE_BasicTypeData *res, IpcTarget iWhich) ;
+	void TypeHandleToExpandedTypeInfo(BOOL boxed, AppDomain *pAppDomain, TypeHandle th, 
+									  DebuggerIPCE_ExpandedTypeData *res, IpcTarget iWhich);
+
+    HRESULT GetAndSendMethodDescParams(DebuggerRCThread* rcThread,
+                                 AppDomain *pAppDomain,
+                                 void *methodDesc, 
                                  IpcTarget iWhich);
 
     HRESULT GetAndSendSpecialStaticInfo(DebuggerRCThread *rcThread,
@@ -848,11 +1466,13 @@ public:
                                         IpcTarget iWhich);
 
     HRESULT GetAndSendJITInfo(DebuggerRCThread* rcThread,
-                              mdMethodDef funcMetadataToken,
-                              void *funcDebuggerModuleToken,
+                              DebuggerJitInfo *pJITInfo,
                               AppDomain *pAppDomain,
                               IpcTarget iWhich);
 
+    HRESULT GetJITFuncData(MethodDesc *pFD,
+                           DebuggerIPCE_JITFuncData *data);
+                            
     void GetAndSendTransitionStubInfo(const BYTE *stubAddress,
                                       IpcTarget iWhich);
 
@@ -961,10 +1581,13 @@ public:
 #endif
 
 
+    static void FuncEvalHijack(void);
+    
     // InsertAtHeadOfList puts the given DJI into the DJI table,
     // thus prepending it to the list of DJIs for the given method (MethodDesc
     // is extracted from dji->m_fd, which had better be valid).
-    HRESULT InsertAtHeadOfList( DebuggerJitInfo *dji );
+    HRESULT AddJitInfo( DebuggerJitInfo *dji );
+    HRESULT InsertAtHeadOfList( DebuggerMethodInfo *dmi);
 
     // DeleteHeadOfList removes the current head of the list,
     // deleting the DJI, fixing up the list if the previous element
@@ -995,9 +1618,9 @@ public:
 
 
     HRESULT  MapThroughVersions(SIZE_T fromIL, 
-                                DebuggerJitInfo *djiFrom,  
+                                DebuggerMethodInfo *dmiFrom,  
                                 SIZE_T *toIL, 
-                                DebuggerJitInfo *djiTo, 
+                                DebuggerMethodInfo *dmiTo, 
                                 BOOL fMappingForwards,
                                 BOOL *fAccurate);
 
@@ -1093,7 +1716,7 @@ public:
     HRESULT FuncEvalCleanup(void *debuggerEvalKey);
 
     HRESULT SetReference(void *objectRefAddress, bool  objectRefInHandle, void *newReference);
-    HRESULT SetValueClass(void *oldData, void *newData, mdTypeDef classMetadataToken, void *classDebuggerModuleToken);
+    HRESULT SetValueClass(void *oldData, void *newData, DebuggerIPCE_BasicTypeData *type);
 
     HRESULT SetILInstrumentedCodeMap(MethodDesc *fd,
                                      BOOL fStartJit,
@@ -1157,7 +1780,9 @@ public:
         return (S_OK);
     }
 
-    SIZE_T GetVersionNumber(MethodDesc *fd);
+    SIZE_T GetVersionNumber(Module *pModule, mdMethodDef token);
+    SIZE_T GetVersionNumber(MethodDesc *fd)
+	{ return GetVersionNumber(fd->GetModule(), fd->GetMemberDef()); }
     void SetVersionNumberLastRemapped(MethodDesc *fd, SIZE_T nVersionRemapped);
     HRESULT IncrementVersionNumber(Module *pModule, mdMethodDef token);
 
@@ -1251,12 +1876,11 @@ private:
 
     HRESULT GetFunctionInfo(Module *pModule,
                             mdToken functionToken,
-                            MethodDesc **ppFD,
+                            //MethodDesc **ppFD,
                             ULONG *pRVA,
                             BYTE **pCodeStart,
                             unsigned int *pCodeSize,
                             mdToken *pLocalSigToken);
-                            
     HRESULT GetAndSendBuffer(DebuggerRCThread* rcThread, ULONG bufSize);
 
     HRESULT SendReleaseBuffer(DebuggerRCThread* rcThread, BYTE *pBuffer);
@@ -1293,7 +1917,7 @@ private:
     BOOL                  m_stopped;
     BOOL                  m_unrecoverableError;
 	BOOL				  m_ignoreThreadDetach;
-    DebuggerJitInfoTable *m_pJitInfos;
+    DebuggerMethodInfoTable *m_pMethodInfos;
     CRITICAL_SECTION      m_jitInfoMutex;
 
 
@@ -1336,52 +1960,7 @@ public:
 
 extern "C" void __stdcall FuncEvalHijack(void);
 extern "C" void * __stdcall FuncEvalHijackWorker(DebuggerEval *pDE);
-    
 
-// CNewZeroData is the allocator used by the all the hash tables that the helper thread could possibly alter. It uses
-// the interop safe allocator.
-class CNewZeroData
-{
-public:
-    static BYTE *Alloc(int iSize, int iMaxSize)
-    {
-        _ASSERTE(g_pDebugger != NULL);
-        _ASSERTE(g_pDebugger->m_heap != NULL);
-
-        BYTE *pb = (BYTE *) g_pDebugger->m_heap->Alloc(iSize);
-
-        if (pb != NULL)
-            memset(pb, 0, iSize);
-        return pb;
-    }
-    static void Free(BYTE *pPtr, int iSize)
-    {
-        _ASSERTE(g_pDebugger != NULL);
-        _ASSERTE(g_pDebugger->m_heap != NULL);
-
-        g_pDebugger->m_heap->Free(pPtr);
-    }
-    static BYTE *Grow(BYTE *&pPtr, int iCurSize)
-    {
-        _ASSERTE(g_pDebugger != NULL);
-        _ASSERTE(g_pDebugger->m_heap != NULL);
-
-        void *p = g_pDebugger->m_heap->Realloc(pPtr, iCurSize + GrowSize());
-
-        if (p == 0) return (0);
-
-        memset((BYTE*)p+iCurSize, 0, GrowSize());
-        return (pPtr = (BYTE *)p);
-    }
-    static int RoundSize(int iSize)
-    {
-        return (iSize);
-    }
-    static int GrowSize()
-    {
-        return (256);
-    }
-};
 
 class DebuggerPendingFuncEvalTable : private CHashTableAndData<CNewZeroData>
 {
@@ -1724,467 +2303,6 @@ struct DebuggerJitInfoEntry
     DebuggerJitInfo    *ji;
 };
 
-// class DebuggerJitInfoTable:  Hash table to hold all the JIT
-// info blocks we have for each function
-// that gets jitted. Hangs off of the Debugger object.
-// INVARIANT: There is only one DebuggerJitInfo per method
-// in the table. Note that DJI's will be hashed by MethodDesc.
-//
-class DebuggerJitInfoTable : private CHashTableAndData<CNewZeroData>
-{
-  private:
-
-    BOOL Cmp(const BYTE *pc1, const HASHENTRY *pc2)
-    {
-        DebuggerJitInfoKey *pDjik = (DebuggerJitInfoKey*)pc1;
-        DebuggerJitInfoEntry*pDjie = (DebuggerJitInfoEntry*)pc2;
-
-        return pDjik->pModule != pDjie->key.pModule ||
-               pDjik->token != pDjie->key.token;
-    }
-
-    USHORT HASH(DebuggerJitInfoKey* pDjik)
-    {
-        DWORD base = (DWORD)pDjik->pModule + (DWORD)pDjik->token;
-        return (USHORT) (base ^ (base>>16));
-    }
-
-    BYTE *KEY(DebuggerJitInfoKey* djik)
-    {
-        return (BYTE *) djik;
-    }
-
-//#define _DEBUG_DJI_TABLE
-
-#ifdef _DEBUG_DJI_TABLE
-public:
-    ULONG CheckDjiTable();
-
-#define CHECK_DJI_TABLE (CheckDjiTable())
-#define CHECK_DJI_TABLE_DEBUGGER (m_pJitInfos->CheckDjiTable())
-
-#else
-
-#define CHECK_DJI_TABLE
-#define CHECK_DJI_TABLE_DEBUGGER
-
-#endif // _DEBUG_DJI_TABLE
-
-  public:
-
-
-    DebuggerJitInfoTable() : CHashTableAndData<CNewZeroData>(101)
-    {
-        NewInit(101, sizeof(DebuggerJitInfoEntry), 101);
-    }
-
-    // Methods that deal with JITs use MethodDescs b/c MethodDescs
-    // will exist before a method gets jitted.
-    HRESULT AddJitInfo(MethodDesc *pFD, DebuggerJitInfo *ji, SIZE_T nVersion)
-    {
-        if (pFD == NULL)
-            return S_OK;
-
-        LOG((LF_CORDB, LL_INFO1000, "Added 0x%x (%s::%s), nVer:0x%x\n", ji,
-            pFD->m_pszDebugClassName, pFD->m_pszDebugMethodName, nVersion));
-
-        return AddJitInfo(pFD->GetModule(),
-                          pFD->GetMemberDef(),
-                          ji,
-                          nVersion);
-    }
-
-
-    HRESULT AddJitInfo(Module *pModule,
-                       mdMethodDef token,
-                       DebuggerJitInfo *ji,
-                       SIZE_T nVersion)
-    {
-       LOG((LF_CORDB, LL_INFO1000, "DJIT::AMI Adding dji:0x%x Mod:0x%x tok:"
-            "0x%x nVer:0x%x\n", ji, pModule, token, nVersion));
-
-       HRESULT hr = OverwriteJitInfo(pModule, token, ji, TRUE);
-        if (hr == S_OK)
-            return hr;
-
-        DebuggerJitInfoKey djik;
-        djik.pModule = pModule;
-        djik.token = token;
-
-        DebuggerJitInfoEntry *djie =
-            (DebuggerJitInfoEntry *) Add(HASH(&djik));
-
-        if (djie != NULL)
-        {
-            djie->key.pModule = pModule;
-            djie->key.token = token;
-            djie->ji = ji;
-
-            if (nVersion >= DebuggerJitInfo::DJI_VERSION_FIRST_VALID)
-                djie->nVersion = nVersion;
-
-            // We haven't sent the remap event for this yet.  Of course,
-            // we might not need to, if we're adding the first version
-
-            djie->nVersionLastRemapped = max(djie->nVersion-1,
-                                   DebuggerJitInfo::DJI_VERSION_FIRST_VALID);
-
-            LOG((LF_CORDB, LL_INFO1000, "DJIT::AJI: mod:0x%x tok:0%x "
-                "remap nVer:0x%x\n", pModule, token,
-                djie->nVersionLastRemapped));
-            return S_OK;
-        }
-
-        return E_OUTOFMEMORY;
-    }
-
-    HRESULT OverwriteJitInfo(Module *pModule,
-                             mdMethodDef token,
-                             DebuggerJitInfo *ji,
-                             BOOL fOnlyIfNull)
-    {
-        LOG((LF_CORDB, LL_INFO1000, "DJIT::OJI: dji:0x%x mod:0x%x tok:0x%x\n", ji,
-            pModule, token));
-
-        DebuggerJitInfoKey djik;
-        djik.pModule = pModule;
-        djik.token = token;
-
-        DebuggerJitInfoEntry *entry
-          = (DebuggerJitInfoEntry *) Find(HASH(&djik), KEY(&djik));
-        if (entry != NULL)
-        {
-            if ( (fOnlyIfNull &&
-                  entry->nVersion == ji->m_nVersion &&
-                  entry->ji == NULL) ||
-                 !fOnlyIfNull)
-            {
-                entry->ji = ji;
-
-                LOG((LF_CORDB, LL_INFO1000, "DJIT::OJI: mod:0x%x tok:0x%x remap"
-                    "nVer:0x%x\n", pModule, token, entry->nVersionLastRemapped));
-                return S_OK;
-            }
-        }
-
-        return E_FAIL;
-    }
-
-    DebuggerJitInfo *GetJitInfo(MethodDesc* fd)
-    {
-//        CHECK_DJI_TABLE;
-        if (fd == NULL)
-            return NULL;
-
-        DebuggerJitInfoKey djik;
-        djik.pModule = fd->GetModule();
-        djik.token = fd->GetMemberDef();
-
-        DebuggerJitInfoEntry *entry
-          = (DebuggerJitInfoEntry *) Find(HASH(&djik), KEY(&djik));
-        if (entry == NULL )
-            return NULL;
-        else
-        {
-            LOG((LF_CORDB, LL_INFO1000, "DJI::GJI: for md 0x%x, got 0x%x prev:0x%x\n",
-                fd, entry->ji, (entry->ji?entry->ji->m_prevJitInfo:0)));
-            return entry->ji; // May be NULL if only version
-                              // number is set.
-        }
-    }
-
-     DebuggerJitInfo *GetFirstJitInfo(HASHFIND *info)
-    {
-        DebuggerJitInfoEntry *entry
-          = (DebuggerJitInfoEntry *) FindFirstEntry(info);
-        if (entry == NULL)
-            return NULL;
-        else
-            return entry->ji;
-    }
-
-    DebuggerJitInfo *GetNextJitInfo(HASHFIND *info)
-    {
-        DebuggerJitInfoEntry *entry =
-            (DebuggerJitInfoEntry *) FindNextEntry(info);
-
-        // We may have incremented the version number
-        // for methods that never got JITted, so we should
-        // pretend like they don't exist here.
-        while (entry != NULL &&
-               entry->ji == NULL)
-        {
-             entry = (DebuggerJitInfoEntry *) FindNextEntry(info);
-        }
-
-        if (entry == NULL)
-            return NULL;
-        else
-            return entry->ji;
-    }
-
-    // pModule is being unloaded - remove any entries that belong to it.  Why?
-    // (a) Correctness: the module can be reloaded at the same address,
-    //      which will cause accidental matches with our hashtable (indexed by
-    //      {Module*,mdMethodDef}
-    // (b) Perf: don't waste the memory!
-    void ClearMethodsOfModule(Module *pModule)
-    {
-        LOG((LF_CORDB, LL_INFO1000000, "CMOM:mod:0x%x (%S)\n", pModule
-            ,pModule->GetFileName()));
-
-        HASHFIND info;
-
-        DebuggerJitInfoEntry *entry
-          = (DebuggerJitInfoEntry *) FindFirstEntry(&info);
-        while(entry != NULL)
-        {
-            Module *pMod = entry->key.pModule ;
-            if (pMod == pModule)
-            {
-                // This method actually got jitted, at least
-                // once - remove all version info.
-                while(entry->ji != NULL)
-                {
-                    DeleteEntryDJI(entry);
-                }
-
-                Delete(HASH(&(entry->key)), (HASHENTRY*)entry);
-            }
-
-            entry = (DebuggerJitInfoEntry *) FindNextEntry(&info);
-        }
-    }
-
-    void RemoveJitInfo(MethodDesc* fd)
-    {
-//        CHECK_DJI_TABLE;
-        if (fd == NULL)
-            return;
-
-        LOG((LF_CORDB, LL_INFO1000000, "RJI:removing :0x%x (%s::%s)\n", fd,
-            fd->m_pszDebugClassName, fd->m_pszDebugMethodName));
-
-        DebuggerJitInfoKey djik;
-        djik.pModule = fd->GetModule();
-        djik.token = fd->GetMemberDef();
-
-        DebuggerJitInfoEntry *entry
-          = (DebuggerJitInfoEntry *) Find(HASH(&djik), KEY(&djik));
-
-        _ASSERTE(entry != NULL); // it had better be in there!
-
-        LOG((LF_CORDB,LL_INFO1000000, "Remove entry 0x%x for %s::%s\n",
-            entry, fd->m_pszDebugClassName, fd->m_pszDebugMethodName));
-
-        if (entry != NULL) // if its not, we fail gracefully in a free build
-        {
-            LOG((LF_CORDB, LL_INFO1000000, "DJI::RJI: for md 0x%x, got 0x%x prev:0x%x\n",
-                fd, entry->ji, (entry->ji?entry->ji->m_prevJitInfo:0)));
-
-            // If we remove the hash table entry, we'll lose
-            // the version number info, which would be bad.
-            // Also, since this is called to undo a failed JIT operation,we
-            // shouldn't mess with the version number.
-            DeleteEntryDJI(entry);
-        }
-
-//        CHECK_DJI_TABLE;
-    }
-
-    void DeleteEntryDJI(DebuggerJitInfoEntry *entry)
-    {
-        DebuggerJitInfo *djiPrev = entry->ji->m_prevJitInfo;
-        TRACE_FREE(entry->ji);
-        DeleteInteropSafe(entry->ji);
-        entry->ji = djiPrev;
-        if ( djiPrev != NULL )
-            djiPrev->m_nextJitInfo = NULL;
-    }
-
-    // Methods that deal with version numbers use the {Module, mdMethodDef} key
-    // since we may set/increment the version number way before the method
-    // gets JITted (if it ever does).
-
-    // SIZE_T DebuggerJitInfoTable::GetVersionNumberLastRemapped():  This
-    // will look for the given method's version number that has
-    // had an EnC 'Remap' event sent for it.
-    SIZE_T GetVersionNumberLastRemapped(Module *pModule, mdMethodDef token)
-    {
-        LOG((LF_CORDB, LL_INFO1000, "DJIT::GVNLR: Mod:0x%x (%S) tok:0x%x\n",
-            pModule, pModule->GetFileName(), token));
-
-        DebuggerJitInfoKey djik;
-        djik.pModule = pModule;
-        djik.token = token;
-
-        DebuggerJitInfoEntry *entry
-          = (DebuggerJitInfoEntry *) Find(HASH(&djik), KEY(&djik));
-
-        if (entry == NULL)
-        {
-            LOG((LF_CORDB, LL_INFO100000, "DJIT::GVNLR mod:0x%x tok:0%x is "
-                "DJI_VERSION_INVALID (0x%x)\n",
-                pModule, token, DebuggerJitInfo::DJI_VERSION_INVALID));
-
-            return DebuggerJitInfo::DJI_VERSION_INVALID;
-        }
-        else
-        {
-            LOG((LF_CORDB, LL_INFO100000, "DJIT::GVNLR mod:0x%x tok:0x%x is "
-                " 0x%x\n", pModule, token, entry->nVersionLastRemapped));
-
-            return entry->nVersionLastRemapped;
-        }
-    }
-
-    // SIZE_T DebuggerJitInfoTable::SetVersionNumberLastRemapped():  This
-    // will look for the given method's version number that has
-    // had an EnC 'Remap' event sent for it.
-    void SetVersionNumberLastRemapped(Module *pModule,
-                                      mdMethodDef token,
-                                      SIZE_T nVersionRemapped)
-    {
-        LOG((LF_CORDB, LL_INFO1000, "DJIT::SVNLR: Mod:0x%x (%S) tok:0x%x to remap"
-            "V:0x%x\n", pModule, pModule->GetFileName(), token, nVersionRemapped));
-
-        DebuggerJitInfoKey djik;
-        djik.pModule = pModule;
-        djik.token = token;
-
-        DebuggerJitInfoEntry *entry
-          = (DebuggerJitInfoEntry *) Find(HASH(&djik), KEY(&djik));
-
-        if (entry == NULL)
-        {
-            HRESULT hr = AddJitInfo(pModule,
-                                    token,
-                                    NULL,
-                                    DebuggerJitInfo::DJI_VERSION_FIRST_VALID);
-            if (FAILED(hr))
-                return;
-
-            entry = (DebuggerJitInfoEntry *) Find(HASH(&djik), KEY(&djik));
-            _ASSERTE(entry != NULL);
-            entry->nVersionLastRemapped = nVersionRemapped;
-        }
-        else
-        {
-            // Shouldn't ever bump this down.
-            if( nVersionRemapped > entry->nVersionLastRemapped )
-                entry->nVersionLastRemapped = nVersionRemapped;
-        }
-
-        LOG((LF_CORDB, LL_INFO100000, "DJIT::SVNLR set mod:0x%x tok:0x%x to 0x%x\n",
-            pModule, token, entry->nVersionLastRemapped));
-    }
-
-    // BOOL DebuggerJitInfoTable::EnCRemapSentForThisVersion():
-    // Returns TRUE if the most current version of the function
-    // has had an EnC remap event sent.
-    BOOL EnCRemapSentForThisVersion(Module *pModule,
-                                    mdMethodDef token,
-                                    SIZE_T nVersion)
-    {
-        SIZE_T lastRemapped = GetVersionNumberLastRemapped(pModule,
-                                                           token);
-
-        LOG((LF_CORDB, LL_INFO10000, "DJIT::EnCRSFTV: Mod:0x%x (%S) tok:0x%x "
-            "lastSent:0x%x nVer Query:0x%x\n", pModule, pModule->GetFileName(), token,
-            lastRemapped, nVersion));
-
-        LOG((LF_CORDB, LL_INFO10000, "DJIT::EnCRSFTV: last:0x%x dji->nVer:0x%x\n",
-            lastRemapped, nVersion));
-
-        if (lastRemapped < nVersion)
-            return FALSE;
-        else
-            return TRUE;
-    }
-
-    // SIZE_T DebuggerJitInfoTable::GetVersionNumber():  This
-    // will look for the given method's most recent version
-    // number (the number of the version that either has been
-    // jitted, or will be jitted (ie and EnC operation has 'bumped
-    // up' the version number)).  It will return the DJI_VERSION_FIRST_VALID
-    // if it fails to find any version.
-    SIZE_T GetVersionNumber(Module *pModule, mdMethodDef token)
-    {
-        DebuggerJitInfoKey djik;
-        djik.pModule = pModule;
-        djik.token = token;
-
-        DebuggerJitInfoEntry *entry
-          = (DebuggerJitInfoEntry *) Find(HASH(&djik), KEY(&djik));
-
-        if (entry == NULL)
-        {
-            LOG((LF_CORDB, LL_INFO1000, "DJIT::GVN: Mod:0x%x (%S) tok:0x%x V:0x%x FIRST\n",
-                pModule, pModule->GetFileName(), token, DebuggerJitInfo::DJI_VERSION_FIRST_VALID));
-
-            return DebuggerJitInfo::DJI_VERSION_FIRST_VALID;
-        }
-        else
-        {
-            LOG((LF_CORDB, LL_INFO1000, "DJIT::GVN: Mod:0x%x (%S) tok: 0x%x V:0x%x\n",
-                pModule, pModule->GetFileName(), token, entry->nVersion));
-
-            return entry->nVersion;
-        }
-    }
-
-    void SetVersionNumber(Module *pModule, mdMethodDef token, SIZE_T nVersion)
-    {
-        LOG((LF_CORDB, LL_INFO1000, "DJIT::SVN: Mod:0x%x (%S) tok:0x%x Setting to 0x%x\n",
-            pModule, pModule->GetFileName(), token, nVersion));
-
-        DebuggerJitInfoKey djik;
-        djik.pModule = pModule;
-        djik.token = token;
-
-        DebuggerJitInfoEntry *entry
-          = (DebuggerJitInfoEntry *) Find(HASH(&djik), KEY(&djik));
-
-        if (entry == NULL)
-        {
-            AddJitInfo( pModule, token, NULL, nVersion );
-        }
-        else
-        {
-            entry->nVersion = nVersion;
-        }
-    }
-
-    // HRESULT DebuggerJitInfoTable::IncrementVersionNumber():  This
-    // will increment the version number if there exists at least one
-    // DebuggerJitInfo for the given method, otherwise
-    HRESULT IncrementVersionNumber(Module *pModule, mdMethodDef token)
-    {
-        LOG((LF_CORDB, LL_INFO1000, "DJIT::IVN: Mod:0x%x (%S) tok:0x%x\n",
-            pModule, pModule->GetFileName(), token));
-
-        DebuggerJitInfoKey djik;
-        djik.pModule = pModule;
-        djik.token = token;
-
-        DebuggerJitInfoEntry *entry
-          = (DebuggerJitInfoEntry *) Find(HASH(&djik), KEY(&djik));
-
-        if (entry == NULL)
-        {
-            return AddJitInfo(pModule,
-                              token,
-                              NULL,
-                              DebuggerJitInfo::DJI_VERSION_FIRST_VALID+1);
-        }
-        else
-        {
-            entry->nVersion++;
-            return S_OK;
-        }
-    }
-};
-
 /* ------------------------------------------------------------------------ *
  * DebuggerEval class
  * ------------------------------------------------------------------------ */
@@ -2212,9 +2330,7 @@ struct DebuggerEval
     CorElementType                 m_resultType;
     Module                        *m_resultModule;
     SIZE_T                         m_arrayRank;
-    mdTypeDef                      m_arrayClassMetadataToken;
-    DebuggerModule                *m_arrayClassDebuggerModuleToken;
-    CorElementType                 m_arrayElementType;
+    DebuggerIPCE_BasicTypeData     m_arrayType;
     bool                           m_aborting;          // Has an abort been requested
     bool                           m_aborted;           // Was this eval aborted
     bool                           m_completed;          // Is the eval complete - successfully or by aborting
@@ -2233,9 +2349,7 @@ struct DebuggerEval
         m_argCount = pEvalInfo->argCount;
         m_stringSize = pEvalInfo->stringSize;
         m_arrayRank = pEvalInfo->arrayRank;
-        m_arrayClassMetadataToken = pEvalInfo->arrayClassMetadataToken;
-        m_arrayClassDebuggerModuleToken = (DebuggerModule*) pEvalInfo->arrayClassDebuggerModuleToken;
-        m_arrayElementType = pEvalInfo->arrayElementType;
+        m_arrayType = pEvalInfo->arrayType;
         m_successful = false;
         m_argData = NULL;
         m_result = 0;
@@ -2267,9 +2381,9 @@ struct DebuggerEval
         m_argCount = 0;
         m_stringSize = 0;
         m_arrayRank = 0;
-        m_arrayClassMetadataToken = mdTypeDefNil;
-        m_arrayClassDebuggerModuleToken = NULL;
-        m_arrayElementType = ELEMENT_TYPE_VOID;
+        m_arrayType.metadataToken = mdTypeDefNil;
+        m_arrayType.debuggerModuleToken = NULL;
+        m_arrayType.elementType = ELEMENT_TYPE_VOID;
         m_successful = false;
         m_argData = NULL;
         m_result = 0;

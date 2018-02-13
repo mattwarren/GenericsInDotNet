@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -45,7 +50,9 @@ MethodTable* COMDelegate::s_pAsyncCallback = 0;
 
 VOID GenerateShuffleArray(PCCOR_SIGNATURE pSig,
                           Module*         pModule,
-                          ShuffleEntry   *pShuffleEntryArray);
+                          ShuffleEntry   *pShuffleEntryArray,
+                          TypeHandle  *inst,
+                          TypeHandle  *methInst);
 
 class ShuffleThunkCache : public MLStubCache
 {
@@ -126,8 +133,10 @@ Stub* COMDelegate::SetupShuffleThunk(DelegateEEClass *pDelCls)
     FillMemory(pShuffleEntryArray, allocsize, 0xcc);
 #endif
     GenerateShuffleArray(pInvokeMethod->GetSig(), 
-                            pInvokeMethod->GetModule(), 
-                            pShuffleEntryArray);
+                         pInvokeMethod->GetModule(), 
+                         pShuffleEntryArray,
+                         pInvokeMethod->GetClassInstantiation(),
+                         pInvokeMethod->GetMethodInstantiation());
     MLStubCache::MLStubCompilationMode mode;
     pShuffleThunk = m_pShuffleThunkCache->Canonicalize((const BYTE *)pShuffleEntryArray, &mode);
     if (!pShuffleThunk || mode != MLStubCache::STANDALONE) {
@@ -215,11 +224,11 @@ FCIMPL4(void, COMDelegate::InternalCreate, ReflectBaseObject* refThisUNSAFE, Obj
     // Convert the signatures and find the method.
     PCCOR_SIGNATURE pSignature; // The signature of the found method
     DWORD cSignature;
-	if(pInvokeMeth) {
+    if(pInvokeMeth) {
         pInvokeMeth->GetSig(&pSignature,&cSignature);
-        pMeth = pVMC->FindMethod(szNameStr, pSignature, cSignature,pInvokeMeth->GetModule(), NULL, !ignoreCase);
-	}
-	else
+        pMeth = pVMC->FindMethod(szNameStr, pSignature, cSignature,pInvokeMeth->GetModule(), NULL, NULL, !ignoreCase);
+    }
+    else
         pMeth = NULL;
 
     // The method wasn't found or is a static method we need to throw an exception
@@ -227,7 +236,6 @@ FCIMPL4(void, COMDelegate::InternalCreate, ReflectBaseObject* refThisUNSAFE, Obj
         COMPlusThrow(kArgumentException,L"Arg_DlgtTargMeth");
 
     RefSecContext sCtx;
-    sCtx.SetClassOfInstance(pVMC);
     InvokeUtil::CheckAccess(&sCtx,
                             pMeth->GetAttrs(),
                             pMeth->GetMethodTable(),
@@ -314,7 +322,7 @@ FCIMPL3(void, COMDelegate::InternalCreateStatic, ReflectBaseObject* refThisUNSAF
 
     pEEC = pRC->GetClass();
     MethodDesc* pMeth = pEEC->FindMethod(szNameStr, pSignature, cSignature, 
-                                         pInvokeMeth->GetModule());
+                                         pInvokeMeth->GetModule(), NULL);
     if (!pMeth || !pMeth->IsStatic())
         COMPlusThrow(kArgumentException,L"Arg_DlgtTargMeth");
 
@@ -412,7 +420,8 @@ LPVOID COMDelegate::ConvertToCallback(OBJECTREF pDelegate)
                     unmanagedCallConv = pInvokeMeth->IsVarArg() ? pmCallConvCdecl : pmCallConvStdcall;
                 }
 
-                pUMThunkMarshInfo->CompleteInit(pSig, cSig, pInvokeMeth->GetModule(), pInvokeMeth->IsStatic(), nltAnsi, unmanagedCallConv, pInvokeMeth->GetMemberDef());            
+                pUMThunkMarshInfo->CompleteInit(pSig, cSig, pInvokeMeth->GetModule(), pInvokeMeth->IsStatic(), nltAnsi, unmanagedCallConv, 
+						pInvokeMeth->GetClassInstantiation(), pInvokeMeth->GetMethodInstantiation(), pInvokeMeth->GetMemberDef());            
 
 
                 if (FastInterlockCompareExchangePointer( (void*volatile*) &(pcls->m_pUMThunkMarshInfo),
@@ -605,7 +614,7 @@ FCIMPL3(void, COMDelegate::DelegateConstruct, ReflectBaseObject* refThisUNSAFE, 
                         DWORD cSig=1024;
                         PCCOR_SIGNATURE sig = (PCCOR_SIGNATURE)_alloca(cSig);
                         pMeth->GetSig(&sig, &cSig);
-                        pMeth = pTarg->FindMethod(pMeth->GetName(),sig,cSig,pMeth->GetModule());
+                        pMeth = pTarg->FindMethod(pMeth->GetName(),sig,cSig,pMeth->GetModule(), NULL);
                     }
                 }
             }
@@ -613,7 +622,7 @@ FCIMPL3(void, COMDelegate::DelegateConstruct, ReflectBaseObject* refThisUNSAFE, 
             // Use the Unboxing stub for value class methods, since the value
             // class is constructed using the boxed instance.
     
-            if (pTarg->IsValueClass() && !pMeth->IsUnboxingStub())
+            if (pTarg->IsValueClass() && !pMeth->IsSpecialStub())
             {
                 // If these are Object/ValueType.ToString().. etc,
                 // don't need an unboxing Stub.
@@ -722,7 +731,9 @@ BOOL COMDelegate::IsDelegate(EEClass *pcls)
 
 VOID GenerateShuffleArray(PCCOR_SIGNATURE pSig,
                           Module*         pModule,
-                          ShuffleEntry   *pShuffleEntryArray)
+                          ShuffleEntry   *pShuffleEntryArray,
+                          TypeHandle  *inst,
+                          TypeHandle  *methInst)
 {
     THROWSCOMPLUSEXCEPTION();
 
@@ -730,14 +741,14 @@ VOID GenerateShuffleArray(PCCOR_SIGNATURE pSig,
 
     // Must create independent msigs to prevent the argiterators from
     // interfering with other.
-    MetaSig msig1(pSig, pModule);
-    MetaSig msig2(pSig, pModule);
+    MetaSig msig1(pSig, pModule, inst, methInst);
+    MetaSig msig2(pSig, pModule, inst, methInst);
 
     ArgIterator    aisrc(NULL, &msig1, FALSE);
     ArgIterator    aidst(NULL, &msig2, TRUE);
 
-    UINT stacksizedelta = MetaSig::SizeOfActualFixedArgStack(pModule, pSig, FALSE) -
-                          MetaSig::SizeOfActualFixedArgStack(pModule, pSig, TRUE);
+    UINT stacksizedelta = MetaSig::SizeOfActualFixedArgStack(pModule, pSig, FALSE, inst, methInst) -
+                          MetaSig::SizeOfActualFixedArgStack(pModule, pSig, TRUE, inst, methInst);
 
 
     UINT srcregofs,dstregofs;
@@ -1043,8 +1054,8 @@ FCIMPL3(void, COMDelegate::InternalCreateMethod, ReflectBaseObject* refThisUNSAF
     memcpy(tmpSig, pISig, ISigCnt);
     *((BYTE*)tmpSig) &= ~IMAGE_CEE_CS_CALLCONV_HASTHIS;
 
-    if (MetaSig::CompareMethodSigs(pTSig,TSigCnt,pTarget->GetModule(),
-        tmpSig,ISigCnt,pInvoke->GetModule()) == 0) {
+    if (MetaSig::CompareMethodSigs(pTSig,TSigCnt,pTarget->GetModule(),NULL,
+        tmpSig,ISigCnt,pInvoke->GetModule(),NULL) == 0) {
         COMPlusThrow(kArgumentException,L"Arg_DlgtTargMeth");
     }
 
@@ -1100,7 +1111,7 @@ FCIMPL1(Object*, COMDelegate::InternalFindMethodInfo, ReflectBaseObject* refThis
 
     gc.refThis      = (REFLECTBASEREF)ObjectToOBJECTREF(refThisIn);
     pMD             = GetMethodDesc(gc.refThis);
-    gc.pRefClass    = (REFLECTCLASSBASEREF) pMD->GetClass()->GetExposedClassObject();
+    gc.pRefClass    = (REFLECTCLASSBASEREF) pMD->GetMethodTable()->GetExposedClassObject();
     pRM             = ((ReflectClass*) gc.pRefClass->GetData())->FindReflectMethod(pMD);
     objMeth         = (OBJECTREF) pRM->GetMethodInfo((ReflectClass*) gc.pRefClass->GetData());
 
@@ -1128,6 +1139,7 @@ FCIMPLEND
 
  */
 /* static */
+// This method is deprecated (not suitable for generics)
 BOOL COMDelegate::ValidateCtor(MethodDesc *pFtn, EEClass *pDlgt, EEClass *pInst)
 {
     _ASSERTE(pFtn);
@@ -1157,7 +1169,7 @@ BOOL COMDelegate::ValidateCtor(MethodDesc *pFtn, EEClass *pDlgt, EEClass *pInst)
                 InterfaceInfo_t *pImpl;
 
                 pMTOfFtn = pClsOfFtn->GetMethodTable();
-                pImpl = pInst->GetInterfaceMap();
+                pImpl = pInst->GetMethodTable()->GetInterfaceMap();
 
                 for (int i = 0; i < pInst->GetNumInterfaces(); i++)
                 {
@@ -1195,7 +1207,7 @@ skip_inst_check:
 
     pDlgtInvoke->GetSig(&pSigDlgt, &cSigDlgt);
     pFtn->GetSig(&pSigFtn, &cSigFtn);
-
+ 
     pModDlgt = pDlgtInvoke->GetModule();
     pModFtn = pFtn->GetModule();
 
@@ -1206,6 +1218,10 @@ skip_inst_check:
     // The function pointer should never be a vararg
     if ((*pSigFtn & IMAGE_CEE_CS_CALLCONV_MASK) == IMAGE_CEE_CS_CALLCONV_VARARG)
         return FALSE; // Vararg function pointer
+
+    // For generic methods, skip the number of generic args
+    if (*pSigFtn & IMAGE_CEE_CS_CALLCONV_GENERIC)
+        pSigFtn++;
 
     // Check the number of arguments
     pSigDlgt++; pSigFtn++;
@@ -1222,12 +1238,236 @@ skip_inst_check:
     for (DWORD i = 0; i<=nArgs; i++)
     {
         if (MetaSig::CompareElementType(pSigDlgt, pSigFtn,
-                pEndSigDlgt, pEndSigFtn, pModDlgt, pModFtn) == FALSE)
+                pEndSigDlgt, pEndSigFtn, pModDlgt, pModFtn, NULL, NULL) == FALSE)
             return FALSE; // Argument types don't match
     }
 
     return TRUE;
 }
+
+/*
+    Does a static validation of parameters passed into a delegate constructor.
+
+    Params:
+    pInst : Type of the instance, from which pFtn is obtained. Ignored if pFtn 
+            is static.
+    ftnParentHnd: Parent of the MethodDesc, pFtn, used to create the delegate
+    pFtn  : (possibly shared) MethodDesc of the function pointer used to create the delegate
+    pDlgt : The delegate type
+    module: The module scoping methodMemberRef and delegateConstructorMemberRef
+    methodMemberRef: the memberref of the target method
+    delegateConstructorMemberRef: the memberref of the delegate constructor
+
+    Validates the following conditions:
+    1.  If the function is not static, pInst should be equal to the type where 
+        pFtn is defined or pInst should be a parent of pFtn's type.
+    2.  The signature of the function should be compatible with the signature
+        of the Invoke method of the delegate type.
+    
+    The signature is retrieved from module, methodMemberRef and delegateConstructorMemberRef
+
+    NB: Although some of these arguments are redundant, we pass them in to avoid looking up 
+        information that should already be available.
+        Instead of comparing type handles modulo some context, the method directly compares metadata to avoid 
+    loading classes referenced in the method signatures (hence the need for the module and member refs).
+    Also, because this method works directly on metadata, without allowing any additional instantiation of the
+    free type variables in the signature of the method or delegate constructor, this code
+    will *only* verify a constructor application at the typical (ie. formal) instantiation.
+*/
+/* static */
+BOOL COMDelegate::ValidateCtor(TypeHandle instHnd,
+                               TypeHandle ftnParentHnd,
+                               MethodDesc *pFtn,
+                               TypeHandle dlgtHnd,
+                               Module *module,
+                               unsigned methodMemberRef,
+                               unsigned delegateConstructorMemberRef)
+{
+    _ASSERTE(pFtn);
+    _ASSERTE(!(dlgtHnd.IsNull()));
+    _ASSERTE(!ftnParentHnd.IsNull());
+
+    /* Abstract is ok, since the only way to get a ftn of a an abstract method
+       is via ldvirtftn, and we don't allow instantiation of abstract types.
+       ldftn on abstract types is illegal.
+    if (pFtn->IsAbstract())
+        return FALSE;       // Cannot use an abstract method
+    */
+    if (!pFtn->IsStatic())
+    {
+        if (instHnd.IsNull())
+            goto skip_inst_check;   // Instance missing, this will result in a 
+                                    // NullReferenceException at runtime on Invoke().
+
+        MethodTable *pMTOfFtn = ftnParentHnd.GetMethodTable();
+
+        if (pMTOfFtn != instHnd.GetMethodTable())
+        {
+            // If class of method is an interface, verify that
+            // the interface is implemented by this instance.
+            if (pMTOfFtn->IsInterface())
+            {
+                InterfaceInfo_t *pImpl;
+
+                pImpl = instHnd.GetMethodTable()->GetInterfaceMap();
+
+                for (DWORD i = 0; i < instHnd.GetMethodTable()->GetNumInterfaces(); i++)
+                {
+                    if (pImpl[i].m_pMethodTable == pMTOfFtn)
+                        goto skip_inst_check;
+                }
+            }
+
+            // Type of pFtn should be Equal or a parent type of instHnd
+
+            MethodTable *pObj = instHnd.GetMethodTable();
+
+            do {
+                pObj = pObj->GetParentMethodTable();
+            } while (pObj && (pObj != pMTOfFtn));
+
+            if (pObj == NULL)
+                return FALSE;   // Function pointer is not that of the instance
+        }
+    }
+
+skip_inst_check:
+    // Check the number and type of arguments
+    PCCOR_SIGNATURE pSigFtn, pEndSigFtn; // Signature of the ftn
+    DWORD cSigFtn;                       // Length of the signature
+    SigPointer FtnInst;                  // Instantation of the ftn's method type parameters
+    DWORD nFtnTypeArguments = 0;         // Number of actual type arguments to the ftn
+    DWORD nFtnTypeParameters = 0;        // Number of formal type parameters to the ftn
+    
+    if (TypeFromToken(methodMemberRef) == mdtMethodSpec) 
+    {
+        PCCOR_SIGNATURE pSig;
+        ULONG cSig;
+        module->GetMDImport()->GetMethodSpecProps(methodMemberRef, &methodMemberRef, &pSig, &cSig);
+        _ASSERTE(*pSig == IMAGE_CEE_CS_CALLCONV_INSTANTIATION);
+        pSig++;
+        SigPointer sp(pSig);
+        nFtnTypeArguments = sp.GetData();
+        FtnInst = sp; 
+    };
+
+    _ASSERTE(TypeFromToken(methodMemberRef) == mdtMethodDef || TypeFromToken(methodMemberRef) == mdtMemberRef);
+
+    if (TypeFromToken(methodMemberRef) == mdtMemberRef)
+    {
+        module->GetMDImport()->GetNameAndSigOfMemberRef(methodMemberRef, &pSigFtn, &cSigFtn);
+    }
+    else // (TypeFromToken(methodMemberRef) == mdtMethodDef)
+    {
+        pSigFtn = module->GetMDImport()->GetSigOfMethodDef(methodMemberRef, &cSigFtn);
+    };
+
+    Substitution *pFtnParentSubst = NULL;
+    unsigned tkParent;
+    HRESULT hr = module->GetMDImport()->GetParentToken(methodMemberRef,&tkParent);
+    if (FAILED(hr)) COMPlusThrowHR(COR_E_BADIMAGEFORMAT);
+    if (TypeFromToken(tkParent) == mdtTypeSpec)
+    {
+        ULONG cSig;
+        PCCOR_SIGNATURE pSig;         
+        module->GetMDImport()->GetTypeSpecFromToken(tkParent, &pSig, &cSig);
+        SigPointer sigptr = SigPointer(pSig);
+        CorElementType type = sigptr.GetElemType();
+       
+        // The only kind of type specs that we recognise are instantiated types
+        if (type == ELEMENT_TYPE_WITH) 
+        {
+            // skip the element type
+            type = sigptr.GetElemType();
+            /* mdToken genericTok = */ sigptr.GetToken();
+            /* DWORD ntypars = */ sigptr.GetData();
+            PCCOR_SIGNATURE pInst = sigptr.GetPtr();
+            pFtnParentSubst = (Substitution*) _alloca(sizeof(Substitution));
+            *pFtnParentSubst = Substitution(module, pInst);
+        };
+        // for others, do nothing 
+    }
+
+    Substitution *pDlgtSubst = NULL;
+    unsigned dlgtParent;
+    hr = module->GetMDImport()->GetParentToken(delegateConstructorMemberRef,&dlgtParent);
+    if (FAILED(hr)) COMPlusThrowHR(COR_E_BADIMAGEFORMAT);
+    // Extract signature instantiation from type spec
+    if (TypeFromToken(dlgtParent) == mdtTypeSpec)
+    {
+        ULONG cSig;
+        PCCOR_SIGNATURE pSig;         
+        module->GetMDImport()->GetTypeSpecFromToken(dlgtParent, &pSig, &cSig);
+        SigPointer sigptr = SigPointer(pSig);
+        CorElementType type = sigptr.GetElemType();
+      
+        _ASSERTE(type == ELEMENT_TYPE_WITH);
+      
+        // skip the element type
+        type = sigptr.GetElemType();
+        /* mdToken genericTok = */ sigptr.GetToken();
+        /* DWORD ntypars = */ sigptr.GetData();
+        PCCOR_SIGNATURE pInst = sigptr.GetPtr();
+        pDlgtSubst = (Substitution*) _alloca(sizeof(Substitution));
+        *pDlgtSubst = Substitution(module, pInst);
+    }
+
+    MethodDesc *pDlgtInvoke;        // The Invoke() method of the delegate
+    Module *pModDlgt, *pModFtn;     // Module where the signature is present
+    PCCOR_SIGNATURE pSigDlgt,pEndSigDlgt;  // Signature of the invoke method
+    DWORD cSigDlgt;                  // Length of the signature
+    DWORD nArgs;                    // Number of arguments
+
+    pDlgtInvoke = COMDelegate::FindDelegateInvokeMethod(dlgtHnd.GetClass());
+
+    if (pDlgtInvoke->IsStatic())
+        return FALSE;               // Invoke cannot be Static.
+
+    pDlgtInvoke->GetSig(&pSigDlgt, &cSigDlgt);
+
+    pModDlgt = pDlgtInvoke->GetModule();
+    pModFtn = module;
+
+    if ((*pSigDlgt & IMAGE_CEE_CS_CALLCONV_MASK) != 
+        (*pSigFtn & IMAGE_CEE_CS_CALLCONV_MASK))
+        return FALSE; // calling convention mismatch
+
+    // The function pointer should never be a vararg
+    if ((*pSigFtn & IMAGE_CEE_CS_CALLCONV_MASK) == IMAGE_CEE_CS_CALLCONV_VARARG)
+        return FALSE; // Vararg function pointer
+
+    BOOL ftnIsGeneric = *pSigFtn & IMAGE_CEE_CS_CALLCONV_GENERIC;
+
+    // Check the number of arguments
+    pSigDlgt++; pSigFtn++;
+
+    pEndSigDlgt = pSigDlgt + cSigDlgt;
+    pEndSigFtn = pSigFtn + cSigFtn;
+
+    // skip the arity of the possibly generic ftn
+    if (ftnIsGeneric)
+    {
+        nFtnTypeParameters = CorSigUncompressData(pSigFtn);
+    }
+    
+    if (nFtnTypeArguments != nFtnTypeParameters) return FALSE;
+
+    nArgs = CorSigUncompressData(pSigDlgt);
+
+    if (CorSigUncompressData(pSigFtn) != nArgs)
+        return FALSE;   // number of arguments don't match
+
+    // do return type as well
+    for (DWORD i = 0; i<=nArgs; i++)
+    {
+        if (MetaSig::CompareElementType(pSigDlgt, pSigFtn,
+                pEndSigDlgt, pEndSigFtn, pModDlgt, pModFtn, pDlgtSubst, pFtnParentSubst, NULL, ftnIsGeneric ? &FtnInst : NULL) == FALSE)
+            return FALSE; // Argument types don't match
+    }
+    return TRUE;
+}
+
+
 
 BOOL COMDelegate::ValidateBeginInvoke(DelegateEEClass* pClass)
 {

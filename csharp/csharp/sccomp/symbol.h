@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -32,11 +37,11 @@
 class ALLOCMAP;
 
 /*
- * Fundemental types. These are the fundemental storage types
+ * Fundamental types. These are the fundamental storage types
  * that are available and used by the code generator.
  */
 enum FUNDTYPE {
-    FT_NONE,        // No fundemental type
+    FT_NONE,        // No fundamental type
     FT_I1,
     FT_I2,
     FT_I4,
@@ -52,6 +57,7 @@ enum FUNDTYPE {
     FT_REF,         // reference type
     FT_STRUCT,      // structure type
     FT_PTR,         // pointer to unmanaged memory
+    FT_VAR,         // generic, unbounded, not yet committed
 
     FT_COUNT        // number of enumerators.
 };
@@ -86,15 +92,13 @@ enum SYMKIND {
 #include "symkinds.h"
 #undef SYMBOLDEF
 
+typedef __int64 symbmask_t;
 /*
  * Define values for symbol masks.
  */
-#define SYMBOLDEF(kind) MASK_ ## kind = (1 << SK_ ## kind),
-enum {
+#define SYMBOLDEF(kind) const symbmask_t MASK_ ## kind = (((symbmask_t)1) << SK_ ## kind);
     #include "symkinds.h"
-    MASK_ALL = ~(MASK_FAKEMETHSYM | MASK_FAKEPROPSYM | MASK_EXPANDEDPARAMSSYM),
-
-};
+#define    MASK_ALL ~(MASK_FAKEMETHSYM | MASK_FAKEPROPSYM | MASK_EXPANDEDPARAMSSYM)
 #undef SYMBOLDEF
 
 // Typedefs for some pointer types up front.
@@ -128,6 +132,18 @@ typedef SYMLIST * PSYMLIST;
 
 #define ENDFOREACHSYMLIST               \
     }                                   \
+}
+
+#define FOREACHSYMLIST2(_list1, _list2, _elem1, _elem2)    \
+{                                       \
+    for (SYMLIST * _next1 = (_list1),  *_next2 = (_list2);     \
+         _next1 && _next2;                         \
+         _next1 = _next1->next) {         \
+        PSYM _elem1 = _next1->sym; \
+        PSYM _elem2 = _next2->sym;
+
+#define ENDFOREACHSYMLIST2               \
+    _next2 = _next2->next; }                                   \
 }
 
 /*
@@ -201,6 +217,12 @@ public:
     class SCOPESYM                  * asSCOPESYM();
     class ARRAYSYM                  * asARRAYSYM();
     class PTRSYM                    * asPTRSYM();
+    class TYVARSYM                  * asTYVARSYM();
+    class INSTAGGSYM                * asINSTAGGSYM();
+    class INSTMETHSYM               * asINSTMETHSYM();
+    class INSTAGGINSTMETHSYM           * asINSTAGGINSTMETHSYM();
+    class INSTAGGMETHSYM               * asINSTAGGMETHSYM();
+    class INSTAGGMEMBVARSYM            * asINSTAGGMEMBVARSYM();
     class PINNEDSYM                 * asPINNEDSYM();
     class PARAMMODSYM               * asPARAMMODSYM();
     class VOIDSYM                   * asVOIDSYM();
@@ -236,7 +258,7 @@ public:
         return allocator->AllocZero(sz);
     }
 
-    int mask() { return 1 << kind; };
+    symbmask_t mask() { return ((symbmask_t) 1) << kind; };
 
     void copyInto(SYM * sym) {
         sym->access = access;
@@ -260,6 +282,7 @@ public:
     BASENODE *      getAttributesNode();
     bool            isContainedInDeprecated() const;
     bool            isVirtualSym() ;
+
 
 #if DEBUG
     virtual void zDummy() {};
@@ -300,6 +323,17 @@ public:
 
     PPARENTSYM  getScope();     // gets the scope symbol corresponding to this symbol
     PPARENTSYM  containingDeclaration();
+	// GENERICS: isAggParent and isAggType help us to distinguish between
+	// places where symbols are used as locations-of-declarations (parents) and
+	// symbols used for constructed types.  The former have children, and
+	// can, for example, be uninstaniated generic classes.  The latter do
+	// not generally have children except in the case where an AGGSYM is being
+	// used as a type.
+	//
+	// <NICE>It would be a great thing if we just separated types
+	// from type definitions altogether, i.e. AGGSYMs would NOT be used as TYPESYMs.</NICE>
+	bool	 isAggParent() { ASSERT (kind != SK_INSTAGGSYM); return (kind == SK_AGGSYM); }
+	      
 };
 
 #define FOREACHCHILD(_parent, _child)           \
@@ -312,6 +346,19 @@ public:
     }                                           \
 }
 
+/*
+ * PREDEFATTR - enum of predefined attributes
+ */
+enum PREDEFATTR
+{
+
+#define PREDEFATTRDEF(id,name, iPredef, validOn) id,
+#include "predefattr.h"
+#undef PREDEFATTRDEF
+
+    PA_COUNT
+};
+
 
 
 /*
@@ -323,9 +370,11 @@ class TYPESYM: public PARENTSYM {
 public:
     // Get the fundemental type of the symbol.
     FUNDTYPE fundType();
-    TYPESYM * underlyingType();
-    AGGSYM * underlyingAggregate();
+    TYPESYM * underlyingType();  // if the type is an enum, expose the type underlying it, else return the type
+    AGGSYM * underlyingAggregate();  // return the type constructor, e.g. byte[] -> byte, List<String> -> List
+    TYPESYM * behavioralType();  // type to search for behaviour (i.e. drops any instantiation due to the generics system), e.g. byte[] -> byte[], List<String> -> List
     unsigned short getFieldsSize();
+    bool     isDelegateType();
     bool     isSimpleType();
     bool     isQSimpleType();
     bool     isNumericType();
@@ -335,6 +384,13 @@ public:
     bool     isUnsafe();
     bool     isPredefType(PREDEFTYPE pt);
     bool     isSpecialByRefType();
+	bool	 isAggType() { return (kind == SK_AGGSYM || kind == SK_INSTAGGSYM); }  // Aggregate or instantiated aggregate
+    // GENERICS: This used to be in AGGSYM.  It really does two things: works out if a 
+	// GENERICS: attribute is a predefined attribute, and if so which one.  Assuming
+	// GENERICS: attributes can be instances of generic classes, then we want to ask
+	// GENERICS: this question of TYPESYMs and not just AGGSYMs.  It will always return
+	// GENERICS: the indicator CA_COUNT unless the attribute is a predefined attribute.
+    PREDEFATTR      getPredefAttr();
     static AGGSYM * commonBase(TYPESYM * type1, TYPESYM * type2);
 };
 
@@ -555,24 +611,13 @@ public:
     bool                    isDottedDeclaration();  // true for a&b in namespace a.b.c {}
 };
 
-/*
- * PREDEFATTR - enum of predefined attributes
- */
-enum PREDEFATTR
-{
-
-#define PREDEFATTRDEF(id,name, iPredef, validOn) id,
-#include "predefattr.h"
-#undef PREDEFATTRDEF
-
-    PA_COUNT
-};
 
 /*
  * AGGSYM - a symbol representing an aggregate type. These are classes,
  * interfaces, and structs. Parent is a namespace or class. Children are methods,
  * properties, and member variables, and types.
- *
+ *  // GENERICS: and named type parameters as well.
+ * 
  * If this type is contained in a namespace then it is linked in
  * a little differently:
  *
@@ -605,6 +650,7 @@ public:
     bool    isDefined:1;        // have members of this type been defined (does NOT ensure base types have been defined)
 
     bool    isTypeDefEmitted: 1; // has type defs been emitted?
+    bool    isBasesEmitted: 1; // has the bases for the type def been emitted?
     bool    isMemberDefsEmitted: 1; // have all member defs been emitted?
     bool    isCompiled:1;       // have members been compiled?
 
@@ -635,7 +681,9 @@ public:
     bool    isPreparing: 1;
     bool    isComImport: 1;     // Does it have [ComImport]
 
-    AGGSYM * baseClass;         // For a class/struct/enum, the base class. For iface: unused.
+    TYVARSYM **ppTypeFormals;   // All the type variables for a generic class, as declarations.
+    unsigned short cTypeFormals;  // The no. of type variables
+    TYPESYM * baseClass;         // For a class/struct/enum, the base class. For iface: unused.
     AGGSYM * underlyingType;    // For enum, the underlying type. For iface, the resolved CoClass. Not used for class/struct.
     PSYMLIST ifaceList;         // List of explicit base interfaces for a class or interface.
     PSYMLIST allIfaceList;      // Recursive closure of base interfaces for an interface.
@@ -653,9 +701,12 @@ public:
                                       // Either a CLASSNODE or a DELEGATENODE
 
     PSYMLIST        abstractMethods;    // for abstract classes the list of all unoverriden abstract methods(inherited and new)
+    PSYMLIST        abstractMethodMethodInTypes;    // for abstract classes the list of the "methodInType" information for each
+                                                  // unoverriden abstract methods(inherited and new)
 
     PSYMLIST        conversionOperators;    // list of locally defined and inherited conversion operators.
                                             // Does not include inherited conversions which are shadowed by local conversions.
+    PSYMLIST        conversionOperatorsMethodInTypes;  // GENERICS: instantiations at which the operators exist
 
     CorAttributeTargets attributeClass; // symbol type this type can be an attribute on. 
                                     // 0 == not an attribute class
@@ -680,7 +731,6 @@ public:
     ULONG           getAssemblyIndex() const;
     PNSDECLSYM      getNamespaceDecl() const;
     BASENODE *      getAttributesNode();
-    PREDEFATTR      getPredefAttr() const;
     CorAttributeTargets     getElementKind();
 };
 
@@ -775,6 +825,44 @@ public:
  
 
 /*
+ * GENERICS: TYVARSYM - a symbol representing a type variable within a class or method. Parent
+ * GENERICS: is the AGGSYM or METHSYM where the thing is in scope.
+ */
+class TYVARSYM: public TYPESYM {
+public:
+    bool isReferenced:1;            // Has this been referenced by the user?
+    mdToken     boundTokenImport;   // Used to record the token for the constraint during 
+	                                // import, until the constraint can be declared.
+    PTYPESYM    bound;              // The constraint declared for the type variable at the point
+	                                // where the type variable is declared, if any.
+    BASENODE * parseTree;           // parse tree, should be a NAMENODE 
+    unsigned num;                   // no. of tyvar in declaration list
+    mdToken tokenEmit;              // Metadata token (typeSpec) in the current output file.
+    AGGSYM *    getClass() const { return parent->asAGGSYM(); }
+    ULONG       getAssemblyIndex()  const{ return getClass()->getAssemblyIndex(); }
+    BASENODE *  getAttributesNode();
+};
+
+
+/*
+ * GENERICS: INSTAGGSYM - a symbol representing the use of a generic aggregate type at a
+ * GENERICS: particular type.  Parent is the root AGGSYM of the referenced type, e.g.
+ *  "List" in List<String>
+ */
+class INSTAGGSYM: public TYPESYM {
+public:
+    unsigned int cArgs; 
+    PTYPESYM *ppArgs;               // Array of arguments, e.g. "[String]" in "List<String>"
+    struct BASENODE * parseTree;    // parse tree, should be a TYPENODE where other = TK_NAMED
+    mdToken tokenEmit;              // Metadata token (typeSpec) in the current output file.
+    bool err;                       // Did an error result from checking the constraints?
+	AGGSYM *    rootType() const { return parent->asAGGSYM(); }
+    AGGSYM *    getClass() const { return parent->asAGGSYM(); }
+    ULONG       getAssemblyIndex()  const{ return getClass()->getAssemblyIndex(); }
+    BASENODE *  getAttributesNode();
+};
+
+/*
  * PTRSYM - a symbol representing a pointer type
  */
 class PTRSYM: public TYPESYM
@@ -824,8 +912,11 @@ public:
  * are a bunch of algorithms in the compiler (e.g., override and overload resolution)
  * that want to treat methods and properties the same. This abstract base class
  * has the common parts. 
+ *
+ * Changed to a PARENTSYM to allow generic methods to parent their type
+ * variables.
  */
-class METHPROPSYM: public SYM {
+class METHPROPSYM: public PARENTSYM {
 public:
     unsigned short cParams;         // Number of parameters.
     bool isStatic: 1;               // Static member?
@@ -849,6 +940,8 @@ public:
                                     // and the member being implemented is pointed to by this member. In this case
                                     // the name of this member is NULL. For method, is a method. For property, can
                                     // be property or event.
+    TYPESYM *explicitImplMethodInType; // Non-NULL if explicitImpl is non-NULL.  Details the exact (perhaps instantiated)
+                                    // type where the explicitImpl implements a method.
 
     mdToken     tokenImport;        // Meta-data token for imported method.
 
@@ -865,6 +958,8 @@ public:
 
     void copyInto(METHPROPSYM * sym) {
         SYM::copyInto(sym);
+        sym->firstChild = firstChild;
+        sym->lastChild = lastChild;
         sym->cParams = cParams;
         sym->isStatic = isStatic;
         sym->isBogus = isBogus;
@@ -898,6 +993,9 @@ public:
     bool checkedCondSymbols: 1;     // conditionalSymbols already includes parent symbols if override
     bool requiresMethodImplForOverride:1;       // only valid if isOverride = true.
 
+    TYVARSYM **ppTypeFormals;   // All the type variables for a generic method, as declarations.
+    unsigned short cTypeFormals;  // The no. of type variables
+
     NAMELIST *  conditionalSymbols; // set if a conditional symbols for method
     NAMELIST *  getBaseConditionalSymbols(class SYMMGR * symmgr);
 
@@ -917,6 +1015,8 @@ public:
         sym->isMetadataVirtual = isMetadataVirtual;
         sym->isAbstract = isAbstract;
         sym->isCtor = isCtor;
+        sym->ppTypeFormals = ppTypeFormals;
+        sym->cTypeFormals = cTypeFormals;
     }
 
     BASENODE* getParamParseTree(int iParam);
@@ -932,6 +1032,45 @@ class EXPANDEDPARAMSSYM: public METHPROPSYM {
 public:
     METHPROPSYM * realMethod;
 };
+
+// Created whenever we use a non-static method or property that belongs to a generic class. 
+// This is a "method in context" in the sense that we record the instantiation of the
+// type parameters for the generic class. Used primarily 
+// to record a unique metadata token (methodRef) corresponding to that use of that method.  Such
+// a methodRef has a typeSpec as a parent indicating the instantiation of the class type
+// parameters.  NOT CREATED AS PART OF BINDING, ONLY EMITTING.
+//
+// The parent of a INSTAGGMETHSYM is the METHPROPSYM
+class INSTAGGMETHSYM: public PARENTSYM {
+public:
+    METHSYM * getMeth() const { return parent->asMETHSYM(); }
+    INSTAGGSYM *methodInType;       // the type where the method is used
+    mdToken     tokenEmit;     // Metadata token (memberRef with parent typeSpec) in the current output file.
+};
+
+class INSTAGGMEMBVARSYM: public SYM {
+public:
+    MEMBVARSYM * getMembVar() const { return parent->asMEMBVARSYM(); }
+    INSTAGGSYM *methodInType;       // the type where the method is used
+    mdToken     tokenEmit;     // Metadata token (memberRef with parent typeSpec) in the current output file.
+};
+
+class INSTMETHSYM: public SYM {
+public:
+    METHSYM * getUnderlyingMeth() const { return parent->asMETHSYM(); }
+    unsigned int cMethArgs; 
+    PTYPESYM *ppMethArgs;                 // Array of arguments, e.g. "[String]" in "List<String>"
+    mdToken     tokenEmit;     // Metadata token (mdMethodInstantiation with parent memberRef) in the current output file.
+};
+
+class INSTAGGINSTMETHSYM: public SYM {
+public:
+    INSTAGGMETHSYM * getUnderlyingMeth() const { return parent->asINSTAGGMETHSYM(); }
+    unsigned int cMethArgs; 
+    PTYPESYM *ppMethArgs;                 // Array of arguments, e.g. "[String]" in "List<String>"
+    mdToken     tokenEmit;     // Metadata token (mdMethodInstantiation with parent memberRef) in the current output file.
+};
+
 
 /*
  * FAKEMETHSYM - a method which we insert into the symbol tree to ease binding of base. calls
@@ -1067,9 +1206,11 @@ typedef PROPINFO * PPROPINFO;
 /* 
  * VARSYM - a symbol representing a variable. Specific subclasses are 
  * used - MEMBVARSYM for member variables, LOCVARSYM for local variables
- * and formal parameters. 
+ * and formal parameters, 
+ *
+ * Made a PARENTSYM so MEMBVARSYM can parent its uses (see INSTAGGMEMBVARSYM)
  */
-class VARSYM: public SYM {
+class VARSYM: public PARENTSYM {
 public:
     PTYPESYM    type;                       // Type of the field.
 };
@@ -1147,6 +1288,7 @@ public:
 
     SYM        *implementation;     // underlying field or property the implements the event.
     EVENTSYM   *explicitImpl;       // if an explicit impl, the explicitly implemented event.
+    TYPESYM    *explicitImplMethodInType;       // if an explicit impl, the explicitly implemented event.
 
     mdToken     tokenImport;        // Meta-data token for imported event.
     mdToken     tokenEmit;          // Metadata token (memberRef or memberDef) in the current output file.
@@ -1327,10 +1469,14 @@ public:
 __forceinline PARENTSYM * SYM::asPARENTSYM() 
 {
     ASSERT(this == NULL ||
-           this->kind == SK_AGGSYM     || this->kind == SK_NSSYM  ||
+           this->kind == SK_AGGSYM     || 
+		   this->kind == SK_INSTAGGSYM     || 
+		   this->kind == SK_INSTAGGMETHSYM     || 
+		   this->kind == SK_NSSYM  ||
            this->kind == SK_ERRORSYM   || this->kind == SK_SCOPESYM ||
            this->kind == SK_OUTFILESYM || this->kind == SK_ARRAYSYM ||
-           this->kind == SK_NSDECLSYM);
+           this->kind == SK_NSDECLSYM || this->kind == SK_METHSYM ||
+           this->kind == SK_EXPANDEDPARAMSSYM || this->kind == SK_FAKEMETHSYM);
 
     return static_cast<PARENTSYM *>(this);
 }
@@ -1338,10 +1484,13 @@ __forceinline PARENTSYM * SYM::asPARENTSYM()
 __forceinline TYPESYM * SYM::asTYPESYM() 
 {
     ASSERT(this == NULL ||
-           this->kind == SK_AGGSYM     || this->kind == SK_ARRAYSYM  ||
+           this->kind == SK_AGGSYM     ||
+		   this->kind == SK_ARRAYSYM  ||
            this->kind == SK_PTRSYM     || this->kind == SK_PARAMMODSYM ||
            this->kind == SK_VOIDSYM    || this->kind == SK_NULLSYM   ||
-           this->kind == SK_ERRORSYM);
+           this->kind == SK_ERRORSYM   || 
+		   this->kind == SK_TYVARSYM   || 
+		   this->kind == SK_INSTAGGSYM);
 
     return static_cast<TYPESYM *>(this);
 }
@@ -1349,7 +1498,8 @@ __forceinline TYPESYM * SYM::asTYPESYM()
 __forceinline VARSYM * SYM::asVARSYM() 
 {
     ASSERT(this == NULL ||
-           this->kind == SK_MEMBVARSYM || this->kind == SK_LOCVARSYM);
+           this->kind == SK_MEMBVARSYM || 
+           this->kind == SK_LOCVARSYM);
 
     return static_cast<VARSYM *>(this);
 }
@@ -1396,7 +1546,9 @@ __forceinline INFILESYM * SYM::asANYINFILESYM()
 
 __forceinline bool SYM::isStructType()
 {
-    return kind == SK_AGGSYM && (asAGGSYM()->isStruct || asAGGSYM()->isEnum);
+    return (kind == SK_AGGSYM && (asAGGSYM()->isStruct || asAGGSYM()->isEnum)) ||
+	       (kind == SK_INSTAGGSYM && (asINSTAGGSYM()->rootType()->isStruct || asINSTAGGSYM()->rootType()->isEnum))
+		;
 }
 
 
@@ -1410,6 +1562,7 @@ __forceinline bool SYM::hasExternalAccess()
 __forceinline TYPESYM * TYPESYM::underlyingType() 
 {
     if (kind == SK_AGGSYM && asAGGSYM()->isEnum) return asAGGSYM()->underlyingType;
+	else if (kind == SK_INSTAGGSYM && asINSTAGGSYM()->rootType()->isEnum) return asINSTAGGSYM()->rootType()->underlyingType;
     return this;
 }
 
@@ -1439,5 +1592,12 @@ inline METHPROPSYM ** METHPROPSYM::getFParentSym()
     }
 }
 
-#endif //__symbol_h__
+// nb. includes the input type
+#define BASE_CLASS_TYPES_LOOP(typ, baseTypeId) { TYPESYM *tmp_type = typ; while (tmp_type) { TYPESYM *baseTypeId = tmp_type; {
+#define END_BASE_CLASS_TYPES_LOOP(symmgr) } tmp_type = (symmgr).SubstTypeUsingType(tmp_type->underlyingAggregate()->baseClass, tmp_type); } }
+    
+// nb. includes the input type
+#define BASE_CLASSES_LOOP(typ, baseClassId) { AGGSYM *tmp_agg = typ; while (tmp_agg) { AGGSYM *baseClassId = tmp_agg; {
+#define END_BASE_CLASSES_LOOP } tmp_agg = tmp_agg->baseClass->underlyingAggregate(); } }
 
+#endif //__symbol_h__

@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -55,8 +60,8 @@ const unsigned g_ClassificationSizeTable[16] = {
     sizeof(NDirectMethodDesc) + METHOD_PREPAD,      // mcNDirect
     sizeof(EEImplMethodDesc) + METHOD_PREPAD,       // mcEEImpl
     sizeof(ArrayECallMethodDesc) + METHOD_PREPAD,   // mcArray
+    sizeof(InstantiatedMethodDesc) + METHOD_PREPAD, // mcInstantiated
         0,
-        0, 
         0, 
 
     sizeof(MI_MethodDesc) + METHOD_PREPAD,          // mcIL | mdcMethodImpl
@@ -64,8 +69,8 @@ const unsigned g_ClassificationSizeTable[16] = {
     sizeof(MI_NDirectMethodDesc) + METHOD_PREPAD,   // mcNDirect | mdcMethodImpl
     sizeof(MI_EEImplMethodDesc) + METHOD_PREPAD,    // mcEEImpl | mdcMethodImpl
     sizeof(MI_ArrayECallMethodDesc) + METHOD_PREPAD,// mcArray | mdcMethodImpl
+    sizeof(MI_InstantiatedMethodDesc) + METHOD_PREPAD, // mcInstantiated | mdcMethodImpl
         0, 
-        0,
         0,
 };  
 
@@ -144,6 +149,45 @@ PCCOR_SIGNATURE MethodDesc::GetSig()
     return GetMDImport()->GetSigOfMethodDef(GetMemberDef(), &cbsig);
 }
 
+// Get the number of type parameters to a generic method
+// Currently we go via the metadata which might be slow, so we only do
+// this for methods that may really be generic.
+DWORD MethodDesc::GetNumGenericMethodArgs()
+{
+    HRESULT hr = S_OK;
+    if (GetClassification() == mcInstantiated || 
+        GetClassification() == mcECall)
+    {
+        HENUMInternal   hEnumTyPars;
+        Module* pModule = GetModule();
+        IMDInternalImport* pInternalImport = pModule->GetMDImport();
+        
+        // Enumerate the formal type parameters
+        hr = pInternalImport->EnumInit(mdtGenericPar, GetMemberDef(), &hEnumTyPars);
+        if (FAILED(hr)) 
+            return false;
+        
+        return pInternalImport->EnumGetCount(&hEnumTyPars);
+
+    }
+    else return 0;
+}
+
+// See method.hpp for details
+TypeHandle* MethodDesc::GetClassInstantiation(TypeHandle owner)
+{
+  TypeHandle *classInst = GetMethodTable()->GetInstantiation();
+  if (classInst == NULL || owner.IsNull())
+    return classInst;
+  else
+  {
+    EEClass *pClass = GetMethodTable()->GetClass();
+    MethodTable *ownerMT = owner.AsMethodTable(); 
+	TypeHandle** perInstInfo = ownerMT->GetPerInstInfo();
+	_ASSERTE(perInstInfo != NULL);
+    return perInstInfo[pClass->GetNumDicts()-1];
+  }
+}
 
 Stub *MethodDesc::GetStub()
 {
@@ -246,7 +290,7 @@ DWORD MethodDesc::SetIntercepted(BOOL set)
 
 BOOL MethodDesc::IsVoid()
 {
-    MetaSig sig(GetSig(),GetModule());
+    MetaSig sig(this);
     return ELEMENT_TYPE_VOID == sig.GetReturnType();
 }
 
@@ -258,6 +302,8 @@ ULONG MethodDesc::GetRVA()
     // Fetch a local copy to avoid concurrent update problems.
     DWORD_PTR CodeOrIL = m_CodeOrIL;
 
+    // GENERICS: Don't replace the first part of this conjunction
+    // with !IsJitted().
     if ( ((CodeOrIL & METHOD_IS_IL_FLAG) == METHOD_IS_IL_FLAG) // !IsJitted() inlined
         && !IsPrejitted())
     {
@@ -301,7 +347,7 @@ MethodDesc::RETURNTYPE MethodDesc::ReturnsObject(
 #endif    
     )
 {
-    MetaSig sig(GetSig(),GetModule());
+    MetaSig sig(this);
     switch (sig.GetReturnType())
     {
         case ELEMENT_TYPE_STRING:
@@ -363,14 +409,76 @@ Module *MethodDesc::GetModule()
     return chunk->GetMethodTable()->GetModule();
 }
 
-
-DWORD MethodDesc::IsUnboxingStub()
+DWORD MethodDesc::IsSpecialStub()
 {
-    return (m_CodeOrIL == (DWORD_PTR) ~0 && GetClass()->IsValueClass());
+    return (m_CodeOrIL == (DWORD_PTR) ~0 && (GetClass()->IsValueClass() || HasMethodInstantiation()));
 }
 
+BOOL MethodDesc::IsInstantiatingStub()
+{
+    return GetClassification() == mcInstantiated && ((InstantiatedMethodDesc*) this)->IsInstantiatingStub();
+}
 
-MethodDescChunk *MethodDescChunk::CreateChunk(LoaderHeap *pHeap, DWORD methodDescCount, int flags, BYTE tokrange)
+BOOL MethodDesc::IsSharedByGenericInstantiations()
+{
+    if (IsInstantiatingStub()) 
+        return false;
+    else if (GetClass()->IsSharedByGenericInstantiations())
+        return true;
+    else return IsSharedByGenericMethodInstantiations();
+}
+
+BOOL MethodDesc::IsSharedByGenericMethodInstantiations()
+{
+    if (GetClassification() == mcInstantiated)
+        return ((InstantiatedMethodDesc*) this)->IsSharedByGenericMethodInstantiations();
+    else return false;
+}
+
+// Strip off method and class instantiation if present e.g.
+// C1<int>.m1<string> -> C1.m1
+// C1<int>.m2 -> C1.m2
+// C2.m2<int> -> C2.m2
+// C2.m2 -> C2.m2
+MethodDesc* MethodDesc::StripClassAndMethodInstantiation()
+{
+    if (HasClassInstantiation() || HasMethodInstantiation())
+    {
+        MethodTable *pMT = GetMethodTable();
+        if (pMT->HasInstantiation())
+            pMT = pMT->GetGenericTypeDefinition().AsMethodTable();
+        MethodDesc *resultMD = pMT->GetMethodDescForSlot(GetSlot());
+        _ASSERTE(!resultMD->HasMethodInstantiation());
+        _ASSERTE(!resultMD->HasClassInstantiation());
+        return resultMD;
+    }
+    else
+        return this;
+
+}
+
+// Strip off the method instantiation (if present) e.g.
+// C<int>.m<string> -> C<int>.m
+// D.m<string> -> D.m    
+MethodDesc* MethodDesc::StripMethodInstantiation()
+{
+    MethodTable *pMT = GetMethodTable();
+    MethodDesc *resultMD = pMT->GetMethodDescForSlot(GetSlot());
+    _ASSERTE(!resultMD->HasMethodInstantiation());
+    return resultMD;
+}
+
+// Does this method expect an extra parameter providing instantiation information?
+BOOL MethodDesc::HasInstParam()
+{
+  // It's either an instantiated method with shared code
+  return HasMethodInstantiation() && IsSharedByGenericInstantiations()
+
+  // or it's an instance method in a value class with shared instantiation
+  || GetMethodTable()->IsValueClass() && GetClass()->IsSharedByGenericInstantiations();
+}
+
+MethodDescChunk *MethodDescChunk::CreateChunk(LoaderHeap *pHeap, DWORD methodDescCount, int flags, BYTE tokrange, MethodTable *pInitialMT)
 {
     _ASSERTE(methodDescCount <= GetMaxMethodDescs(flags));
     _ASSERTE(methodDescCount > 0);
@@ -386,6 +494,7 @@ MethodDescChunk *MethodDescChunk::CreateChunk(LoaderHeap *pHeap, DWORD methodDes
     block->m_count = (BYTE) (methodDescCount-1);
     block->m_kind = flags & (mdcClassification|mdcMethodImpl);
     block->m_tokrange = tokrange;
+    block->m_methodTable = pInitialMT;
 
     WS_PERF_UPDATE_DETAIL("MethodDescChunk::CreateChunk", 
                           presize + mdSize * methodDescCount, block);
@@ -403,17 +512,17 @@ void MethodDescChunk::SetMethodTable(MethodTable *pMT)
 
 UINT MethodDesc::SizeOfVirtualFixedArgStack()
 {
-    return MetaSig::SizeOfVirtualFixedArgStack(GetModule(), GetSig(), IsStatic());
+    return MetaSig(this).SizeOfVirtualFixedArgStack(IsStatic());
 }
 
 UINT MethodDesc::SizeOfActualFixedArgStack()
 {
-    return MetaSig::SizeOfActualFixedArgStack(GetModule(), GetSig(), IsStatic());
+    return MetaSig(this).SizeOfActualFixedArgStack(IsStatic());
 }
 
 UINT MethodDesc::CbStackPop()
 {
-    return MetaSig::CbStackPop(GetModule(), GetSig(), IsStatic());
+    return MetaSig(this).CbStackPop(IsStatic());    
 }
 
 
@@ -467,7 +576,8 @@ ARG_SLOT MethodDesc::CallTransparentProxy(const ARG_SLOT *pArguments)
 
     const BYTE* pTarget = (const BYTE*)pTPMT->GetVtable()[slot];
     
-    return CallDescr(pTarget, GetModule(), GetSig(), IsStatic(), pArguments);
+    MetaSig metasig(this);
+    return CallDescr(pTarget, GetModule(), &metasig, IsStatic(), pArguments);
 }
 
 //--------------------------------------------------------------------
@@ -527,7 +637,8 @@ ARG_SLOT MethodDesc::Call(const ARG_SLOT *pArguments)
     
     THROWSCOMPLUSEXCEPTION();
 
-    return CallDescr(GetCallTarget(pArguments), GetModule(), GetSig(), IsStatic(), pArguments);
+    MetaSig metasig(this);
+    return CallDescr(GetCallTarget(pArguments), GetModule(), &metasig, IsStatic(), pArguments);
 }
 
 // NOTE: This variant exists so that we don't have to touch the metadata for the method being called.
@@ -544,13 +655,14 @@ ARG_SLOT MethodDesc::Call(const ARG_SLOT *pArguments, BinderMethodID sigID)
     
     _ASSERTE(MetaSig::CompareMethodSigs(g_Mscorlib.GetMethodSig(sigID)->GetBinarySig(), 
                                         g_Mscorlib.GetMethodSig(sigID)->GetBinarySigLength(), 
-                                        SystemDomain::SystemModule(),
-                                        pSig, cSig, GetModule()));
+                                        SystemDomain::SystemModule(), NULL,
+                                        pSig, cSig, GetModule(), NULL));
 #endif
     
     THROWSCOMPLUSEXCEPTION();
 
-    MetaSig sig(g_Mscorlib.GetMethodBinarySig(sigID), SystemDomain::SystemModule());
+    //@GENERICS: assumption is that binder methods are non-generic
+    MetaSig sig(g_Mscorlib.GetMethodBinarySig(sigID), SystemDomain::SystemModule(), NULL, NULL);
 
     return CallDescr(GetCallTarget(pArguments), GetModule(), &sig, IsStatic(), pArguments);
 }
@@ -577,13 +689,12 @@ ARG_SLOT MethodDesc::CallOnInterface(const ARG_SLOT *pArguments)
     THROWSCOMPLUSEXCEPTION();
 
     const BYTE *pTarget = GetLocationOfPreStub();
-    return CallDescr(pTarget, GetModule(), GetSig(), IsStatic(), pArguments);
+    MetaSig metasig(this);
+    return CallDescr(pTarget, GetModule(), &metasig, IsStatic(), pArguments);
 }
 
 ARG_SLOT MethodDesc::CallOnInterface(const ARG_SLOT *pArguments, MetaSig *pSig)
 {   
-    // This should only be used for ComPlusCalls.
-    _ASSERTE(IsComPlusCall());
 
     THROWSCOMPLUSEXCEPTION();
 
@@ -965,6 +1076,10 @@ MethodImpl *MethodDesc::GetMethodImpl()
 
 const BYTE* MethodDesc::GetAddrOfCodeForLdFtn()
 {
+  _ASSERTE(!IsGenericMethodDefinition());
+  if (HasMethodInstantiation())
+    return GetUnsafeAddrofCode();
+
     if (IsRemotingIntercepted2())
         return *(BYTE**)CRemotingServices::GetNonVirtualThunkForVirtualMethod(this);
     else

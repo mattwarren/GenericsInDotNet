@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -1498,6 +1503,7 @@ HRESULT validateOneArg(
     ULONG       ulElemSize;             // Size of the element type.
     mdToken     token;                  // Embedded token.
     ULONG       ulArgCnt;               // Argument count for function pointer.
+    ULONG       ulIndex;                // Index for type parameters
     ULONG       ulRank;                 // Rank of the array.
     ULONG       ulSizes;                // Count of sized dimensions of the array.
     ULONG       ulLbnds;                // Count of lower bounds of the array.
@@ -1671,6 +1677,37 @@ HRESULT validateOneArg(
 					}
 				}
 				break;
+       			case ELEMENT_TYPE_VAR:
+		        case ELEMENT_TYPE_MVAR:
+		            // Validate that index is present.
+		            _ASSERTE(*pulCurByte <= cbSig);
+		            if (cbSig == *pulCurByte) return VLDTR_E_SIG_MISSFPTRARGCNT;
+		
+		            // Consume index.
+		            *pulCurByte += CorSigUncompressedDataSize(pbSig);
+		            ulIndex = CorSigUncompressData(pbSig);
+
+		            break;
+
+		        case ELEMENT_TYPE_WITH:
+		            // Validate the generic type.
+		            if(FAILED(hr = validateOneArg(tk, pbSig, cbSig, pulCurByte,pulNSentinels,pImport,TRUE))) return hr;
+
+		            // Validate that parameter count is present.
+		            _ASSERTE(*pulCurByte <= cbSig);
+		            if (cbSig == *pulCurByte) return VLDTR_E_SIG_MISSFPTRARGCNT;
+		            // Consume parameter count.
+		            *pulCurByte += CorSigUncompressedDataSize(pbSig);
+		            ulArgCnt = CorSigUncompressData(pbSig);
+
+
+		            // Validate and consume the parameters.
+		            while(ulArgCnt--)
+		            {
+			            if(FAILED(hr = validateOneArg(tk, pbSig, cbSig, pulCurByte,NULL,pImport,TRUE))) return hr;
+		            }
+		            break;
+
 			case ELEMENT_TYPE_SENTINEL: // this case never works because all modifiers are skipped before switch
 				if(TypeFromToken(tk) == mdtMethodDef) return VLDTR_E_SIG_SENTINMETHODDEF;
 				break;
@@ -1696,6 +1733,7 @@ HRESULT validateTokenSig(
     ULONG       ulCurByte = 0;          // Current index into the signature.
     ULONG       ulCallConv;             // Calling convention.
     ULONG       ulArgCount = 1;         // Count of arguments (1 because of the return type)
+    ULONG       ulTyArgCount = 0;         // Count of type arguments
 	ULONG		ulArgIx = 0;			// Starting index of argument (standalone sig: 1)
     ULONG       i;                      // Looping index.
     HRESULT     hr = S_OK;              // Value returned.
@@ -1752,6 +1790,13 @@ HRESULT validateTokenSig(
     // Is there any sig left for arguments?
     _ASSERTE(ulCurByte <= cbSig);
     if (cbSig == ulCurByte) return VLDTR_E_MD_NOARGCNT;
+
+    // Get the type argument count
+    if (ulCallConv & IMAGE_CEE_CS_CALLCONV_GENERIC)
+    {
+      ulCurByte += CorSigUncompressedDataSize(pbSig);
+      ulTyArgCount += CorSigUncompressData(pbSig);
+    }
 
     // Get the argument count.
     ulCurByte += CorSigUncompressedDataSize(pbSig);

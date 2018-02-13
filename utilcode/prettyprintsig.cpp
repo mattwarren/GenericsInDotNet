@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -98,8 +103,9 @@ static PCCOR_SIGNATURE PrettyPrintType(
 	WCHAR rcname[MAX_CLASS_NAME];
 	bool		isValueArray;
 	HRESULT		hr;
+        unsigned __int8 elt = *typePtr++;
 
-	switch(*typePtr++) 
+	switch(elt) 
 	{	
 		case ELEMENT_TYPE_VOID			:	
 			str = L"void"; goto APPEND;	
@@ -190,10 +196,6 @@ static PCCOR_SIGNATURE PrettyPrintType(
 			swprintf(buff, L"[%d]", bound);	
 			appendStrW(out, buff);	
 			} break;	
-		case 0x1e /* obsolete */		:
-			typePtr = PrettyPrintType(typePtr, out, pIMDI); 
-			appendStrW(out, L"[?]");
-			break;
 		case ELEMENT_TYPE_ARRAY		:	
 			{	
 			typePtr = PrettyPrintType(typePtr, out, pIMDI); 
@@ -242,10 +244,27 @@ static PCCOR_SIGNATURE PrettyPrintType(
 			}
 			} break;	
 
-        case 0x13 /* obsolete */        :   
+        case ELEMENT_TYPE_MVAR       :
+                        appendStrW(out, L"!");
+			// fall through
+        case ELEMENT_TYPE_VAR        :   
 			appendStrW(out, L"!");  
 			appendStrNumW(out, CorSigUncompressData(typePtr));
 			break;
+        case ELEMENT_TYPE_WITH :
+			{	
+			typePtr = PrettyPrintType(typePtr, out, pIMDI); 
+			unsigned ntypars = CorSigUncompressData(typePtr);	
+                        appendStrW(out, L"<");
+                        for (unsigned i = 0; i < ntypars; i++)
+			  {
+                            if (i > 0) appendStrW(out, L",");
+			    typePtr = PrettyPrintType(typePtr, out, pIMDI); 
+                          }
+                        appendStrW(out, L">");
+                        }
+                        break;
+               
             // Modifiers or depedant types  
 		case ELEMENT_TYPE_PINNED	:
 			str = L" pinned"; goto MODIFIER;	
@@ -280,6 +299,7 @@ LPCWSTR PrettyPrintSig(
 	IMetaDataImport *pIMDI) 			// Import api to use.
 {
 	out->ReSize(0); 
+        unsigned numTyArgs = 0;
 	unsigned numArgs;	
 	PCCOR_SIGNATURE typeEnd = typePtr + typeLen;
 
@@ -301,6 +321,12 @@ LPCWSTR PrettyPrintSig(
 
 		if (callConv & IMAGE_CEE_CS_CALLCONV_HASTHIS)	
 			appendStrW(out, L"instance ");	
+
+		if (callConv & IMAGE_CEE_CS_CALLCONV_GENERIC)	
+		{
+			appendStrW(out, L"generic ");	
+			numTyArgs = CorSigUncompressData(typePtr);
+		}
 
 		static WCHAR* callConvNames[8] = 
 		{	
@@ -373,8 +399,9 @@ static HRESULT PrettyPrintTypeA(        // S_OK or error code.
     LPCUTF8     pN;                     // A type's name.
 	bool		isValueArray;           // If true, array is value array.
 	HRESULT		hr;                     // A result.
+        unsigned __int8 elt = *typePtr++;
 
-	switch(*typePtr++) 
+	switch(elt) 
 	{	
 		case ELEMENT_TYPE_VOID			:	
 			str = "void"; goto APPEND;	
@@ -474,10 +501,6 @@ static HRESULT PrettyPrintTypeA(        // S_OK or error code.
 			sprintf(buff, "[%d]", bound);	
 			IfFailGo(appendStrA(out, buff));	
 			} break;	
-		case 0x1e /* obsolete */		:
-			IfFailGo(PrettyPrintTypeA(typePtr, out, pIMDI)); 
-			IfFailGo(appendStrA(out, "[?]"));
-			break;
 		case ELEMENT_TYPE_ARRAY		:	
 			{	
 			IfFailGo(PrettyPrintTypeA(typePtr, out, pIMDI)); 
@@ -527,10 +550,28 @@ static HRESULT PrettyPrintTypeA(        // S_OK or error code.
 			} 
             break;	
 
-        case 0x13 /* obsolete */        :   
+        case ELEMENT_TYPE_MVAR       :
+                        IfFailGo(appendStrA(out, "!"));
+			// fall through
+        case ELEMENT_TYPE_VAR        :   
 			IfFailGo(appendStrA(out, "!"));  
 			appendStrNumA(out, CorSigUncompressData(typePtr));
 			break;
+        case ELEMENT_TYPE_WITH :
+			{	
+			IfFailGo(PrettyPrintTypeA(typePtr, out, pIMDI)); 
+			unsigned ntypars = CorSigUncompressData(typePtr);	
+                        IfFailGo(appendStrA(out, "<"));
+                        for (unsigned i = 0; i < ntypars; i++)
+			  {
+                            if (i > 0) IfFailGo(appendStrA(out, ","));
+			    IfFailGo(PrettyPrintTypeA(typePtr, out, pIMDI)); 
+                          }
+                        IfFailGo(appendStrA(out, ">"));
+                        }
+                        break;
+               
+
             // Modifiers or depedant types  
 		case ELEMENT_TYPE_PINNED	:
 			str = " pinned"; goto MODIFIER;	
@@ -546,8 +587,8 @@ static HRESULT PrettyPrintTypeA(        // S_OK or error code.
 		default:	
 		case ELEMENT_TYPE_SENTINEL		:	
 		case ELEMENT_TYPE_END			:	
-			_ASSERTE(!"Unknown Type");	
-            hr = E_INVALIDARG;
+			_ASSERTE(!"Unknown type");
+			hr = E_INVALIDARG;
 			break;	
 	}	
 ErrExit:    
@@ -569,6 +610,7 @@ HRESULT PrettyPrintSigInternal(
     HRESULT     hr = S_OK;              // A result.
 	out->ReSize(0); 
 	unsigned numArgs;	
+	unsigned numTyArgs = 0;	
 	PCCOR_SIGNATURE typeEnd = typePtr + typeLen;
 	bool needComma = false;
 
@@ -590,6 +632,12 @@ HRESULT PrettyPrintSigInternal(
 
 		if (callConv & IMAGE_CEE_CS_CALLCONV_HASTHIS)	
 			IfFailGo(appendStrA(out, "instance "));	
+
+		if (callConv & IMAGE_CEE_CS_CALLCONV_GENERIC)	
+		{
+			IfFailGo(appendStrA(out, "generic "));	
+			numTyArgs = CorSigUncompressData(typePtr);
+		}
 
 		static CHAR* callConvNames[8] = 
 		{	

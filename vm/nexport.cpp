@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -983,12 +988,14 @@ static Stub * CreateUMThunkMLStubWorker(MLStubLinker *psl,
                                         BOOL    fIsStatic,
                                         BYTE    nltType,
                                         CorPinvokeMap unmgdCallConv,
+					TypeHandle *classInst,
+					TypeHandle *methodInst,
                                         mdMethodDef mdForNativeTypes)
 {
     Stub* pstub = NULL; // CHANGE, VC6.0
 
-    MetaSig msig(szMetaSig, pModule);
-    MetaSig msig2(szMetaSig, pModule);
+    MetaSig msig(szMetaSig, pModule, classInst, methodInst);
+    MetaSig msig2(szMetaSig, pModule, classInst, methodInst);
     ArgIterator argit(NULL, &msig2, fIsStatic);
     UMThunkMLStub header;
 
@@ -1243,20 +1250,21 @@ static Stub * CreateUMThunkMLStubWorker(MLStubLinker *psl,
 
 //---------------------------------------------------------
 // Creates a new stub for a N/Export call. Return refcount is 1.
-// If failed, returns NULL and sets *ppException to an exception
-// object.
+// If failed, returns NULL.
 //---------------------------------------------------------
 Stub * CreateUMThunkMLStub(PCCOR_SIGNATURE szMetaSig,
                            Module*    pModule,
                            BOOL       fIsStatic,
                            BYTE       nltType,
                            CorPinvokeMap unmgdCallConv,
-                           mdMethodDef mdForNativeTypes)
+                           mdMethodDef mdForNativeTypes,
+			   TypeHandle *classInst,
+			   TypeHandle *methodInst)
 {
     MLStubLinker sl;
     MLStubLinker slPost;
     MLStubLinker slRet;
-    return CreateUMThunkMLStubWorker(&sl, &slPost, &slRet, szMetaSig, pModule, fIsStatic, nltType, unmgdCallConv, mdForNativeTypes);
+    return CreateUMThunkMLStubWorker(&sl, &slPost, &slRet, szMetaSig, pModule, fIsStatic, nltType, unmgdCallConv, classInst, methodInst, mdForNativeTypes);
 }
 
 
@@ -1299,6 +1307,8 @@ VOID UMThunkMarshInfo::LoadTimeInit(PCCOR_SIGNATURE          pSig,
                                     BOOL                     fIsStatic,
                                     BYTE                     nlType,
                                     CorPinvokeMap            unmgdCallConv,
+				    TypeHandle*              classInst,
+				    TypeHandle*              methodInst,
                                     mdMethodDef              mdForNativeTypes /*= mdMethodDefNil*/)
 {
     _ASSERTE(!IsCompletelyInited());
@@ -1311,6 +1321,8 @@ VOID UMThunkMarshInfo::LoadTimeInit(PCCOR_SIGNATURE          pSig,
     m_fIsStatic  = fIsStatic;
     m_nlType     = nlType;
     m_unmgdCallConv = unmgdCallConv;
+    m_classInst = classInst;
+    m_methodInst = methodInst;
 
     // These fields must be explicitly NULL'd out for the atomic
     // FastInterlockCompareExchange update to work during the runtime init.
@@ -1372,7 +1384,7 @@ VOID UMThunkMarshInfo::RunTimeInit()
 
 
 
-        m_cbActualArgSize = MetaSig::SizeOfActualFixedArgStack(m_pModule, m_pSig, m_fIsStatic);
+        m_cbActualArgSize = MetaSig::SizeOfActualFixedArgStack(m_pModule, m_pSig, m_fIsStatic, NULL, NULL);
 
         // This allows us to do a LoadInit even before MSCorLib has loaded.
         if (m_pModule == NULL)
@@ -1387,7 +1399,9 @@ VOID UMThunkMarshInfo::RunTimeInit()
                                         m_fIsStatic,
                                         m_nlType,
                                         m_unmgdCallConv,
-                                        m_mdForNativeTypes);
+                                        m_mdForNativeTypes,
+					m_classInst,
+					m_methodInst);
     
         m_cbRetPop = ( (UMThunkMLStub*)(pMLStream->GetEntryPoint()) )->m_cbRetPop;
     
@@ -1500,10 +1514,12 @@ VOID UMThunkMarshInfo::CompleteInit(PCCOR_SIGNATURE          pSig,
                                     BOOL                     fIsStatic,
                                     BYTE                     nlType,
                                     CorPinvokeMap            unmgdCallConv,
+				    TypeHandle*              classInst,
+				    TypeHandle*              methodInst,
                                     mdMethodDef              mdForNativeTypes /*= mdMethodDefNil*/)
 {
     THROWSCOMPLUSEXCEPTION();
-    LoadTimeInit(pSig, cSig, pModule, fIsStatic, nlType, unmgdCallConv, mdForNativeTypes);
+    LoadTimeInit(pSig, cSig, pModule, fIsStatic, nlType, unmgdCallConv, classInst, methodInst, mdForNativeTypes);
     RunTimeInit();
 
 }

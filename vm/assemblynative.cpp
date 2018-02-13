@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -39,6 +44,7 @@
 #include "strongname.h"
 #include "interoputil.h"
 #include "frames.h"
+#include "typeparse.h"
 
 
 //
@@ -663,7 +669,6 @@ Object* AssemblyNative::GetTypeInner(Assembly *pAssembly,
     if (!sRef)
         COMPlusThrowArgumentNull(L"typeName",L"ArgumentNull_String");
 
-    OBJECTREF       rv = NULL;
     DWORD           strLen = sRef->GetStringLength() + 1;
     CQuickBytes     qb;
     LPUTF8          szClassName = (LPUTF8) qb.Alloc(strLen);
@@ -673,120 +678,32 @@ Object* AssemblyNative::GetTypeInner(Assembly *pAssembly,
     // Get the class name in UTF8
     if (!COMString::TryConvertStringDataToUTF8(sRef, szClassName, strLen))
         szClassName = GetClassStringVars(sRef, &bytes, &cClassName);
-    
-    // Find the return address. This can be used to find caller's assembly
-//    Frame* pFrame = GetThread()->GetFrame();
-//    _ASSERTE(pFrame->IsFramedMethodFrame());
 
-    void* returnIP = NULL;
-    EEClass *pCallersClass = NULL;
-    Assembly *pCallersAssembly = NULL;
-
-    if(pAssembly) {
-        TypeHandle typeHnd;
-        BOOL fVisible = TRUE;
-        OBJECTREF Throwable = NULL;
-
-        // Look for namespace separator
-        LPUTF8 szNameSpaceSep = NULL;
-        LPUTF8 szWalker = szClassName;
-        DWORD nameLen = 0;
-        for (; *szWalker; szWalker++, nameLen++) {
-
-            if (*szWalker == NAMESPACE_SEPARATOR_CHAR)
-                szNameSpaceSep = szWalker;
-        }
-        
-        if (nameLen >= MAX_CLASSNAME_LENGTH)
-            COMPlusThrow(kArgumentException, L"Argument_TypeNameTooLong");
-
-        GCPROTECT_BEGIN(Throwable);
-
-        if (NormalizeArrayTypeName(szClassName, nameLen)) {
-
-            if (!*szClassName)
-              COMPlusThrow(kArgumentException, L"Format_StringZeroLength");
-
-            NameHandle typeName;
-            char noNameSpace = '\0';
-            if (szNameSpaceSep) {
-
-                *szNameSpaceSep = '\0';
-                typeName.SetName(szClassName, szNameSpaceSep + 1);
-            }
-            else
-                typeName.SetName(&noNameSpace, szClassName);
-
-            if(bIgnoreCase)
-                typeName.SetCaseInsensitive();
-            else
-                typeName.SetCaseSensitive();
-
-            if (bVerifyAccess) {
-                pCallersClass = GetCallersClass(NULL, returnIP);
-                pCallersAssembly = (pCallersClass) ? pCallersClass->GetAssembly() : NULL;
-            }
-
-            // Returning NULL only means that the type is not in this assembly.
-            typeHnd = pAssembly->FindNestedTypeHandle(&typeName, &Throwable);
-
-            if (typeHnd.IsNull() && Throwable == NULL) 
-                typeHnd = pAssembly->GetInternalType(&typeName, bThrowOnError, &Throwable);
-
-            if (!typeHnd.IsNull() && bVerifyAccess) {
-                    // verify visibility
-                    EEClass *pClass = typeHnd.GetClassOrTypeParam();
-                    _ASSERTE(pClass);
-
-                if (bPublicOnly && !(IsTdPublic(pClass->GetProtection()) || IsTdNestedPublic(pClass->GetProtection())))
-                    // the user is asking for a public class but the class we have is not public, discard
-                    fVisible = FALSE;
-                else {
-                    // if the class is a top level public there is no check to perform
-                    if (!IsTdPublic(pClass->GetProtection())) {
-                        if (!pCallersAssembly) {
-                            pCallersClass = GetCallersClass(NULL, returnIP);
-                            pCallersAssembly = (pCallersClass) ? pCallersClass->GetAssembly() : NULL;
-                        }
-
-                        if (pCallersAssembly && // full trust for interop
-                            !ClassLoader::CanAccess(pCallersClass,
-                                                    pCallersAssembly,
-                                                    pClass,
-                                                    pClass->GetAssembly(),
-                                                    pClass->GetAttrClass())) {
-                            // This is not legal if the user doesn't have reflection permission
-                            if (!AssemblyNative::HaveReflectionPermission(bThrowOnError))
-                                fVisible = FALSE;
-                        }
-                    }
-                }
-            }
-
-            if((!typeHnd.IsNull()) && fVisible)
-                // There one case were this may return null, if typeHnd
-                //  represents the Transparent proxy.
-                rv = typeHnd.CreateClassObj();
-        }
-
-        if ((rv == NULL) && bThrowOnError) {
-
-            if (Throwable == NULL) {
-                if (szNameSpaceSep)
-                    *szNameSpaceSep = NAMESPACE_SEPARATOR_CHAR;
-
-                pAssembly->PostTypeLoadException(szClassName, IDS_CLASSLOAD_GENERIC, &Throwable);
-            }
-
-            COMPlusThrow(Throwable);
-        }
-        
-        GCPROTECT_END();
-    }
-    
-    return OBJECTREFToObject(rv);
+    return GetTypeInnerHelper(pAssembly, szClassName, bThrowOnError, bIgnoreCase, bVerifyAccess, bPublicOnly);
 }
+    
+Object* AssemblyNative::GetTypeInnerHelper(Assembly *pAssembly,
+                                    LPUTF8 szClassName,
+                                    BOOL bThrowOnError, 
+                                    BOOL bIgnoreCase, 
+                                    BOOL bVerifyAccess,
+                                    BOOL bPublicOnly)
+{
+    THROWSCOMPLUSEXCEPTION();
 
+    LPVOID          rv = NULL;
+
+    TypeParser tp = TypeParser(szClassName, bThrowOnError, bIgnoreCase, bVerifyAccess, bPublicOnly, pAssembly);
+    LPCUTF8 szTypeExpr = szClassName;
+    TypeHandle typeHnd = tp.Parse(&szTypeExpr, TRUE);
+    
+    // There is one case where this may return null, if typeHnd
+    // represents the Transparent proxy.
+    if (!typeHnd.IsNull())
+        rv = OBJECTREFToObject(typeHnd.CreateClassObj());
+
+    return (OBJECTREFToObject(rv));
+}
 
 
 BOOL AssemblyNative::HaveReflectionPermission(BOOL ThrowOnFalse)
@@ -1715,6 +1632,7 @@ FCIMPL1(Object*, AssemblyNative::GetEntryPoint, Object* refThisUNSAFE)
         pMeth = InitialClass->FindMethod((mdMethodDef)tkEntry);  
         o = COMMember::g_pInvokeUtil->GetMethodInfo(pMeth);
     }   
+        //@GENERICS: no instantiation because pMeth must be static
     else 
     { 
         pMeth = pModule->FindFunction((mdToken)tkEntry);

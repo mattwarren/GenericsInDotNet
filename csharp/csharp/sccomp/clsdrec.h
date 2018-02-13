@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -38,6 +43,7 @@ enum BINDTYPEFLAG {
     BTF_NODEPRECATED    = 32,   // don't report deprecated errors
     BTF_NOERRORS        = 64,   // don't report any warnings or errors.
     BTF_USINGALIAS      = 128,  // when binding the RHS of a using alias (skips first level of using clauses)
+    BTF_NOTYVARS        = 256,   // no type variables allowed in types
 };
 
 #define XML_INDENT  L"    "
@@ -54,18 +60,18 @@ private:
     void checkConstituentVisibility(SYM * main, SYM * constituent, int errCode);
 
     void checkUnsafe(BASENODE * tree, PINFILESYM inputfile, TYPESYM * type);
-    bool checkForBadMember(NAME *name, BASENODE *parseTree, AGGSYM *cls);
-    bool checkForBadMember(NAME *name, SYMKIND symkind, PTYPESYM *params, BASENODE *parseTree, AGGSYM *cls);
-    bool checkForBadMember(NAMENODE *nameNode, SYMKIND symkind, PTYPESYM *params, AGGSYM *cls);
-    bool checkForDuplicateSymbol(NAME *name, BASENODE *parseTree, AGGSYM *cls);
-    bool checkForDuplicateSymbol(NAME *name, SYMKIND symkind, PTYPESYM *params, BASENODE *parseTree, AGGSYM *cls);
-    bool checkForDuplicateSymbol(NAMENODE *nameNode, SYMKIND symkind, PTYPESYM *params, AGGSYM *cls);
+    bool checkForBadMember(NAME *name, BASENODE *parseTree, AGGSYM *cls, SYM* created = NULL);
+    bool checkForBadMember(NAME *name, SYMKIND symkind, PTYPESYM *params, BASENODE *parseTree, AGGSYM *cls, SYM* created = NULL);
+    bool checkForBadMember(NAMENODE *nameNode, SYMKIND symkind, PTYPESYM *params, AGGSYM *cls, SYM* created = NULL);
+    bool checkForDuplicateSymbol(NAME *name, BASENODE *parseTree, AGGSYM *cls, SYM* created = NULL);
+    bool checkForDuplicateSymbol(NAME *name, SYMKIND symkind, PTYPESYM *params, BASENODE *parseTree, AGGSYM *cls, SYM* created = NULL);
+    bool checkForDuplicateSymbol(NAMENODE *nameNode, SYMKIND symkind, PTYPESYM *params, AGGSYM *cls, SYM* created = NULL);
     void checkCLSnaming(AGGSYM *cls);
     void checkCLSnaming(NSSYM *cls);
     void checkForMethodImplOnOverride(METHSYM *method, METHSYM *overridenMethod);
     PTYPESYM * RemoveRefOut(int cTypes, PTYPESYM * types);
 
-    SYM *checkExplicitImpl(BASENODE *name, PTYPESYM returnType, PTYPESYM *params, SYM *sym, AGGSYM *cls);
+    SYM *checkExplicitImpl(BASENODE *name, PTYPESYM returnType, PTYPESYM *params, SYM *sym, AGGSYM *cls, TYPESYM **pExplicitImplMethodInType);
 
     SYM *findDuplicateConversion(bool conversionsOnly, PTYPESYM *parameterTypes, PTYPESYM returnType, PNAME name, AGGSYM* cls);
 
@@ -99,9 +105,9 @@ private:
     SYM * bindDottedTypeName(BINOPNODE * name, PARENTSYM * symContext, int flags, AGGSYM *classBeingResolved);
     bool searchUsingClauses(NAME* name, BASENODE *node, NSDECLSYM * nsDeclaration, PARENTSYM *context, SYM **returnValue, SYM ** badAccess, SYM ** badKind, AGGSYM *classBeingResolved);
     bool searchNamespace(NAME *name, BASENODE *node, NSDECLSYM * nsDeclaration, PARENTSYM *context, SYM **returnValue, SYM ** badAccess, SYM ** badKind, bool fUsingAlias, AGGSYM *classBeingResolved);
-    bool searchClass(NAME *name, AGGSYM * classToSearchIn, PARENTSYM *context, SYM **returnValue, bool declareIfNeeded, SYM ** badAccess, SYM ** badKind);
-    METHSYM *findSameSignature(METHSYM *method, AGGSYM *classToSearchIn);
-    PROPSYM *findSameSignature(PROPSYM *prop, AGGSYM *classToSearchIn);
+    bool searchClassForTypeName(NAME *name, AGGSYM * classToSearchIn, PARENTSYM *context, SYM **returnValue, bool declareIfNeeded, SYM ** badAccess, SYM ** badKind);
+    METHSYM *findSameSignature(TYPESYM *methAtTyp, METHSYM *method, TYPESYM *typeToSearchIn);
+    PROPSYM *findSameSignature(TYPESYM *propAtTyp, PROPSYM *prop, TYPESYM *typeToSearchIn);
     void checkHiddenSymbol(SYM *newSymbol, SYM *hiddenSymbol);
     void checkFlags(SYM * item, unsigned allowedFlags, unsigned actualFlags, bool error = true);
 
@@ -119,17 +125,18 @@ private:
     void checkSimpleHiding(SYM *sym, unsigned flags);
     void checkSimpleHiding(SYM *sym, unsigned flags, SYMKIND symkind, PTYPESYM *params);
     void checkIfaceHiding(SYM *sym, unsigned flags, SYMKIND symkind, PTYPESYM *params);
-    SYM *findHiddenSymbol(NAME *name, AGGSYM *classToSearchIn, AGGSYM *context);
-    void addUniqueInterfaces(SYMLIST *list, SYMLIST *** addToList, SYMLIST *source);
-    void addUniqueInterfaces(SYMLIST *list, SYMLIST *** addToList, AGGSYM *sym);
+    SYM *findHiddenSymbol(NAME *name, TYPESYM *typeToSearchIn, AGGSYM *context, TYPESYM **methodInType = NULL);
+    void addUniqueInterfaces(SYMLIST *list, SYMLIST *** addToList, SYMLIST *source, TYPESYM *inheritAt);
+    void addUniqueInterfaces(SYMLIST *list, SYMLIST *** addToList, TYPESYM *sym);
     void prepareInterface(AGGSYM * cls);
     void prepareEnum(AGGSYM *cls);
-    METHSYM *needExplicitImpl(METHSYM *ifaceMethod, METHSYM *implMethod, AGGSYM *cls);
+    METHSYM *needExplicitImpl(METHSYM *ifaceMethod, TYPESYM *ifaceMethodMethodInType, METHSYM *implMethod, AGGSYM *cls);
     void findEntryPoint(AGGSYM *cls);
 
     void emitTypedefsAggregate(AGGSYM *cls);
     void emitMemberdefsAggregate(AGGSYM *cls);
     void reemitMemberdefsAggregate(AGGSYM *cls);
+    void emitBasesAggregate(AGGSYM *cls);
 
     void compileAggregate(AGGSYM * cls, bool UnsafeContext);
     void compileMethod(METHSYM * method, AGGINFO * info);
@@ -141,6 +148,7 @@ private:
     void EnumMembersInEmitOrder(AGGSYM *cls, VOID *info, MEMBER_OPERATION doMember);
     void EmitMemberdef(SYM *member, VOID *unused);
     void CompileMember(SYM *member, AGGINFO *info);
+    PSYMLIST getConversionListAux(TYPESYM *cls, PSYMLIST *conversionOperatorsMethodInTypes);
 
 
     COMPILER * compiler();
@@ -161,7 +169,7 @@ public:
     void EndDocFile(BOOL saveFile);
 
     void declareInputfile(NAMESPACENODE * parseTree, PINFILESYM infile);
-    bool hasBaseChanged(AGGSYM *cls, AGGSYM *newBaseClass);
+    bool hasBaseChanged(AGGSYM *cls, TYPESYM *newBaseClass);
     AGGSYM *getEnumUnderlyingType(CLASSNODE *parseTree);
     bool resolveInheritance(NSDECLSYM *nsdecl);
     bool resolveInheritance(AGGSYM *cls);
@@ -174,6 +182,7 @@ public:
     void emitTypedefsNamespace(NSDECLSYM *nsDeclaration);
     void emitMemberdefsNamespace(NSDECLSYM *nsDeclaration);
     void reemitMemberdefsNamespace(NSDECLSYM *nsDeclaration);
+    void emitBasesNamespace(NSDECLSYM *nsDeclaration);
     void compileNamespace(NSDECLSYM *nsDeclaration);
     void prepareAggregate(AGGSYM * cls);
 
@@ -181,19 +190,27 @@ public:
     void evaluateConstants(AGGSYM *cls);
 
     TYPESYM * bindType(TYPENODE * type, PARENTSYM* symContext, int flags, AGGSYM *classBeingResolved);
+    bool bindTypeList(BASENODE *pBase, BASENODE *pTypeList, PARENTSYM* symContext, int flags, PTYPESYM **pArgs, unsigned short *pCount, AGGSYM *classBeingResolved);
+    TYPESYM * bindInstAggType(BASENODE *pBase, BASENODE *pParams, AGGSYM *aggTyp, PARENTSYM* symContext, int flags, AGGSYM *classBeingResolved);
     SYM * bindSingleTypeName(NAMENODE * name, PARENTSYM * symContext, int flags, AGGSYM *classBeingResolved);
-    SYM * lookupIfAccessOk(NAME *, PARENTSYM * parent, int mask, PARENTSYM * current, bool declareIfNeeded, SYM ** badAccess, SYM ** badKind);
-    PSYMLIST getConversionList(AGGSYM *cls);
-    SYM *findNextName(NAME *name, AGGSYM *classToSearchIn, SYM *current);
-    SYM *findNextAccessibleName(NAME *name, AGGSYM *classToSearchIn, PARENTSYM *context, SYM *current, bool bAllowAllProtected, bool ignoreSpecialMethods);
-    SYM *findAnyAccessHiddenSymbol(NAME *name, SYMKIND symkind, PTYPESYM *params, AGGSYM *classToSearchIn);
-    SYM *findHiddenSymbol(NAME *name, SYMKIND symkind, PTYPESYM *params, AGGSYM *classToSearchIn, AGGSYM *context);
-    SYM *findExplicitInterfaceImplementation(AGGSYM *cls,SYM *explicitImpl);
+    SYM * lookupIfAccessOk(NAME *, PARENTSYM * parent, symbmask_t mask, PARENTSYM * current, bool declareIfNeeded, SYM ** badAccess, SYM ** badKind);
+    PSYMLIST getConversionList(AGGSYM *cls, PSYMLIST *conversionOperatorsMethodInTypes);
+    SYM *findNextName(NAME *name, TYPESYM **pTypeToSearchIn, SYM *current);
+    SYM *findNextAccessibleName(NAME *name, TYPESYM **pTypeToSearchIn, PARENTSYM *context, SYM *current, bool bAllowAllProtected, bool ignoreSpecialMethods);
+    SYM *findAnyAccessHiddenSymbol(NAME *name, SYMKIND symkind, PTYPESYM *params, TYPESYM *typeToSearchIn, TYPESYM **pWhereDefined = NULL);
+    SYM *findHiddenSymbol(NAME *name, SYMKIND symkind, PTYPESYM *params, TYPESYM *typeToSearchIn, AGGSYM *context, TYPESYM **pWhereDefined = NULL);
+    SYM *findExplicitInterfaceImplementation(AGGSYM *cls,SYM *explicitImpl, TYPESYM *explicitImplMethodInType);
     SYM *findSymName(LPCWSTR fullyQualifiedName, size_t cchName = 0);
+
+	bool checkBounds(BASENODE *pBase, PTYPESYM *ppActuals, unsigned short cActuals, TYVARSYM **ppFormals, unsigned short cFormals, SYM *offender);
+    void defineTypars(PARENTSYM *parent, BASENODE *typars, TYVARSYM ***ppFormals, unsigned short *cFormals);
+    TYVARSYM * defineTypar(PARENTSYM *parent, NAMENODE *parseTree, int typar_num);
+    void defineMethodTypars(METHSYM *parent, BASENODE *typars, TYVARSYM ***ppFormals, unsigned short *cFormals);
+    void defineBounds(BASENODE *pConstraints, unsigned short cFormals, TYVARSYM **ppFormals, PARENTSYM *context, AGGSYM *classBeingResolved);
 
     OPERATOR operatorOfName(PNAME name);
 
-    BOOL isAttributeClass(TYPESYM *type);
+    BOOL isAttributeClass(AGGSYM *type);
     bool isAttributeType(TYPESYM *type);
     SYM * bindTypeName(BASENODE *name, PARENTSYM * symContext, int flags, AGGSYM *classBeingResolved);
 
@@ -246,6 +263,9 @@ public:
     void reportDeprecated(BASENODE * tree, PSYM refContext, SYM * sym);
     void reportDeprecatedType(BASENODE * tree, PSYM refContext, TYPESYM * type);
     void reportDeprecatedMethProp(BASENODE *tree, METHPROPSYM *methprop);
+
+
+    PTYPESYM RelateTypeToAggregateByInheritance(PTYPESYM typ, AGGSYM *agg);
 private:
 
     static const PREDEFNAME operatorNames[OP_LAST];
@@ -255,7 +275,9 @@ private:
     bool    bHadIncludes;
     long commentIndex;
     long commentAdjust;
-
+    PSYMLIST constraints;       // list of all constraints induced by instantiating generic types,
+                                // all  of which need to be satisfied.  
+    PSYMLIST *end_of_constraints;      
     void    CheckParamTags(SYM * sym, int cParam, PARAMINFO * params);
     LPWSTR  EncodeSymName(SYM* sym);
     LPWSTR  EncodeParams(int cParams, TYPESYM **params);

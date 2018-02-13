@@ -10,6 +10,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -41,23 +46,19 @@ static AsmParse* parser = 0;
 #define PASM    (parser->assem)
 #define PASMM   (parser->assem->m_pManifest)
 
-static char* newStringWDel(char* str1, char* str2, char* str3 = 0);
+static char* newStringWDel(char* str1, char delimiter, char* str3 = 0);
 static char* newString(char* str1);
 static void corEmitInt(BinStr* buff, unsigned data);
 bool bParsingByteArray = FALSE;
 bool bExternSource = FALSE;
-int  nExtLine,nExtCol;
+unsigned  nExtLine,nExtCol,nCurrPC,nExtLineEnd,nExtColEnd;
 int iOpcodeLen = 0;
 
-ARG_NAME_LIST *palDummy;
+ARG_NAME_LIST *palDummyFirst,*palDummyLast;
 
 int  nTemp=0;
 
-unsigned int g_uCodePage = CP_ACP;
-extern DWORD	g_dwSubsystem,g_dwComImageFlags,g_dwFileAlignment;
-extern size_t	g_stBaseAddress;
 unsigned int uMethodBeginLine,uMethodBeginColumn;
-extern BOOL	g_bOnUnicode;
 %}
 
 %union {
@@ -82,6 +83,8 @@ extern BOOL	g_bOnUnicode;
         Labels*  labels;
         Instr*   instr;         // instruction opcode
         NVPair*  pair;
+        pTyParList typarlist;
+        mdToken token;
 };
 
         /* These are returned by the LEXER and have values */
@@ -101,25 +104,26 @@ extern BOOL	g_bOnUnicode;
 
         /* Keywords   Note the undersores are to avoid collisions as these are common names */
 %token VOID_ BOOL_ CHAR_ UNSIGNED_ INT_ INT8_ INT16_ INT32_ INT64_ FLOAT_ FLOAT32_ FLOAT64_ BYTEARRAY_
+%token UINT_ UINT8_ UINT16_ UINT32_ UINT64_  FLAGS_ CALLCONV_
 %token OBJECT_ STRING_ NULLREF_
         /* misc keywords */ 
-%token DEFAULT_ CDECL_ VARARG_ STDCALL_ THISCALL_ FASTCALL_ CONST_ CLASS_ 
-%token TYPEDREF_ UNMANAGED_ NOT_IN_GC_HEAP_ FINALLY_ HANDLER_ CATCH_ FILTER_ FAULT_
+%token DEFAULT_ CDECL_ VARARG_ STDCALL_ THISCALL_ FASTCALL_ CLASS_ 
+%token TYPEDREF_ UNMANAGED_ FINALLY_ HANDLER_ CATCH_ FILTER_ FAULT_
 %token EXTENDS_ IMPLEMENTS_ TO_ AT_ TLS_ TRUE_ FALSE_
 
         /* class, method, field attributes */
 
 %token VALUE_ VALUETYPE_ NATIVE_ INSTANCE_ SPECIALNAME_
 %token STATIC_ PUBLIC_ PRIVATE_ FAMILY_ FINAL_ SYNCHRONIZED_ INTERFACE_ SEALED_ NESTED_
-%token ABSTRACT_ AUTO_ SEQUENTIAL_ EXPLICIT_ WRAPPER_ ANSI_ UNICODE_ AUTOCHAR_ IMPORT_ ENUM_
-%token VIRTUAL_ NOTREMOTABLE_ SPECIAL_ NOINLINING_ UNMANAGEDEXP_ BEFOREFIELDINIT_
+%token ABSTRACT_ AUTO_ SEQUENTIAL_ EXPLICIT_ ANSI_ UNICODE_ AUTOCHAR_ IMPORT_ ENUM_
+%token VIRTUAL_ NOINLINING_ UNMANAGEDEXP_ BEFOREFIELDINIT_
 %token METHOD_ FIELD_ PINNED_ MODREQ_ MODOPT_ SERIALIZABLE_
 %token ASSEMBLY_ FAMANDASSEM_ FAMORASSEM_ PRIVATESCOPE_ HIDEBYSIG_ NEWSLOT_ RTSPECIALNAME_ PINVOKEIMPL_
 %token _CTOR _CCTOR LITERAL_ NOTSERIALIZED_ INITONLY_ REQSECOBJ_
         /* method implementation attributes: NATIVE_ and UNMANAGED_ listed above */
 %token CIL_ OPTIL_ MANAGED_ FORWARDREF_ PRESERVESIG_ RUNTIME_ INTERNALCALL_
         /* PInvoke-specific keywords */
-%token _IMPORT NOMANGLE_ LASTERR_ WINAPI_ CDECL_ STDCALL_ THISCALL_ FASTCALL_ AS_
+%token _IMPORT NOMANGLE_ LASTERR_ WINAPI_ AS_
 
         /* intruction tokens (actually instruction groupings) */
 %token <instr> INSTR_NONE INSTR_VAR INSTR_I INSTR_I8 INSTR_R INSTR_BRTARGET INSTR_METHOD INSTR_FIELD 
@@ -128,9 +132,9 @@ extern BOOL	g_bOnUnicode;
 
         /* assember directives */
 %token _CLASS _NAMESPACE _METHOD _FIELD _DATA
-%token _EMITBYTE _TRY _MAXSTACK _LOCALS _ENTRYPOINT _ZEROINIT _PDIRECT 
-%token _EVENT _ADDON _REMOVEON _FIRE _OTHER PROTECTED_
-%token _PROPERTY _SET _GET DEFAULT_ READONLY_
+%token _EMITBYTE _TRY _MAXSTACK _LOCALS _ENTRYPOINT _ZEROINIT  
+%token _EVENT _ADDON _REMOVEON _FIRE _OTHER 
+%token _PROPERTY _SET _GET DEFAULT_ 
 %token _PERMISSION _PERMISSIONSET
 
                 /* security actions */
@@ -149,13 +153,13 @@ extern BOOL	g_bOnUnicode;
 %token _VTABLE _VTFIXUP FROMUNMANAGED_ CALLMOSTDERIVED_ _VTENTRY
         /* manifest */
 %token _FILE NOMETADATA_ _HASH _ASSEMBLY _PUBLICKEY _PUBLICKEYTOKEN ALGORITHM_ _VER _LOCALE EXTERN_ 
-%token _MRESOURCE _LOCALIZED IMPLICITCOM_ IMPLICITRES_ NOAPPDOMAIN_ NOPROCESS_ NOMACHINE_
+%token _MRESOURCE NOAPPDOMAIN_ NOPROCESS_ NOMACHINE_
 %token _MODULE _EXPORT
         /* field marshaling */
 %token MARSHAL_ CUSTOM_ SYSSTRING_ FIXED_ VARIANT_ CURRENCY_ SYSCHAR_ DECIMAL_ DATE_ BSTR_ TBSTR_ LPSTR_
 %token LPWSTR_ LPTSTR_ OBJECTREF_ IUNKNOWN_ IDISPATCH_ STRUCT_ SAFEARRAY_ BYVALSTR_ LPVOID_ ANY_ ARRAY_ LPSTRUCT_
         /* parameter attributes */
-%token IN_ OUT_ OPT_ LCID_ RETVAL_ _PARAM
+%token IN_ OUT_ OPT_ _PARAM
                 /* method implementations */
 %token _OVERRIDE WITH_
                 /* variant type specifics */
@@ -166,12 +170,15 @@ extern BOOL	g_bOnUnicode;
 
 
         /* nonTerminals */
-%type <string> name1 id className methodName atOpt slashedName
+%type <string> name1 id methodName atOpt slashedName
 %type <labels> labels
 %type <int32> callConv callKind int32 customHead customHeadWithOwner customType ownerType memberRef vtfixupAttr paramAttr ddItemCount variantType repeatOpt truefalse
 %type <float64> float64
 %type <int64> int64
-%type <binstr> sigArgs0 sigArgs1 sigArg type bound bounds1 int16s typeSpec bytes hexbytes fieldInit nativeType initOpt compQstring caValue
+%type <binstr> sigArgs0 sigArgs1 sigArg type bound bounds1 int16s bytes hexbytes fieldInit nativeType initOpt compQstring caValue
+%type <binstr> tyArgs0 tyArgs1 tyArgs2
+%type <typarlist> typarsRest typars typarsClause
+%type <token> tyBound className typeSpec
 %type <classAttr> classAttr
 %type <methAttr> methAttr
 %type <fieldAttr> fieldAttr
@@ -217,10 +224,10 @@ decl                    : classHead '{' classDecls '}'                          
                         | moduleHead
                         | secDecl
                         | customAttrDecl
-						| _SUBSYSTEM int32										{ if(!g_dwSubsystem) PASM->m_dwSubsystem = $2; }
-						| _CORFLAGS int32										{ if(!g_dwComImageFlags) PASM->m_dwComImageFlags = $2; }
-						| _FILE ALIGNMENT_ int32								{ if(!g_dwFileAlignment) PASM->m_dwFileAlignment = $3; }
-						| _IMAGEBASE int64										{ if(!g_stBaseAddress) PASM->m_stBaseAddress = (size_t)(*($2)); delete $2; }
+						| _SUBSYSTEM int32										{ PASM->m_dwSubsystem = $2; }
+						| _CORFLAGS int32										{ PASM->m_dwComImageFlags = $2; }
+						| _FILE ALIGNMENT_ int32								{ PASM->m_dwFileAlignment = $3; }
+						| _IMAGEBASE int64										{ PASM->m_stBaseAddress = (size_t)(*($2)); delete $2; }
 						| languageDecl
                         ;
 
@@ -237,20 +244,20 @@ languageDecl			: _LANGUAGE SQSTRING									{ LPCSTRToGuid($2,&(PASM->m_guidLang
 						;
 
 customAttrDecl          : _CUSTOM customType                                    { if(PASM->m_tkCurrentCVOwner) 
-                                                                                    PASM->DefineCV(PASM->m_tkCurrentCVOwner, $2, NULL);
+                                                                                    PASM->DefineCV(new CustomDescr(PASM->m_tkCurrentCVOwner, $2, NULL));
                                                                                   else if(PASM->m_pCustomDescrList)
                                                                                     PASM->m_pCustomDescrList->PUSH(new CustomDescr($2, NULL)); }
                         | _CUSTOM customType '=' compQstring                    { if(PASM->m_tkCurrentCVOwner) 
-                                                                                    PASM->DefineCV(PASM->m_tkCurrentCVOwner, $2, $4);
+                                                                                    PASM->DefineCV(new CustomDescr(PASM->m_tkCurrentCVOwner, $2, $4));
                                                                                   else if(PASM->m_pCustomDescrList)
                                                                                     PASM->m_pCustomDescrList->PUSH(new CustomDescr($2, $4)); }
                         | customHead bytes ')'                                  { if(PASM->m_tkCurrentCVOwner) 
-                                                                                    PASM->DefineCV(PASM->m_tkCurrentCVOwner, $1, $2);
+                                                                                    PASM->DefineCV(new CustomDescr(PASM->m_tkCurrentCVOwner, $1, $2));
                                                                                    else if(PASM->m_pCustomDescrList)
                                                                                     PASM->m_pCustomDescrList->PUSH(new CustomDescr($1, $2)); }
-                        | _CUSTOM '(' ownerType ')' customType                  { PASM->DefineCV($3, $5, NULL); }
-                        | _CUSTOM '(' ownerType ')' customType '=' compQstring  { PASM->DefineCV($3, $5, $7); }
-                        | customHeadWithOwner bytes ')'                         { PASM->DefineCV(PASM->m_tkCurrentCVOwner, $1, $2); }
+                        | _CUSTOM '(' ownerType ')' customType                  { PASM->DefineCV(new CustomDescr($3, $5, NULL)); }
+                        | _CUSTOM '(' ownerType ')' customType '=' compQstring  { PASM->DefineCV(new CustomDescr($3, $5, $7)); }
+                        | customHeadWithOwner bytes ')'                         { PASM->DefineCV(new CustomDescr(PASM->m_tkCurrentCVOwner, $1, $2)); }
                         ;
 
 moduleHead              : _MODULE                                               { PASMM->SetModuleName(NULL); PASM->m_tkCurrentCVOwner=1; }
@@ -280,7 +287,8 @@ vtableHead              : _VTABLE '=' '('                                       
 nameSpaceHead           : _NAMESPACE name1                                      { PASM->StartNameSpace($2); }
                         ;
 
-classHead               : _CLASS classAttr id extendsClause implClause          { PASM->StartClass($3, $2); }
+classHead               : _CLASS classAttr id typarsClause extendsClause implClause          
+                                                                                { PASM->StartClass($3, $2, $4); }
                         ;
 
 classAttr               : /* EMPTY */                       { $$ = (CorRegTypeAttr) 0; }
@@ -308,22 +316,35 @@ classAttr               : /* EMPTY */                       { $$ = (CorRegTypeAt
                         | classAttr BEFOREFIELDINIT_        { $$ = (CorRegTypeAttr) ($1 | tdBeforeFieldInit); }
                         | classAttr SPECIALNAME_            { $$ = (CorRegTypeAttr) ($1 | tdSpecialName); }
                         | classAttr RTSPECIALNAME_          { $$ = (CorRegTypeAttr) ($1); }
+                        | classAttr FLAGS_ '(' int32 ')'    { $$ = (CorRegTypeAttr) ($4); }
                         ;
 
 extendsClause           : /* EMPTY */                                           
-                        | EXTENDS_ className                { strcpy(PASM->m_szExtendsClause,$2); }
+                        | EXTENDS_ typeSpec				    { PASM->m_crExtends = $2; }
                         ;
 
 implClause              : /* EMPTY */
-                        | IMPLEMENTS_ classNames
-                                                ;
-
-classNames              : classNames ',' className          { PASM->AddToImplList($3); }
-                        | className                         { PASM->AddToImplList($1); }
+                        | IMPLEMENTS_ implList
                         ;
 
 classDecls              : /* EMPTY */
                         | classDecls classDecl
+                        ;
+                        
+implList                : implList ',' typeSpec             { PASM->AddToImplList($3); }
+                        | typeSpec                          { PASM->AddToImplList($1); }
+				        ;
+
+typarsClause              : /* EMPTY */                     { $$ = NULL; }
+                          | '<' typars '>'                  { $$ = $2; }
+                          ;
+
+typars                  : tyBound id typarsRest             { $$ = new TyParList($1, $2, $3); }
+                        | id typarsRest                     { $$ = new TyParList(NULL, $1, $2); }
+                        ;
+
+typarsRest              : /* EMPTY */                       { $$ = NULL; }
+                        | ',' typars                        { $$ = $2; }
                         ;
 
 classDecl               : methodHead  methodDecls '}'       { if(PASM->m_pCurMethod->m_ulLines[1] ==0)
@@ -342,7 +363,13 @@ classDecl               : methodHead  methodDecls '}'       { if(PASM->m_pCurMet
                         | _PACK int32                           { PASM->m_pCurClass->m_ulPack = $2; }
                         | exportHead '{' comtypeDecls '}'       { PASMM->EndComType(); }
                         | _OVERRIDE typeSpec DCOLON methodName WITH_ callConv type typeSpec DCOLON methodName '(' sigArgs0 ')'
-                                                                { PASM->AddMethodImpl($2,$4,parser->MakeSig($6,$7,$12),$8,$10); }
+			                                                    { BinStr *sig1 = parser->MakeSig($6, $7, $12); 
+                                                                  BinStr *sig2 = new BinStr(); sig2->append(sig1); 
+                                                                  PASM->AddMethodImpl($2,$4,sig1,$8,$10,sig2); } 
+                        | _OVERRIDE METHOD_ callConv type typeSpec DCOLON methodName '(' sigArgs0 ')' WITH_ METHOD_ callConv type typeSpec DCOLON methodName '(' sigArgs0 ')' 
+                                                                 { PASM->AddMethodImpl($5,$7,
+                                                                      parser->MakeSig($3,$4,$9),$15,$17,
+                                                                      parser->MakeSig($13,$14,$19)); }
 						| languageDecl
                         ;
 
@@ -375,13 +402,15 @@ customHeadWithOwner     : _CUSTOM '(' ownerType ')' customType '=' '('
 
 memberRef				: methodSpec callConv type typeSpec DCOLON methodName '(' sigArgs0 ')'
                                                             { $$ = PASM->MakeMemberRef($4, $6, parser->MakeSig($2, $3, $8),iOpcodeLen); 
-                                                               delete PASM->m_firstArgName;
-                                                               PASM->m_firstArgName = palDummy;
+                                                               PASM->delArgNameList(PASM->m_firstArgName);
+                                                               PASM->m_firstArgName = palDummyFirst;
+                                                               PASM->m_lastArgName = palDummyLast;
 															}
                         | methodSpec callConv type methodName '(' sigArgs0 ')'
-                                                            { $$ = PASM->MakeMemberRef(NULL, $4, parser->MakeSig($2, $3, $6),iOpcodeLen); 
-                                                               delete PASM->m_firstArgName;
-                                                               PASM->m_firstArgName = palDummy;
+                                                            { $$ = PASM->MakeMemberRef(mdTokenNil, $4, parser->MakeSig($2, $3, $6),iOpcodeLen); 
+                                                               PASM->delArgNameList(PASM->m_firstArgName);
+                                                               PASM->m_firstArgName = palDummyFirst;
+                                                               PASM->m_lastArgName = palDummyLast;
 															}
                         | FIELD_ type typeSpec DCOLON id
                                                              { $2->insertInt8(IMAGE_CEE_CS_CALLCONV_FIELD); 
@@ -394,15 +423,15 @@ memberRef				: methodSpec callConv type typeSpec DCOLON methodName '(' sigArgs0 
 customType              : callConv type typeSpec DCOLON _CTOR '(' sigArgs0 ')'
                                                             { $$ = PASM->MakeMemberRef($3, newString(COR_CTOR_METHOD_NAME), parser->MakeSig($1, $2, $7),0); }
                         | callConv type _CTOR '(' sigArgs0 ')'
-                                                            { $$ = PASM->MakeMemberRef(NULL, newString(COR_CTOR_METHOD_NAME), parser->MakeSig($1, $2, $5),0); }
+                                                            { $$ = PASM->MakeMemberRef(mdTokenNil, newString(COR_CTOR_METHOD_NAME), parser->MakeSig($1, $2, $5),0); }
                         ;
 
-ownerType               : typeSpec                          { $$ = PASM->MakeTypeRef($1); }
+ownerType               : typeSpec                          { $$ = $1; }
                         | memberRef                         { $$ = $1; }
                         ;
 
 eventHead               : _EVENT eventAttr typeSpec id      { PASM->ResetEvent($4, $3, $2); }
-                        | _EVENT eventAttr id               { PASM->ResetEvent($3, NULL, $2); }
+                        | _EVENT eventAttr id               { PASM->ResetEvent($3, mdTypeRefNil, $2); }
                         ;
 
 
@@ -475,9 +504,12 @@ methodHeadPart1         : _METHOD                           { PASM->ResetForNext
 															  uMethodBeginColumn=PASM->m_ulCurColumn;}
                         ;
 
-methodHead              : methodHeadPart1 methAttr callConv paramAttr type methodName '(' sigArgs0 ')' implAttr '{'
-                                                            { PASM->StartMethod($6, parser->MakeSig($3, $5, $8), $2, NULL, $4);
-                                                              PASM->SetImplAttr((USHORT)$10);  
+methodHead              : methodHeadPart1 methAttr callConv paramAttr type methodName typarsClause'(' sigArgs0 ')' implAttr '{'
+                                                            { BinStr* sig;
+							                                  if ($7 == NULL) sig = parser->MakeSig($3, $5, $9);
+							                                  else sig = parser->MakeSig($3 | IMAGE_CEE_CS_CALLCONV_GENERIC, $5, $9, $7->Count());
+							                                  PASM->StartMethod($6, sig, $2, NULL, $4, $7);
+                                                              PASM->SetImplAttr((USHORT)$11);  
 															  PASM->m_pCurMethod->m_ulLines[0] = uMethodBeginLine;
 															  PASM->m_pCurMethod->m_ulColumns[0]=uMethodBeginColumn; }
                         | methodHeadPart1 methAttr callConv paramAttr type MARSHAL_ '(' nativeType ')' methodName '(' sigArgs0 ')' implAttr '{'
@@ -506,7 +538,7 @@ methAttr                : /* EMPTY */                       { $$ = (CorMethodAtt
                         | methAttr RTSPECIALNAME_           { $$ = $1; }/*{ $$ = (CorMethodAttr) ($1 | mdRTSpecialName); }*/
                         | methAttr UNMANAGEDEXP_            { $$ = (CorMethodAttr) ($1 | mdUnmanagedExport); }
                         | methAttr REQSECOBJ_               { $$ = (CorMethodAttr) ($1 | mdRequireSecObject); }
-						
+                        | methAttr FLAGS_ '(' int32 ')'     { $$ = (CorMethodAttr) ($4); }
                         | methAttr PINVOKEIMPL_ '(' compQstring AS_ compQstring pinvAttr ')'                    
                                                             { PASM->SetPinvoke($4,0,$6,$7); 
                                                               $$ = (CorMethodAttr) ($1 | mdPinvokeImpl); }
@@ -529,6 +561,7 @@ pinvAttr                : /* EMPTY */                       { $$ = (CorPinvokeMa
                         | pinvAttr STDCALL_                 { $$ = (CorPinvokeMap) ($1 | pmCallConvStdcall); }
                         | pinvAttr THISCALL_                { $$ = (CorPinvokeMap) ($1 | pmCallConvThiscall); }
                         | pinvAttr FASTCALL_                { $$ = (CorPinvokeMap) ($1 | pmCallConvFastcall); }
+                        | pinvAttr FLAGS_ '(' int32 ')'     { $$ = (CorPinvokeMap) ($4); }
                         ;
 
 methodName              : _CTOR                             { $$ = newString(COR_CTOR_METHOD_NAME); }
@@ -561,6 +594,7 @@ fieldAttr               : /* EMPTY */                       { $$ = (CorFieldAttr
                         | fieldAttr PRIVATESCOPE_           { $$ = (CorFieldAttr) (($1 & ~mdMemberAccessMask) | fdPrivateScope); }
                         | fieldAttr LITERAL_                { $$ = (CorFieldAttr) ($1 | fdLiteral); }
                         | fieldAttr NOTSERIALIZED_          { $$ = (CorFieldAttr) ($1 | fdNotSerialized); }
+                        | fieldAttr FLAGS_ '(' int32 ')'    { $$ = (CorFieldAttr) ($4); }
                         ;
 
 implAttr                : /* EMPTY */                       { $$ = (CorMethodImpl) (miIL | miManaged); }
@@ -575,14 +609,14 @@ implAttr                : /* EMPTY */                       { $$ = (CorMethodImp
                         | implAttr INTERNALCALL_            { $$ = (CorMethodImpl) ($1 | miInternalCall); }
                         | implAttr SYNCHRONIZED_            { $$ = (CorMethodImpl) ($1 | miSynchronized); }
                         | implAttr NOINLINING_              { $$ = (CorMethodImpl) ($1 | miNoInlining); }
+                        | implAttr FLAGS_ '(' int32 ')'     { $$ = (CorMethodImpl) ($4); }
                         ;
 
-localsHead              : _LOCALS                           { PASM->delArgNameList(PASM->m_firstArgName); PASM->m_firstArgName = NULL; }
+localsHead              : _LOCALS                           { PASM->delArgNameList(PASM->m_firstArgName); PASM->m_firstArgName = NULL;PASM->m_lastArgName = NULL; }
                         ;
 
 
-methodDecl              : _EMITBYTE int32                   { char c = (char)$2;
-                                                              PASM->EmitByte($2); }
+methodDecl              : _EMITBYTE int32                   { PASM->EmitByte($2); }
                         | sehBlock                          { delete PASM->m_SEHD; PASM->m_SEHD = PASM->m_SEHDstack.POP(); }
                         | _MAXSTACK int32                   { PASM->EmitMaxStack($2); }
                         | localsHead '(' sigArgs0 ')'       { PASM->EmitLocals(parser->MakeSig(IMAGE_CEE_CS_CALLCONV_LOCAL_SIG, 0, $3)); }
@@ -592,13 +626,16 @@ methodDecl              : _EMITBYTE int32                   { char c = (char)$2;
                         | _ZEROINIT                         { PASM->EmitZeroInit(); }
                         | dataDecl
                         | instr
-                        | id ':'                            { PASM->EmitLabel($1); }
+                        | id ':'                            { PASM->AddLabel(PASM->m_CurPC,$1); /*PASM->EmitLabel($1);*/ }
                         | secDecl
                         | extSourceSpec
 						| languageDecl
                         | customAttrDecl
 						| _EXPORT '[' int32 ']'				{ if(PASM->m_pCurMethod->m_dwExportOrdinal == 0xFFFFFFFF)
+						                                      {
 						                                          PASM->m_pCurMethod->m_dwExportOrdinal = $3;
+															      PASM->m_pCurMethod->m_szExportAlias = NULL;
+															  }
 														      else
 															      PASM->report->warn("Duplicate .export directive, ignored\n");
 															}
@@ -613,7 +650,11 @@ methodDecl              : _EMITBYTE int32                   { char c = (char)$2;
                         | _VTENTRY int32 ':' int32          { PASM->m_pCurMethod->m_wVTEntry = (WORD)$2;
                                                               PASM->m_pCurMethod->m_wVTSlot = (WORD)$4; }
                         | _OVERRIDE typeSpec DCOLON methodName 
-                                                            { PASM->AddMethodImpl($2,$4,NULL,NULL,NULL); }
+			                                                { PASM->AddMethodImpl($2,$4,NULL,NULL,NULL,NULL); }
+
+			            | _OVERRIDE METHOD_ callConv type typeSpec DCOLON methodName '(' sigArgs0 ')'
+			                                                { PASM->AddMethodImpl($5,$7,
+                                                                   parser->MakeSig($3,$4,$9),NULL,NULL,NULL); } 
                         | scopeBlock
                         | _PARAM '[' int32 ']' initOpt                            
                                                             { if( $3 ) {
@@ -678,7 +719,7 @@ filterHead              : FILTER_                            { PASM->m_SEHD->seh
                                                                PASM->m_SEHD->sehFilter = PASM->m_CurPC; } 
                         ;
 
-catchClause             : CATCH_ className                   { PASM->m_SEHD->sehClause = COR_ILEXCEPTION_CLAUSE_NONE;
+catchClause             : CATCH_ typeSpec                   {  PASM->m_SEHD->sehClause = COR_ILEXCEPTION_CLAUSE_NONE;
                                                                PASM->SetCatchClass($2); 
                                                                PASM->m_SEHD->sehHandler = PASM->m_CurPC; }
                         ;
@@ -783,17 +824,33 @@ fieldInit               : FLOAT32_ '(' float64 ')'           { $$ = new BinStr()
                                                                $$->appendInt32(*((__int32*)$3)); delete $3;}
                         | INT16_ '(' int64 ')'               { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_I2); 
                                                                $$->appendInt16(*((__int16*)$3)); delete $3;}
-                        | CHAR_ '(' int64 ')'                { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_CHAR); 
-                                                               $$->appendInt16((int)*((unsigned __int16*)$3)); delete $3;}
                         | INT8_ '(' int64 ')'                { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_I1); 
                                                                $$->appendInt8(*((__int8*)$3)); delete $3; }
+                        | UNSIGNED_ INT64_ '(' int64 ')'     { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_U8); 
+                                                               $$->appendInt64((__int64 *)$4); delete $4; } 
+                        | UNSIGNED_ INT32_ '(' int64 ')'     { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_U4); 
+                                                               $$->appendInt32(*((__int32*)$4)); delete $4;}
+                        | UNSIGNED_ INT16_ '(' int64 ')'     { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_U2); 
+                                                               $$->appendInt16(*((__int16*)$4)); delete $4;}
+                        | UNSIGNED_ INT8_ '(' int64 ')'      { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_U1); 
+                                                               $$->appendInt8(*((__int8*)$4)); delete $4; }
+                        | UINT64_ '(' int64 ')'              { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_U8); 
+                                                               $$->appendInt64((__int64 *)$3); delete $3; } 
+                        | UINT32_ '(' int64 ')'              { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_U4); 
+                                                               $$->appendInt32(*((__int32*)$3)); delete $3;}
+                        | UINT16_ '(' int64 ')'              { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_U2); 
+                                                               $$->appendInt16(*((__int16*)$3)); delete $3;}
+                        | UINT8_ '(' int64 ')'               { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_U1); 
+                                                               $$->appendInt8(*((__int8*)$3)); delete $3; }
+                        | CHAR_ '(' int64 ')'                { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_CHAR); 
+                                                               $$->appendInt16((int)*((unsigned __int16*)$3)); delete $3;}
                         | BOOL_ '(' truefalse ')'            { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_BOOLEAN); 
                                                                $$->appendInt8($3);}
                         | compQstring                        { $$ = BinStrToUnicode($1); $$->insertInt8(ELEMENT_TYPE_STRING);}
                         | bytearrayhead bytes ')'            { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_STRING);
                                                                $$->append($2); delete $2;}
 						| NULLREF_							 { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_CLASS); 
-																$$->appendInt32(0); }
+															    $$->appendInt32(0); }
                         ;
 
 bytearrayhead           : BYTEARRAY_ '('                     { bParsingByteArray = TRUE; }
@@ -813,8 +870,10 @@ instr_r_head            : INSTR_R '('                        { $$ = $1; bParsing
 instr_tok_head          : INSTR_TOK                          { $$ = $1; iOpcodeLen = PASM->OpcodeLen($1); }
                         ;
 
-methodSpec              : METHOD_                            { palDummy = PASM->m_firstArgName;
-                                                               PASM->m_firstArgName = NULL; }
+methodSpec              : METHOD_                            { palDummyFirst = PASM->m_firstArgName;
+                                                               palDummyLast = PASM->m_lastArgName;   
+                                                               PASM->m_firstArgName = NULL;
+                                                               PASM->m_lastArgName = NULL; }
                         ;
 
 instr                   : INSTR_NONE                         { PASM->EmitOpcode($1); }
@@ -835,18 +894,34 @@ instr                   : INSTR_NONE                         { PASM->EmitOpcode(
                                                                delete $2; }
                         | INSTR_BRTARGET int32               { PASM->EmitInstrBrOffset($1, $2); }
                         | INSTR_BRTARGET id                  { PASM->EmitInstrBrTarget($1, $2); }
-                        | INSTR_METHOD callConv type typeSpec DCOLON methodName '(' sigArgs0 ')'
+                        | INSTR_METHOD callConv type typeSpec DCOLON methodName tyArgs0 '(' sigArgs0 ')'
                                                              { if($1->opcode == CEE_NEWOBJ || $1->opcode == CEE_CALLVIRT)
                                                                    $2 = $2 | IMAGE_CEE_CS_CALLCONV_HASTHIS; 
-                                                               mdToken mr = PASM->MakeMemberRef($4, $6, parser->MakeSig($2, $3, $8),PASM->OpcodeLen($1));
+							                                   mdToken mr;
+                                                               if ($7 == NULL)
+                                                                 mr = PASM->MakeMemberRef($4, $6, parser->MakeSig($2, $3, $9), PASM->OpcodeLen($1));
+                                                               else
+							                                   {
+                                                                 mr = PASM->MakeMemberRef($4, $6, parser->MakeSig($2 | IMAGE_CEE_CS_CALLCONV_GENERIC, $3, $9, corCountArgs($7)), 0);
+                                                                 mr = PASM->MakeMethodSpec(mr, 
+                                                                   parser->MakeSig(IMAGE_CEE_CS_CALLCONV_INSTANTIATION, 0, $7),PASM->OpcodeLen($1));
+							                                   }
                                                                PASM->EmitInstrI($1,mr);
                                                                PASM->m_tkCurrentCVOwner = mr;
                                                                PASM->m_pCustomDescrList = NULL;
                                                              }
-                        | INSTR_METHOD callConv type methodName '(' sigArgs0 ')'
+                        | INSTR_METHOD callConv type methodName tyArgs0 '(' sigArgs0 ')'
                                                              { if($1->opcode == CEE_NEWOBJ || $1->opcode == CEE_CALLVIRT)
                                                                    $2 = $2 | IMAGE_CEE_CS_CALLCONV_HASTHIS; 
-                                                               mdToken mr = PASM->MakeMemberRef(NULL, $4, parser->MakeSig($2, $3, $6),PASM->OpcodeLen($1));
+							                                   mdToken mr;
+                                                               if ($5 == NULL)
+                                                                 mr = PASM->MakeMemberRef(mdTokenNil, $4, parser->MakeSig($2, $3, $7), PASM->OpcodeLen($1));
+                                                               else
+							                                   {
+                                                                 mr = PASM->MakeMemberRef(mdTokenNil, $4, parser->MakeSig($2 | IMAGE_CEE_CS_CALLCONV_GENERIC, $3, $7, corCountArgs($5)), 0);
+                                                                 mr = PASM->MakeMethodSpec(mr, 
+                                                                   parser->MakeSig(IMAGE_CEE_CS_CALLCONV_INSTANTIATION, 0, $5),PASM->OpcodeLen($1));
+							                                   }
                                                                PASM->EmitInstrI($1,mr);
                                                                PASM->m_tkCurrentCVOwner = mr;
                                                                PASM->m_pCustomDescrList = NULL;
@@ -860,17 +935,18 @@ instr                   : INSTR_NONE                         { PASM->EmitOpcode(
                                                              }
                         | INSTR_FIELD type id
                                                              { $2->insertInt8(IMAGE_CEE_CS_CALLCONV_FIELD); 
-                                                               mdToken mr = PASM->MakeMemberRef(NULL, $3, $2, PASM->OpcodeLen($1));
+                                                               mdToken mr = PASM->MakeMemberRef(mdTokenNil, $3, $2, PASM->OpcodeLen($1));
                                                                PASM->EmitInstrI($1,mr);
                                                                PASM->m_tkCurrentCVOwner = mr;
                                                                PASM->m_pCustomDescrList = NULL;
                                                              }
-                        | INSTR_TYPE typeSpec                { mdToken mr = PASM->MakeTypeRef($2);
-                                                               PASM->EmitInstrI($1, mr); 
-                                                               PASM->m_tkCurrentCVOwner = mr;
+                        | INSTR_TYPE typeSpec                { PASM->EmitInstrI($1, $2); 
+                                                               PASM->m_tkCurrentCVOwner = $2;
                                                                PASM->m_pCustomDescrList = NULL;
                                                              }
                         | INSTR_STRING compQstring           { PASM->EmitInstrStringLiteral($1, $2,TRUE); }
+                        | INSTR_STRING ANSI_ '(' compQstring ')'
+						                                     { PASM->EmitInstrStringLiteral($1, $4,FALSE); }
                         | INSTR_STRING bytearrayhead bytes ')'
                                                              { PASM->EmitInstrStringLiteral($1, $3,FALSE); }
                         | INSTR_SIG callConv type '(' sigArgs0 ')'      
@@ -880,14 +956,29 @@ instr                   : INSTR_NONE                         { PASM->EmitOpcode(
                         | INSTR_RVA int32                    { PASM->EmitInstrRVA($1, (char *)$2, FALSE); 
                                                                PASM->report->warn("Deprecated instruction 'ldptr'\n"); }
                         | instr_tok_head ownerType /* ownerType ::= memberRef | typeSpec */
-                                                             { mdToken mr = $2;
-                                                               PASM->EmitInstrI($1,mr);
-                                                               PASM->m_tkCurrentCVOwner = mr;
+                                                             { PASM->EmitInstrI($1,$2);
+                                                               PASM->m_tkCurrentCVOwner = $2;
                                                                PASM->m_pCustomDescrList = NULL;
 															   iOpcodeLen = 0;
                                                              }
                         | INSTR_SWITCH '(' labels ')'        { PASM->EmitInstrSwitch($1, $3); }
                         | INSTR_PHI int16s                   { PASM->EmitInstrPhi($1, $2); }
+                        ;
+
+tyArgs0                 : /* EMPTY */                        { $$ = NULL; }
+                        | '<' tyArgs1 '>'                    { $$ = $2; }
+                        ;
+
+tyArgs1                 : /* EMPTY */                        { $$ = NULL; }
+                        | type                               { $$ = $1; }
+                        | tyArgs2                            { $$ = $1; }
+                        ;
+
+tyArgs2                 : tyArgs1 ',' type                   { $$ = $1; $$->append($3); delete $3; } 
+                        | tyArgs1 ','                        { $$ = $1; $$->append(NULL); }
+                        ;
+
+tyBound                 : '(' typeSpec ')'                   { $$ = $2; }
                         ;
 
 sigArgs0                : /* EMPTY */                        { $$ = new BinStr(); }
@@ -900,52 +991,38 @@ sigArgs1                : sigArg                             { $$ = $1; }
 
 sigArg                  : ELIPSES                             { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_SENTINEL); }
                         | paramAttr type                      { $$ = new BinStr(); $$->append($2); PASM->addArgName("", $2, NULL, $1); }
-                        | paramAttr type id                   { $$ = new BinStr(); $$->append($2); PASM->addArgName($3, $2, NULL, $1); }
+                        | paramAttr type id                   { $$ = new BinStr(); $$->append($2); PASM->addArgName($3, $2, NULL, $1); delete $3;}
                         | paramAttr type MARSHAL_ '(' nativeType ')'    
                                                               { $$ = new BinStr(); $$->append($2); PASM->addArgName("", $2, $5, $1); }
                         | paramAttr type MARSHAL_ '(' nativeType ')' id 
-                                                              { $$ = new BinStr(); $$->append($2); PASM->addArgName($7, $2, $5, $1); }
+                                                              { $$ = new BinStr(); $$->append($2); PASM->addArgName($7, $2, $5, $1); delete $7;}
                         ;
 
 name1                   : id                                  { $$ = $1; }
                         | DOTTEDNAME                          { $$ = $1; }
-                        | name1 '.' name1                     { $$ = newStringWDel($1, newString("."), $3); }
+                        | name1 '.' name1                     { $$ = newStringWDel($1, '.', $3); }
                         ;
 
-className               : '[' name1 ']' slashedName           { $$ = newStringWDel($2, newString("^"), $4); }
-                        | '[' _MODULE name1 ']' slashedName   { $$ = newStringWDel($3, newString("~"), $5); }
-                        | slashedName                         { $$ = $1; }
+className               : '[' name1 ']' slashedName           { $$ = PASM->ResolveClassRef(PASM->GetAsmRef($2), $4, NULL); delete[] $2;}
+                        | '[' '*' ']' slashedName             { $$ = PASM->ResolveClassRef(mdTokenNil, $4, NULL); }
+                        | '[' _MODULE name1 ']' slashedName   { $$ = PASM->ResolveClassRef(PASM->GetModRef($3),$5, NULL); delete[] $3;}
+                        | slashedName                         { $$ = PASM->ResolveClassRef(1,$1,NULL); }
                         ;
 
 slashedName             : name1                               { $$ = $1; }
-                        | slashedName '/' name1               { $$ = newStringWDel($1, newString("/"), $3); }
+                        | slashedName '/' name1               { $$ = newStringWDel($1, (char)NESTING_SEP, $3); }
                         ;
 
-typeSpec                : className                           { unsigned len = (unsigned int)strlen($1)+1;
-                                                                $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_NAME);
-                                                                memcpy($$->getBuff(len), $1, len);
-                                                                delete $1;
-                                                              }
-                        | '[' name1 ']'                       { unsigned len = (unsigned int)strlen($2);
-                                                                $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_NAME);
-                                                                memcpy($$->getBuff(len), $2, len);
-                                                                delete $2;
-                                                                $$->appendInt8('^');
-                                                                $$->appendInt8(0); 
-                                                              }
-                        | '[' _MODULE name1 ']'               { unsigned len = (unsigned int)strlen($3);
-                                                                $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_NAME);
-                                                                memcpy($$->getBuff(len), $3, len);
-                                                                delete $3;
-                                                                $$->appendInt8('~');
-                                                                $$->appendInt8(0); 
-                                                              }
-                        | type                                { $$ = $1; }
+typeSpec                : className                           { $$ = $1;}
+                        | '[' name1 ']'                       { $$ = PASM->GetAsmRef($2); delete[] $2;}
+                        | '[' _MODULE name1 ']'               { $$ = PASM->GetModRef($3); delete[] $3;}
+                        | type                                { $$ = PASM->ResolveTypeSpec($1); }
                         ;
 
 callConv                : INSTANCE_ callConv                  { $$ = ($2 | IMAGE_CEE_CS_CALLCONV_HASTHIS); }
                         | EXPLICIT_ callConv                  { $$ = ($2 | IMAGE_CEE_CS_CALLCONV_EXPLICITTHIS); }
                         | callKind                            { $$ = $1; }
+                        | CALLCONV_ '(' int32 ')'             { $$ = $3; }
                         ;
 
 callKind                : /* EMPTY */                         { $$ = IMAGE_CEE_CS_CALLCONV_DEFAULT; }
@@ -994,6 +1071,10 @@ nativeType              : /* EMPTY */                         { $$ = new BinStr(
                         | UNSIGNED_ INT16_                    { $$ = new BinStr(); $$->appendInt8(NATIVE_TYPE_U2); }
                         | UNSIGNED_ INT32_                    { $$ = new BinStr(); $$->appendInt8(NATIVE_TYPE_U4); }
                         | UNSIGNED_ INT64_                    { $$ = new BinStr(); $$->appendInt8(NATIVE_TYPE_U8); }
+                        | UINT8_                              { $$ = new BinStr(); $$->appendInt8(NATIVE_TYPE_U1); }
+                        | UINT16_                             { $$ = new BinStr(); $$->appendInt8(NATIVE_TYPE_U2); }
+                        | UINT32_                             { $$ = new BinStr(); $$->appendInt8(NATIVE_TYPE_U4); }
+                        | UINT64_                             { $$ = new BinStr(); $$->appendInt8(NATIVE_TYPE_U8); }
                         | nativeType '*'                      { $$ = $1; $$->insertInt8(NATIVE_TYPE_PTR); 
 																PASM->report->warn("Deprecated native type '*'\n"); }
                         | nativeType '[' ']'                  { $$ = $1; if($$->length()==0) $$->appendInt8(NATIVE_TYPE_MAX);
@@ -1032,6 +1113,7 @@ nativeType              : /* EMPTY */                         { $$ = new BinStr(
                                                                 
                         | INT_                                { $$ = new BinStr(); $$->appendInt8(NATIVE_TYPE_INT); }
                         | UNSIGNED_ INT_                      { $$ = new BinStr(); $$->appendInt8(NATIVE_TYPE_UINT); }
+                        | UINT_                               { $$ = new BinStr(); $$->appendInt8(NATIVE_TYPE_UINT); }
                         | NESTED_ STRUCT_                     { $$ = new BinStr(); $$->appendInt8(NATIVE_TYPE_NESTEDSTRUCT); 
 																PASM->report->warn("Deprecated native type 'nested struct'\n"); }
                         | BYVALSTR_                           { $$ = new BinStr(); $$->appendInt8(NATIVE_TYPE_BYVALSTR); }
@@ -1059,6 +1141,10 @@ variantType             : /* EMPTY */                         { $$ = VT_EMPTY; }
                         | UNSIGNED_ INT16_                    { $$ = VT_UI2; }
                         | UNSIGNED_ INT32_                    { $$ = VT_UI4; }
                         | UNSIGNED_ INT64_                    { $$ = VT_UI8; }
+                        | UINT8_                              { $$ = VT_UI1; }
+                        | UINT16_                             { $$ = VT_UI2; }
+                        | UINT32_                             { $$ = VT_UI4; }
+                        | UINT64_                             { $$ = VT_UI8; }
                         | '*'                                 { $$ = VT_PTR; }
                         | variantType '[' ']'                 { $$ = $1 | VT_ARRAY; }
                         | variantType VECTOR_                 { $$ = $1 | VT_VECTOR; }
@@ -1073,6 +1159,7 @@ variantType             : /* EMPTY */                         { $$ = VT_EMPTY; }
                         | SAFEARRAY_                          { $$ = VT_SAFEARRAY; }
                         | INT_                                { $$ = VT_INT; }
                         | UNSIGNED_ INT_                      { $$ = VT_UINT; }
+                        | UINT_                               { $$ = VT_UINT; }
                         | ERROR_                              { $$ = VT_ERROR; }
                         | HRESULT_                            { $$ = VT_HRESULT; }
                         | CARRAY_                             { $$ = VT_CARRAY; }
@@ -1089,19 +1176,18 @@ variantType             : /* EMPTY */                         { $$ = VT_EMPTY; }
                         | CLSID_                              { $$ = VT_CLSID; }
                         ;
 
-type                    : CLASS_ className                    { if((strcmp($2,"System.String")==0) ||
-																   (strcmp($2,"mscorlib^System.String")==0))
+type                    : CLASS_ className                    { if($2 == PASM->m_tkSysString)
                                                                 {     $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_STRING); }
-                                                                else if((strcmp($2,"System.Object")==0) ||
-																   (strcmp($2,"mscorlib^System.Object")==0))
+                                                                else if($2 == PASM->m_tkSysObject)
                                                                 {     $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_OBJECT); }
-                                                                else $$ = parser->MakeTypeClass(ELEMENT_TYPE_CLASS, $2); } 
+                                                                else  
+                                                                 $$ = parser->MakeTypeClass(ELEMENT_TYPE_CLASS, $2); } 
 						| OBJECT_							  { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_OBJECT); } 
 						| STRING_							  { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_STRING); } 
                         | VALUE_ CLASS_ className             { $$ = parser->MakeTypeClass(ELEMENT_TYPE_VALUETYPE, $3); } 
                         | VALUETYPE_ className                { $$ = parser->MakeTypeClass(ELEMENT_TYPE_VALUETYPE, $2); } 
                         | type '[' ']'                        { $$ = $1; $$->insertInt8(ELEMENT_TYPE_SZARRAY); } 
-                        | type '[' bounds1 ']'                { $$ = parser->MakeTypeArray($1, $3); } 
+                        | type '[' bounds1 ']'                { $$ = parser->MakeTypeArray(ELEMENT_TYPE_ARRAY, $1, $3); } 
 						/* uncomment when and if this type is supported by the Runtime
                         | type VALUE_ '[' int32 ']'           { $$ = $1; $$->insertInt8(ELEMENT_TYPE_VALUEARRAY); corEmitInt($$, $4); }
                         */
@@ -1112,14 +1198,22 @@ type                    : CLASS_ className                    { if((strcmp($2,"S
                                                                 $$->append($1); }
                         | type MODOPT_ '(' className ')'      { $$ = parser->MakeTypeClass(ELEMENT_TYPE_CMOD_OPT, $4);
                                                                 $$->append($1); }
-                        | '!' int32                           { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_VAR); $$->appendInt8($2); 
-                                                                PASM->report->warn("Deprecated type modifier '!'(ELEMENT_TYPE_VAR)\n"); }
                         | methodSpec callConv type '*' '(' sigArgs0 ')'  
                                                               { $$ = parser->MakeSig($2, $3, $6);
                                                                 $$->insertInt8(ELEMENT_TYPE_FNPTR); 
-                                                                delete PASM->m_firstArgName;
-                                                                PASM->m_firstArgName = palDummy;
+                                                                PASM->delArgNameList(PASM->m_firstArgName);
+                                                                PASM->m_firstArgName = palDummyFirst;
+                                                                PASM->m_lastArgName = palDummyLast;
                                                               }
+                        | type '<' tyArgs1 '>'                { if($3 == NULL) $$ = $1;
+                                                                else {
+                                                                  $$ = new BinStr(); 
+                                                                  $$->appendInt8(ELEMENT_TYPE_WITH); 
+                                                                  $$->append($1);
+                                                                  corEmitInt($$, corCountArgs($3)); 
+                                                                  $$->append($3); delete $1; delete $3; }}
+                        | '!' '!' int32                       { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_MVAR); corEmitInt($$, $3); }
+                        | '!' int32                           { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_VAR); corEmitInt($$, $2); }
                         | TYPEDREF_                           { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_TYPEDBYREF); }
                         | CHAR_                               { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_CHAR); }
                         | VOID_                               { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_VOID); }
@@ -1134,8 +1228,13 @@ type                    : CLASS_ className                    { if((strcmp($2,"S
                         | UNSIGNED_ INT16_                    { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_U2); }
                         | UNSIGNED_ INT32_                    { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_U4); }
                         | UNSIGNED_ INT64_                    { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_U8); }
+                        | UINT8_                              { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_U1); }
+                        | UINT16_                             { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_U2); }
+                        | UINT32_                             { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_U4); }
+                        | UINT64_                             { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_U8); }
                         | NATIVE_ INT_                        { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_I); }
                         | NATIVE_ UNSIGNED_ INT_              { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_U); }
+                        | NATIVE_ UINT_                       { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_U); }
                         | NATIVE_ FLOAT_                      { $$ = new BinStr(); $$->appendInt8(ELEMENT_TYPE_R); }
                         ;
 
@@ -1184,6 +1283,8 @@ secDecl                 : _PERMISSION secAction typeSpec '(' nameValPairs ')'
                                                               { PASM->AddPermissionDecl($2, $3, $5); }
                         | _PERMISSION secAction typeSpec      { PASM->AddPermissionDecl($2, $3, NULL); }
                         | psetHead bytes ')'                  { PASM->AddPermissionSetDecl($1, $2); }
+                        | _PERMISSIONSET secAction compQstring
+                                                              { PASM->AddPermissionSetDecl($2,BinStrToUnicode($3));}
                         ;
 
 psetHead                : _PERMISSIONSET secAction '=' '('    { $$ = $2; bParsingByteArray = TRUE; }
@@ -1215,22 +1316,26 @@ caValue                 : truefalse                           { $$ = new BinStr(
                                                                 $$->appendInt8(0); }
                         | className '(' INT8_ ':' int32 ')'   { $$ = new BinStr();
                                                                 $$->appendInt8(SERIALIZATION_TYPE_ENUM);
-                                                                strcpy((char *)$$->getBuff((unsigned)strlen($1) + 1), $1);
+                                                                char* sz = PASM->ReflectionNotation($1);
+                                                                strcpy((char *)$$->getBuff((unsigned)strlen(sz) + 1), sz);
                                                                 $$->appendInt8(1);
                                                                 $$->appendInt32($5); }
                         | className '(' INT16_ ':' int32 ')'  { $$ = new BinStr();
                                                                 $$->appendInt8(SERIALIZATION_TYPE_ENUM);
-                                                                strcpy((char *)$$->getBuff((unsigned)strlen($1) + 1), $1);
+                                                                char* sz = PASM->ReflectionNotation($1);
+                                                                strcpy((char *)$$->getBuff((unsigned)strlen(sz) + 1), sz);
                                                                 $$->appendInt8(2);
                                                                 $$->appendInt32($5); }
                         | className '(' INT32_ ':' int32 ')'  { $$ = new BinStr();
                                                                 $$->appendInt8(SERIALIZATION_TYPE_ENUM);
-                                                                strcpy((char *)$$->getBuff((unsigned)strlen($1) + 1), $1);
+                                                                char* sz = PASM->ReflectionNotation($1);
+                                                                strcpy((char *)$$->getBuff((unsigned)strlen(sz) + 1), sz);
                                                                 $$->appendInt8(4);
                                                                 $$->appendInt32($5); }
                         | className '(' int32 ')'             { $$ = new BinStr();
                                                                 $$->appendInt8(SERIALIZATION_TYPE_ENUM);
-                                                                strcpy((char *)$$->getBuff((unsigned)strlen($1) + 1), $1);
+                                                                char* sz = PASM->ReflectionNotation($1);
+                                                                strcpy((char *)$$->getBuff((unsigned)strlen(sz) + 1), sz);
                                                                 $$->appendInt8(4);
                                                                 $$->appendInt32($3); }
                         ;
@@ -1252,14 +1357,45 @@ secAction               : REQUEST_                            { $$ = dclRequest;
                         | NONCASINHERITANCE_                  { $$ = dclNonCasInheritance; }
                         ;
 
-extSourceSpec           : _LINE int32 SQSTRING                { bExternSource = TRUE; nExtLine = $2; nExtCol=1;
-                                                                PASM->SetSourceFileName($3); delete $3;}
-                        | _LINE int32                         { bExternSource = TRUE; nExtLine = $2; nExtCol=1;}
-                        | _LINE int32 ':' int32 SQSTRING      { bExternSource = TRUE; nExtLine = $2; nExtCol=$4;
-                                                                PASM->SetSourceFileName($5); delete $5;}
-                        | _LINE int32 ':' int32               { bExternSource = TRUE; nExtLine = $2; nExtCol=$4;}
-                        | P_LINE int32 QSTRING                { bExternSource = TRUE; nExtLine = $2; nExtCol=1;
-                                                                PASM->SetSourceFileName($3); delete $3; }
+esHead                  : _LINE                               { nCurrPC = PASM->m_CurPC; bExternSource = TRUE;}
+                        | P_LINE                              { nCurrPC = PASM->m_CurPC; bExternSource = TRUE;}
+                        ;
+                        
+extSourceSpec           : esHead int32 SQSTRING               { nExtLine = nExtLineEnd = $2;
+                                                                nExtCol = 1; nExtColEnd  = 1;
+                                                                PASM->SetSourceFileName($3);}
+                        | esHead int32                        { nExtLine = nExtLineEnd = $2;
+                                                                nExtCol = 1; nExtColEnd  = 1; }
+                        | esHead int32 ':' int32 SQSTRING     { nExtLine = nExtLineEnd = $2; 
+                                                                nExtCol=$4; nExtColEnd = nExtCol;
+                                                                PASM->SetSourceFileName($5);}
+                        | esHead int32 ':' int32              { nExtLine = nExtLineEnd = $2; 
+                                                                nExtCol=$4; nExtColEnd = nExtCol;}
+                        | esHead int32 ':' int32 ',' int32 SQSTRING     
+                                                              { nExtLine = nExtLineEnd = $2; 
+                                                                nExtCol=$4; nExtColEnd = $6;
+                                                                PASM->SetSourceFileName($7);}
+                        | esHead int32 ':' int32 ',' int32     
+                                                              { nExtLine = nExtLineEnd = $2; 
+                                                                nExtCol=$4; nExtColEnd = $6; }
+                        | esHead int32 ',' int32 ':' int32 SQSTRING     
+                                                              { nExtLine = $2; nExtLineEnd = $4; 
+                                                                nExtCol=$6; nExtColEnd = nExtCol;
+                                                                PASM->SetSourceFileName($7);}
+                        | esHead int32 ',' int32 ':' int32     
+                                                              { nExtLine = $2; nExtLineEnd = $4; 
+                                                                nExtCol=$6; nExtColEnd = nExtCol; }
+                        | esHead int32 ',' int32 ':' int32 ',' int32 SQSTRING     
+                                                              { bExternSource = TRUE; 
+                                                                nExtLine = $2; nExtLineEnd = $4; 
+                                                                nExtCol=$6; nExtColEnd = $8;
+                                                                PASM->SetSourceFileName($9);}
+                        | esHead int32 ',' int32 ':' int32 ',' int32     
+                                                              { nExtLine = $2; nExtLineEnd = $4; 
+                                                                nExtCol=$6; nExtColEnd = $8; }
+                        | esHead int32 QSTRING                { nExtLine = nExtLineEnd = $2;
+                                                                nExtCol = 1; nExtColEnd  = 1;
+                                                                PASM->SetSourceFileName($3);}
                         ;
 
 fileDecl                : _FILE fileAttr name1 fileEntry hashHead bytes ')' fileEntry      
@@ -1447,8 +1583,8 @@ static Keywords keywords[] = {
 #define NEW_INLINE_NAMES
                 // The volatile instruction collides with the volatile keyword, so 
                 // we treat it as a keyword everywhere and modify the grammar accordingly (Yuck!) 
-#define OPDEF(c,s,pop,push,args,type,l,s1,s2,ctrl) { s, args, c },
-#define OPALIAS(alias_c, s, c) { s, NO_VALUE, c },
+#define OPDEF(c,s,pop,push,args,type,l,s1,s2,ctrl) { s, args, c},
+#define OPALIAS(alias_c, s, c) { s, NO_VALUE, c},
 #include "opcode.def"
 #undef OPALIAS
 #undef OPDEF
@@ -1458,8 +1594,6 @@ static Keywords keywords[] = {
 #include "il_kywd.h"
 #undef KYWD
 
-        // These are deprecated
-        { "float",                      FLOAT_ },
 };
 
 /********************************************************************************/
@@ -1473,30 +1607,46 @@ static int __cdecl keywordCmp(const void *op1, const void *op2)
 /* looks up the keyword 'name' of length 'nameLen' (name does not need to be 
    null terminated)   Returns 0 on failure */
 
-static int findKeyword(const char* name, size_t nameLen, Instr** value) 
+int findKeyword(const char* name, size_t nameLen, Instr** value) 
 {
     Keywords* low = keywords;
     Keywords* high = &keywords[sizeof(keywords) / sizeof(Keywords)];
 
     _ASSERTE (high > low);          // Table is non-empty
     for(;;) 
-        {
-        Keywords* mid = &low[(high - low) / 2];
+    {
+        Keywords* mid = &low[(high - low) >> 1];
 
                 // compare the strings
         int cmp = strncmp(name, mid->name, nameLen);
-        if (cmp == 0 && nameLen < strlen(mid->name)) --cmp;
+        if ((cmp == 0) && (nameLen < strlen(mid->name))) --cmp;
         if (cmp == 0)
         {
             //printf("Token '%s' = %d opcode = %d\n", mid->name, mid->token, mid->tokenVal);
             if (mid->tokenVal != NO_VALUE)
             {
-                if((*value = new Instr))
+                *value = PASM->GetInstr();
+                if(*value)
 				{
-                    (*value)->opcode = mid->tokenVal;
-                    (*value)->linenum = (bExternSource ? nExtLine : parser->curLine);
-                    (*value)->column = (bExternSource ? nExtCol : 1);
-                }
+					(*value)->opcode = mid->tokenVal;
+                    (*value)->pWriter = PASM->m_pSymDocument;
+                    if(bExternSource)
+                    {
+					    (*value)->linenum = nExtLine;
+					    (*value)->column = nExtCol;
+   					    (*value)->linenum_end = nExtLineEnd;
+					    (*value)->column_end = nExtColEnd;
+                        (*value)->pc = nCurrPC;
+                    }
+                    else
+                    {
+					    (*value)->linenum = parser->curLine;
+					    (*value)->column = 1;
+   					    (*value)->linenum_end = parser->curLine;
+					    (*value)->column_end = 1;
+                        (*value)->pc = PASM->m_CurPC;
+                    }
+				}
             }
             else *value = NULL;
 
@@ -1530,10 +1680,10 @@ static unsigned __int64 str2uint64(const char* str, const char** endStr, unsigne
         initialize = FALSE;
     }
     for(;;str++) 
-        {
+    {
         digit = digits[*str];
         if (digit >= radix) 
-                {
+        {
             *endStr = str;
             return(ret);
         }
@@ -1718,11 +1868,11 @@ Its_An_Id:
 
         if((yylval.string = new char[tokLen+1]))
 		{
-        memcpy(yylval.string, curTok, tokLen);
-        yylval.string[tokLen] = 0;
-        tok = (offsetDot == (size_t)(-1))? ID : DOTTEDNAME;
-        //printf("yylex: ID = '%s', curPos=0x%8.8X\n",yylval.string,curPos);
-    }
+			memcpy(yylval.string, curTok, tokLen);
+			yylval.string[tokLen] = 0;
+			tok = (offsetDot == (size_t)(-1))? ID : DOTTEDNAME;
+			//printf("yylex: ID = '%s', curPos=0x%8.8X\n",yylval.string,curPos);
+		}
 		else return BAD_LITERAL_;
     }
     else if (isdigit((*curPos)&0xFF) 
@@ -1742,11 +1892,11 @@ Its_An_Id:
         if (neg) curPos++;
 
         if (curPos[0] == '0' && curPos[1] != '.') 
-                {
+        {
             curPos++;
             radix = 8;
             if (*curPos == 'x' || *curPos == 'X') 
-                        {
+            {
                 curPos++;
                 radix = 16;
             }
@@ -1759,7 +1909,7 @@ Its_An_Id:
             if (neg) *yylval.int64 = -*yylval.int64;
         }
         if (radix == 10 && ((*curPos == '.' && curPos[1] != '.') || *curPos == 'E' || *curPos == 'e')) 
-                {
+        {
             yylval.float64 = new double(strtod(begNum, &curPos));
             if (neg) *yylval.float64 = -*yylval.float64;
             tok = FLOAT64;
@@ -1946,24 +2096,25 @@ static char* newString(char* str1)
 }
 
 /**************************************************************************/
-/* concatinate strings and release them */
+/* concatenate strings and release them */
 
-static char* newStringWDel(char* str1, char* str2, char* str3) 
+static char* newStringWDel(char* str1, char delimiter, char* str3) 
 {
-    size_t len = strlen(str1) + strlen(str2)+1;
+    size_t len1 = strlen(str1);
+    size_t len = len1+2;
     if (str3) len += strlen(str3);
     char* ret = new char[len];
     if(ret)
 	{
-    strcpy(ret, str1);
-    delete [] str1;
-    strcat(ret, str2);
-    delete [] str2;
-    if (str3)
-    {
-        strcat(ret, str3);
-        delete [] str3;
-    }
+		strcpy(ret, str1);
+		delete [] str1;
+        ret[len1] = delimiter;
+        ret[len1+1] = 0;
+		if (str3)
+		{
+			strcat(ret, str3);
+			delete [] str3;
+		}
 	}
     return(ret);
 }
@@ -2051,6 +2202,7 @@ AGAIN:
                 goto AGAIN;
 
         case ELEMENT_TYPE_VAR:
+        case ELEMENT_TYPE_MVAR:
                 CorSigUncompressData((PCCOR_SIGNATURE&) ptr);  // bound
                 break;
 
@@ -2066,6 +2218,17 @@ AGAIN:
                     }
                 }
                 break;
+
+        case ELEMENT_TYPE_WITH: 
+               {
+			       ptr = skipType(ptr);			// type constructor
+			       unsigned argCnt = CorSigUncompressData((PCCOR_SIGNATURE&) ptr);		// arg count
+			       while(argCnt > 0) {
+				       ptr = skipType(ptr);
+				       --argCnt;
+				   }
+			   }
+			   break;                        
 
         default:
         case ELEMENT_TYPE_SENTINEL              :
@@ -2110,29 +2273,30 @@ AsmParse::AsmParse(ReadStream* aIn, Assembler *aAssem)
     _ASSERTE(buffBase);
 	if(buffBase)
 	{
-    curTok = curPos = endPos = limit = buff = &buffBase[IN_OVERLAP];     // Offset it 
-    curLine = 1;
-    assem->m_ulCurLine = curLine;
-    assem->m_ulCurColumn = 1;
+		curTok = curPos = endPos = limit = buff = &buffBase[IN_OVERLAP];     // Offset it 
+		curLine = 1;
+		assem->m_ulCurLine = curLine;
+		assem->m_ulCurColumn = 1;
+        m_bOnUnicode = TRUE;
 
-	hstdout = GetStdHandle(STD_OUTPUT_HANDLE);
-	hstderr = GetStdHandle(STD_ERROR_HANDLE);
+		hstdout = GetStdHandle(STD_OUTPUT_HANDLE);
+		hstderr = GetStdHandle(STD_ERROR_HANDLE);
 
-    success = true; 
-    _ASSERTE(parser == 0);          // Should only be one parser instance at a time
+		success = true; 
+		_ASSERTE(parser == 0);          // Should only be one parser instance at a time
+    
+                // Resolve aliases
+                for (unsigned int i = 0; i < sizeof(keywords) / sizeof(Keywords); i++)
+                {
+                        if (keywords[i].token == NO_VALUE)
+                        keywords[i].token = keywords[keywords[i].tokenVal].token;
+                }
 
-    // Resolve aliases
-    for (unsigned int i = 0; i < sizeof(keywords) / sizeof(Keywords); i++)
-    {
-        if (keywords[i].token == NO_VALUE)
-            keywords[i].token = keywords[keywords[i].tokenVal].token;
-    }
-
-    // Sort the keywords for fast lookup 
-    qsort(keywords, sizeof(keywords) / sizeof(Keywords), sizeof(Keywords), keywordCmp);
-    parser = this;
-    //yyparse();
-}
+                // Sort the keywords for fast lookup 
+                qsort(keywords, sizeof(keywords) / sizeof(Keywords), sizeof(Keywords), keywordCmp);
+                parser = this;
+                //yyparse();
+	}
 	else
 	{
 		assem->report->error("Failed to allocate parsing buffer\n");
@@ -2148,7 +2312,7 @@ AsmParse::~AsmParse()
 }
 
 /**************************************************************************/
-DWORD IsItUnicode(CONST LPVOID pBuff, int cb, LPINT lpi)
+DWORD AsmParse::IsItUnicode(CONST LPVOID pBuff, int cb, LPINT lpi)
 {
 	if(*((WORD*)pBuff) == 0xFEFF)
 	{
@@ -2191,13 +2355,13 @@ char* AsmParse::fillBuff(char* pos)
 			g_uCodePage = CP_UTF8;
             if((readbuff = new char[iOrdered+2])) // buffer for reading Unicode chars
 			{
-			if(iOptions & IS_TEXT_UNICODE_SIGNATURE)
-				memcpy(readbuff,buff+2,iRead-2);   // only first time, next time it will be read into new buffer
+				if(iOptions & IS_TEXT_UNICODE_SIGNATURE)
+					memcpy(readbuff,buff+2,iRead-2);   // only first time, next time it will be read into new buffer
+				else
+					memcpy(readbuff,buff,iRead);   // only first time, next time it will be read into new buffer
+				if(assem->m_fReportProgress) printf("Source file is UNICODE\n\n");
+			}
 			else
-				memcpy(readbuff,buff,iRead);   // only first time, next time it will be read into new buffer
-			printf("Source file is UNICODE\n\n");
-		}
-		else
 				assem->report->error("Failed to allocate read buffer\n");
 		}
 		else
@@ -2207,10 +2371,10 @@ char* AsmParse::fillBuff(char* pos)
 			{
 				g_uCodePage = CP_UTF8;
 				curPos += 3;
-				printf("Source file is UTF-8\n\n");
+				if(assem->m_fReportProgress) printf("Source file is UTF-8\n\n");
 			}
 			else
-				printf("Source file is ANSI\n\n");
+				if(assem->m_fReportProgress) printf("Source file is ANSI\n\n");
 		}
 	}
 	else  iRead = in->read(readbuff, iOrdered);
@@ -2237,21 +2401,24 @@ char* AsmParse::fillBuff(char* pos)
 }
 
 /********************************************************************************/
-BinStr* AsmParse::MakeSig(unsigned callConv, BinStr* retType, BinStr* args) 
+BinStr* AsmParse::MakeSig(unsigned callConv, BinStr* retType, BinStr* args, int ntyargs) 
 {
+    _ASSERTE((ntyargs != 0) == ((callConv & IMAGE_CEE_CS_CALLCONV_GENERIC) != 0));
     BinStr* ret = new BinStr();
 	if(ret)
 	{
-    //if (retType != 0) 
-            ret->insertInt8(callConv); 
-    corEmitInt(ret, corCountArgs(args));
+		//if (retType != 0) 
+				ret->insertInt8(callConv);
+        if (ntyargs != 0)
+            corEmitInt(ret, ntyargs);
+		corEmitInt(ret, corCountArgs(args));
 
-    if (retType != 0) 
-        {
-        ret->append(retType); 
-        delete retType;
-    }
-    ret->append(args); 
+		if (retType != 0) 
+			{
+			ret->append(retType); 
+			delete retType;
+		}
+		ret->append(args); 
 	}
 	else
 		assem->report->error("\nOut of memory!\n");
@@ -2261,7 +2428,7 @@ BinStr* AsmParse::MakeSig(unsigned callConv, BinStr* retType, BinStr* args)
 }
 
 /********************************************************************************/
-BinStr* AsmParse::MakeTypeArray(BinStr* elemType, BinStr* bounds) 
+BinStr* AsmParse::MakeTypeArray(CorElementType kind, BinStr* elemType, BinStr* bounds) 
 {
     // 'bounds' is a binary buffer, that contains an array of 'struct Bounds' 
     struct Bounds {
@@ -2276,7 +2443,7 @@ BinStr* AsmParse::MakeTypeArray(BinStr* elemType, BinStr* bounds)
 
     BinStr* ret = new BinStr();
 
-    ret->appendInt8(ELEMENT_TYPE_ARRAY);
+    ret->appendInt8(kind);
     ret->append(elemType);
     corEmitInt(ret, boundsLen);                     // emit the rank
 
@@ -2313,17 +2480,15 @@ BinStr* AsmParse::MakeTypeArray(BinStr* elemType, BinStr* bounds)
 }
 
 /********************************************************************************/
-BinStr* AsmParse::MakeTypeClass(CorElementType kind, char* name) 
+BinStr* AsmParse::MakeTypeClass(CorElementType kind, mdToken tk) 
 {
 
     BinStr* ret = new BinStr();
     _ASSERTE(kind == ELEMENT_TYPE_CLASS || kind == ELEMENT_TYPE_VALUETYPE ||
                      kind == ELEMENT_TYPE_CMOD_REQD || kind == ELEMENT_TYPE_CMOD_OPT);
     ret->appendInt8(kind);
-    mdToken tk = PASM->ResolveClassRef(name,NULL);
     unsigned cnt = CorSigCompressToken(tk, ret->getBuff(5));
     ret->remove(5 - cnt);
-    delete [] name;
     return(ret);
 }
 /**************************************************************************/

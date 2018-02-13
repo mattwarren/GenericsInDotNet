@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -69,11 +74,13 @@ long BASENODE::GetOperatorToken (long iOp)
 
 HRESULT BASENODE::AppendNameText (CStringBuilder &sb, ICSNameTable *pNameTable)
 {
-    if (this->kind == NK_NAME)
+    if (this->IsAnyName())
     {
-        if (pNameTable != NULL && pNameTable->IsKeyword (this->asNAME()->pName, NULL) == S_OK)
+        if (pNameTable != NULL && pNameTable->IsKeyword (this->asANYNAME()->pName, NULL) == S_OK)
             sb += L"@";
-        sb += this->asNAME()->pName->text;
+        sb += this->asANYNAME()->pName->text;
+        if (this->kind == NK_GENERICNAME)
+            AppendParametersToKey(this->asGENERICNAME()->pParams, sb);
         return S_OK;
     }
 
@@ -81,9 +88,7 @@ HRESULT BASENODE::AppendNameText (CStringBuilder &sb, ICSNameTable *pNameTable)
     {
         this->asDOT()->p1->AppendNameText (sb, pNameTable);
         sb += L".";
-        if (pNameTable != NULL && pNameTable->IsKeyword (this->asDOT()->p2->asNAME()->pName, NULL) == S_OK)
-            sb += L"@";
-        sb += this->asDOT()->p2->asNAME()->pName->text;
+        this->asDOT()->p2->AppendNameText (sb, pNameTable);
         return S_OK;
     }
 
@@ -126,6 +131,16 @@ HRESULT BASENODE::AppendTypeText (CStringBuilder &sb, ICSNameTable *pNameTable)
             sb += L"@";
 
         sb += pName->text;
+        if (this->kind == NK_DELEGATE) {
+            BASENODE *pTypeParams = this->asDELEGATE()->pTypeParams;
+            if (pTypeParams)
+                AppendParametersToKey(pTypeParams, sb);
+        }
+        else {
+            BASENODE *pTypeParams = this->asAGGREGATE()->pTypeParams;
+            AppendParametersToKey(pTypeParams, sb);
+        }
+ 
         hr = S_OK;
     }
 

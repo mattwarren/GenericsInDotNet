@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -76,6 +81,8 @@ TIMERID(TIME_IMI_GETCUSTOMATTRIBUTEPROPS,       "IMetadataImport::GetCustomAttri
 TIMERID(TIME_IMI_ENUMEVENTS,                    "IMetadataImport::EnumEvents",              2)
 TIMERID(TIME_IMI_GETEVENTPROPS,                 "IMetadataImport::GetEventProps",           2)
 TIMERID(TIME_IMI_GETNESTEDCLASSPROPS,           "IMetadataImport::GetNestedClassProps",     2)
+TIMERID(TIME_IMI_ENUMFORMALTYPARS,              "IMetadataImport::EnumFormalTyPars",        2)
+TIMERID(TIME_IMI_GETFORMALTYPARPROPS,           "IMetadataImport::GetFormalTyParProps",     2)
 TIMERID(TIME_IMAI_ENUMFILES,                    "IMetadataAssemblyImport::EnumFiles",       2)
 TIMERID(TIME_IMAI_GETFILEPROPS,                 "IMetadataAssemblyImport::GetFileProps",    2)
 TIMERID(TIME_IMAI_ENUMCOMTYPES,                 "IMetadataAssemblyImport::EnumComTypes",    2)
@@ -110,9 +117,13 @@ TIMERID(TIME_IME_SETPROPERTYPROPS,              "IMetaDataEmit::SetPropertyProps
 TIMERID(TIME_IME_SETNESTEDCLASSPROPS,           "IMetaDataEmit::SetNestedClassProps",       3)
 TIMERID(TIME_IME_DEFINENESTEDTYPE,              "IMetaDataEmit::DefineNestedType",          3)
 TIMERID(TIME_IME_GETTOKENFROMTYPESPEC,          "IMetaDataEmit::GetTokenFromTypeSpec",      3)
+TIMERID(TIME_IME_DEFINEOPENTOKEN,               "IMetaDataEmit::DefineOpenToken",           3)
+TIMERID(TIME_IME_DEFINEMETHODINSTANTIATION,     "IMetaDataEmit::DefineMethodInstantiation", 3)
 TIMERID(TIME_IME_DEFINEEVENT,                   "IMetaDataEmit::DefineEvent",               3)
 TIMERID(TIME_IME_TRANSLATESIGWITHSCOPE,         "IMetaDataEmit::TranslateSigWithScope",     3)
 TIMERID(TIME_IME_SETMETHODIMPLFLAGS,            "IMetaDataEmit::SetMethodImplFlags",        3)
+TIMERID(TIME_IME_SETMETHODTYPARS,               "IMetaDataEmit::SetMethodTyPars",           3)
+TIMERID(TIME_IME_SETTYPEDEFTYPARS,              "IMetaDataEmit::SetTypeDefTyPars",          3)
 TIMERID(TIME_IME_SETEVENTPROPS,                 "IMetaDataEmit::SetEventProps",             3)
 TIMERID(TIME_IME_SETMETHODPROPS,                "IMetaDataEmit::SetMethodProps",            3)
 TIMERID(TIME_IME_DELETECLASSLAYOUT,             "IMetaDataEmit::DeleteClassLayout",         3)

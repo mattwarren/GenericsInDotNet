@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -19,18 +24,8 @@
 #include <palstartupw.h>
 
 
-WCHAR *g_wzResourceFile = NULL;
-WCHAR *g_wzKeySourceName = NULL;
 
-bool OnErrGo = false;
-bool bClock = false;
-DWORD       cBegin=0,cEnd=0,
-			cParsBegin=0,cParsEnd=0,
-			cMDEmitBegin=0,cMDEmitEnd=0,
-			cMDEmit1=0,cMDEmit2=0,cMDEmit3=0,cMDEmit4=0,
-			cRef2DefBegin=0,cRef2DefEnd=0,
-			cFilegenBegin=0,cFilegenEnd=0;
-extern unsigned int g_uCodePage;
+
 WCHAR* EqualOrColon(WCHAR* szArg)
 {
 	WCHAR* pchE = wcschr(szArg,L'=');
@@ -42,14 +37,15 @@ WCHAR* EqualOrColon(WCHAR* szArg)
 	return ret;
 }
 
-DWORD	g_dwSubsystem=0,g_dwComImageFlags=0,g_dwFileAlignment=0;
-size_t	g_stBaseAddress=0;
-BOOL	g_bOnUnicode;
+static DWORD	g_dwSubsystem=0,g_dwComImageFlags=0,g_dwFileAlignment=0;
+static size_t	g_stBaseAddress=0;
+static BOOL	    g_bOnUnicode;
 
 extern "C" int _cdecl wmain(int argc, WCHAR **argv)
 {
     char        szInputFilename[MAX_FILENAME_LENGTH*3];
-	WCHAR		wzOutputFilename[MAX_FILENAME_LENGTH], wzInputFilename[MAX_FILENAME_LENGTH];
+	WCHAR		wzInputFilename[MAX_FILENAME_LENGTH];
+	WCHAR		wzOutputFilename[MAX_FILENAME_LENGTH];
 	WCHAR		*pwzInputFiles[1024];
     int         i, NumFiles = 0;
     bool	    IsDLL = false, IsOBJ = false;
@@ -61,7 +57,13 @@ extern "C" int _cdecl wmain(int argc, WCHAR **argv)
 	bool		bLogo = TRUE;
 	BOOL		bNoDebug = TRUE;
 
-	cBegin = GetTickCount();
+    unsigned    uCodePage;
+
+    bool bClock = false;
+    Clockwork   cw;
+
+    memset(&cw,0,sizeof(Clockwork));
+	cw.cBegin = GetTickCount();
 
 	g_bOnUnicode = OnUnicodeSystem();
 	memset(wzOutputFilename,0,sizeof(wzOutputFilename));
@@ -91,10 +93,11 @@ extern "C" int _cdecl wmain(int argc, WCHAR **argv)
 
       exit(1);
     }
-
 	g_uCodePage = g_bOnUnicode ? CP_UTF8 : CP_ACP;
     if((pAsm = new Assembler()))
 	{
+        uCodePage = g_bOnUnicode ? CP_UTF8 : CP_ACP;
+        pAsm->SetCodePage(uCodePage);
 		if(pAsm->Init())
 		{
 			pAsm->SetStdMapping(1);
@@ -104,7 +107,7 @@ extern "C" int _cdecl wmain(int argc, WCHAR **argv)
 				if((argv[i][0] == L'/') || (argv[i][0] == L'-'))
 				{
 					memset(szOpt,0,sizeof(szOpt));
-					WszWideCharToMultiByte(g_uCodePage,0,&argv[i][1],10,szOpt,sizeof(szOpt),NULL,NULL);
+					WszWideCharToMultiByte(uCodePage,0,&argv[i][1],10,szOpt,sizeof(szOpt),NULL,NULL);
 					szOpt[3] = 0;
 					if (!_stricmp(szOpt,"NOA"))
 					{
@@ -131,6 +134,7 @@ extern "C" int _cdecl wmain(int argc, WCHAR **argv)
 					else if (!_stricmp(szOpt, "CLO"))
 					{ 
 					  bClock = true;
+                      pAsm->SetClock(&cw);
 					}
 					else if (!_stricmp(szOpt, "DLL"))
 					{ 
@@ -142,7 +146,7 @@ extern "C" int _cdecl wmain(int argc, WCHAR **argv)
 					}
 					else if (!_stricmp(szOpt, "ERR"))
 					{ 
-					  OnErrGo = true;
+					  pAsm->OnErrGo = true;
 					}
 					else if (!_stricmp(szOpt, "EXE"))
 					{
@@ -150,13 +154,13 @@ extern "C" int _cdecl wmain(int argc, WCHAR **argv)
 					}
 					else if (!_stricmp(szOpt, "RES"))
 					{
-						if(g_wzResourceFile==NULL)
+						if(pAsm->m_wzResourceFile==NULL)
 						{
 							WCHAR *pStr = EqualOrColon(argv[i]);
 							if(pStr == NULL) goto ErrorExit;
 							for(pStr++; *pStr == L' '; pStr++); //skip the blanks
 							if(wcslen(pStr)==0) goto ErrorExit; //if no file name
-							g_wzResourceFile = pStr;
+							pAsm->m_wzResourceFile = pStr;
 						}
 						else
 							printf("Multiple resource files not allowed. Option %ls skipped\n",argv[i]);
@@ -167,7 +171,7 @@ extern "C" int _cdecl wmain(int argc, WCHAR **argv)
 						if(pStr == NULL) goto ErrorExit;
 						for(pStr++; *pStr == L' '; pStr++); //skip the blanks
 						if(wcslen(pStr)==0) goto ErrorExit; //if no file name
-						g_wzKeySourceName = pStr;
+						pAsm->m_wzKeySourceName = pStr;
 					}
 					else if (!_stricmp(szOpt, "OUT"))
 					{
@@ -231,7 +235,7 @@ AssumeFileName:
 					if(NumFiles == 1)
 					{
 						memset(szInputFilename,0,sizeof(szInputFilename));
-						WszWideCharToMultiByte(g_uCodePage,0,argv[i],-1,szInputFilename,MAX_FILENAME_LENGTH*3-1,NULL,NULL);
+						WszWideCharToMultiByte(uCodePage,0,argv[i],-1,szInputFilename,MAX_FILENAME_LENGTH*3-1,NULL,NULL);
 						size_t j = strlen(szInputFilename);
 						do
 						{
@@ -270,7 +274,9 @@ AssumeFileName:
 			//------------ Assembler initialization done. Now, to business -----------------------
             if((pParser = new AsmParse(NULL, pAsm)))
 			{
-				g_uCodePage = g_bOnUnicode ? CP_UTF8 : CP_ACP;
+				uCodePage = g_bOnUnicode ? CP_UTF8 : CP_ACP;
+                pAsm->SetCodePage(uCodePage);
+                pParser->SetOnUnicode(g_bOnUnicode);
 				//======================================================================
 				if(bLogo)
 				{
@@ -282,23 +288,20 @@ AssumeFileName:
 				pAsm->SetOBJ(IsOBJ);
 				wcscpy(pAsm->m_wzOutputFileName,wzOutputFilename);
 				strcpy(pAsm->m_szSourceFileName,szInputFilename);
-				if(g_dwSubsystem)		pAsm->m_dwSubsystem = g_dwSubsystem;
-				if(g_dwComImageFlags)	pAsm->m_dwComImageFlags = g_dwComImageFlags;
-				if(g_dwFileAlignment)	pAsm->m_dwFileAlignment = g_dwFileAlignment;
-				if(g_stBaseAddress)		pAsm->m_stBaseAddress = g_stBaseAddress;
 
 				if (SUCCEEDED(pAsm->InitMetaData()))
 				{
 					int iFile;
 					BOOL fAllFilesPresent = TRUE;
-					if(bClock) cParsBegin = GetTickCount();
+					if(bClock) cw.cParsBegin = GetTickCount();
 					for(iFile = 0; iFile < NumFiles; iFile++)
 					{
-						g_uCodePage = g_bOnUnicode ? CP_UTF8 : CP_ACP;
+						uCodePage = g_bOnUnicode ? CP_UTF8 : CP_ACP;
+                        pAsm->SetCodePage(uCodePage);
 						if(iFile) // for the first file, it's already done
 						{
 							memset(szInputFilename,0,sizeof(szInputFilename));
-							WszWideCharToMultiByte(g_uCodePage,0,pwzInputFiles[iFile],-1,szInputFilename,MAX_FILENAME_LENGTH*3-1,NULL,NULL);
+							WszWideCharToMultiByte(uCodePage,0,pwzInputFiles[iFile],-1,szInputFilename,MAX_FILENAME_LENGTH*3-1,NULL,NULL);
 							size_t j = strlen(szInputFilename);
 							do
 							{
@@ -312,26 +315,28 @@ AssumeFileName:
 							}
 							while(j);
 						}
-						pParser->msg("\nAssembling '%s' ", szInputFilename);
-						if(pAsm->m_fCPlusPlus)	pParser->msg(" C++");
-						if(pAsm->m_fWindowsCE)	pParser->msg(" WINCE");
-						if(!pAsm->m_fAutoInheritFromObject)	pParser->msg(" NOAUTOINHERIT");
-						pParser->msg(pAsm->m_fGenerateListing ? ", with listing file," : ", no listing file,");
-						pParser->msg(IsDLL ? " to DLL" : (IsOBJ? " to OBJ" : " to EXE"));
-						//======================================================================
-						if (pAsm->m_fStdMapping == FALSE)
-							pParser->msg(", with REFERENCE mapping");
-
-						{
-							char szOutputFilename[MAX_FILENAME_LENGTH*3];
-							memset(szOutputFilename,0,sizeof(szOutputFilename));
-							WszWideCharToMultiByte(g_uCodePage,0,wzOutputFilename,-1,szOutputFilename,MAX_FILENAME_LENGTH*3-1,NULL,NULL);
-							pParser->msg(" --> '%s'\n", szOutputFilename);
-						}
+                        if(pAsm->m_fReportProgress)
+                        {
+    						pParser->msg("\nAssembling '%s' ", szInputFilename);
+    						if(pAsm->m_fCPlusPlus)	pParser->msg(" C++");
+    						if(pAsm->m_fWindowsCE)	pParser->msg(" WINCE");
+    						if(!pAsm->m_fAutoInheritFromObject)	pParser->msg(" NOAUTOINHERIT");
+    						pParser->msg(pAsm->m_fGenerateListing ? ", with listing file," : ", no listing file,");
+    						pParser->msg(IsDLL ? " to DLL" : (IsOBJ? " to OBJ" : " to EXE"));
+    						//======================================================================
+    						if (pAsm->m_fStdMapping == FALSE)
+    							pParser->msg(", with REFERENCE mapping");
+    
+    						{
+    							char szOutputFilename[MAX_FILENAME_LENGTH*3];
+    							memset(szOutputFilename,0,sizeof(szOutputFilename));
+    							WszWideCharToMultiByte(uCodePage,0,wzOutputFilename,-1,szOutputFilename,MAX_FILENAME_LENGTH*3-1,NULL,NULL);
+    							pParser->msg(" --> '%s'\n", szOutputFilename);
+    						}
+                        }
 
 						if(g_bOnUnicode)
 						{
-							memset(wzInputFilename,0,sizeof(wzInputFilename));
 							WszMultiByteToWideChar(CP_UTF8,0,szInputFilename,-1,wzInputFilename,MAX_FILENAME_LENGTH);
 							pIn = new FileReadStream(wzInputFilename);
 						}
@@ -352,11 +357,14 @@ AssumeFileName:
 						}
 						if(pIn) delete pIn;
 					} // end for(iFile)
-					if(bClock) cParsEnd = GetTickCount();
-					if ((pParser->Success() && fAllFilesPresent) || OnErrGo)
+					if(bClock) cw.cParsEnd = GetTickCount();
+					if ((pParser->Success() && fAllFilesPresent) || pAsm->OnErrGo)
 					{
 						HRESULT hr;
-						//g_uCodePage = g_bOnUnicode ? CP_UTF8 : CP_ACP;
+                        if(g_dwSubsystem)		pAsm->m_dwSubsystem = g_dwSubsystem;
+                        if(g_dwComImageFlags)	pAsm->m_dwComImageFlags = g_dwComImageFlags;
+                        if(g_dwFileAlignment)	pAsm->m_dwFileAlignment = g_dwFileAlignment;
+                        if(g_stBaseAddress)		pAsm->m_stBaseAddress = g_stBaseAddress;
 						if(FAILED(hr=pAsm->CreatePEFile(wzOutputFilename))) 
 							pParser->msg("Could not create output file, error code=0x%08X\n",hr);
 						else
@@ -365,11 +373,11 @@ AssumeFileName:
 							else
 							{
 								pParser->msg("Output file contains errors\n");
-								if(OnErrGo) exitval = 0;
+								if(pAsm->OnErrGo) exitval = 0;
 							}
 							if(exitval == 0) // Write the output file
 							{
-								if(bClock) cFilegenEnd = GetTickCount();
+								if(bClock) cw.cFilegenEnd = GetTickCount();
 								if(pAsm->m_fReportProgress) pParser->msg("Writing %s file\n", pAsm->m_fOBJ ? "COFF" : "PE");
 								// Generate the file
 								if (FAILED(hr = pAsm->m_pCeeFileGen->GenerateCeeFile(pAsm->m_pCeeFile)))
@@ -387,7 +395,7 @@ AssumeFileName:
                                         pParser->msg("Failed to strong name sign output file, error code=0x%08X\n",hr);
                                     }
                                 }
-								if(bClock) cEnd = GetTickCount();
+								if(bClock) cw.cEnd = GetTickCount();
 							}
 
 						}
@@ -418,22 +426,24 @@ AssumeFileName:
 	}
     if (exitval == 0)
 	{
-        printf("Operation completed successfully\n");
+        if(pAsm->m_fReportProgress) printf("Operation completed successfully\n");
 		if(bClock)
 		{
-			printf("Timing (msec): Total run               %d\n",(cEnd-cBegin));
-			printf("               Startup                 %d\n",(cParsBegin-cBegin));
-			printf("               Parsing                 %d\n",(cParsEnd - cParsBegin));
-			printf("               Emitting MD             %d\n",(cMDEmitEnd - cMDEmitBegin));
-			printf("                - global fixups        %d\n",(cMDEmit1 - cMDEmitBegin));
-			printf("                - SN sig alloc         %d\n",(cMDEmit2 - cMDEmit1));
-			printf("                - check local TypeRefs %d\n",(cMDEmit3 - cMDEmit2));
-			printf("                - emit members         %d\n",(cMDEmit4 - cMDEmit3));
-			printf("                - emit MethodImpls     %d\n",(cMDEmitEnd - cMDEmit4));
-			printf("               Ref to Def resolution   %d\n",(cRef2DefEnd - cRef2DefBegin));
-			printf("               Fixup and linking       %d\n",(cFilegenBegin - cRef2DefEnd));
-			printf("               CEE file generation     %d\n",(cFilegenEnd - cFilegenBegin));
-			printf("               PE file writing         %d\n",(cEnd - cFilegenEnd));
+			printf("Timing (msec): Total run                 %d\n",(cw.cEnd-cw.cBegin));
+			printf("               Startup                   %d\n",(cw.cParsBegin-cw.cBegin));
+			printf("               - MD initialization       %d\n",(cw.cMDInitEnd - cw.cMDInitBegin));
+			printf("               Parsing                   %d\n",(cw.cParsEnd - cw.cParsBegin));
+			printf("               Emitting MD               %d\n",(cw.cMDEmitEnd - cw.cRef2DefEnd)+(cw.cRef2DefBegin - cw.cMDEmitBegin));
+			//printf("                - global fixups         %d\n",(cw.cMDEmit1 - cw.cMDEmitBegin));
+			printf("                - SN sig alloc           %d\n",(cw.cMDEmit2 - cw.cMDEmitBegin));
+			printf("                - Classes,Methods,Fields %d\n",(cw.cRef2DefBegin - cw.cMDEmit2));
+			printf("                - Events,Properties      %d\n",(cw.cMDEmit3 - cw.cRef2DefEnd));
+			printf("                - MethodImpls            %d\n",(cw.cMDEmit4 - cw.cMDEmit3));
+			printf("                - Manifest,CAs           %d\n",(cw.cMDEmitEnd - cw.cMDEmit4));
+			printf("               Ref to Def resolution     %d\n",(cw.cRef2DefEnd - cw.cRef2DefBegin));
+			printf("               Fixup and linking         %d\n",(cw.cFilegenBegin - cw.cMDEmitEnd));
+			printf("               CEE file generation       %d\n",(cw.cFilegenEnd - cw.cFilegenBegin));
+			printf("               PE file writing           %d\n",(cw.cEnd - cw.cFilegenEnd));
 		}
 	}
     else

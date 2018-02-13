@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -181,7 +186,7 @@ private:
 
     int VWrite(char *str, ...);
     int VWriteLine(char *str, ...);
-    int	VWrite(char *str, va_list marker);
+    int VWriteMarker(char *str, va_list marker);
     
     void InitSigBuffer();
     HRESULT AddToSigBuffer(char *string);

@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -126,12 +131,11 @@ FCIMPL1(ReflectClassBaseObject*, ObjectNative::GetClass, Object* pThis)
     HELPER_METHOD_FRAME_BEGIN_RET_ATTRIB_2(Frame::FRAME_ATTR_RETURNOBJ, objRef, refClass);
     
     objRef = ObjectToOBJECTREF(pThis);
-    EEClass* pClass = objRef->GetTrueMethodTable()->GetClass();
+    MethodTable *pMT = objRef->GetTrueMethodTable();
 
     // Arrays of Pointers are implemented by reflection,
     //  defer to COMClass for them.
-    if (pClass->IsArrayClass()) 
-    {
+    if (pMT->GetClass()->IsArrayClass()) {
         // This code is essentially duplicated in GetExistingClass.
         ArrayBase* array = (ArrayBase*) OBJECTREFToObject(objRef);
         TypeHandle arrayType = array->GetTypeHandle();
@@ -143,7 +147,7 @@ FCIMPL1(ReflectClassBaseObject*, ObjectNative::GetClass, Object* pThis)
     }
     else
     {
-        refClass = (REFLECTCLASSBASEREF) pClass->GetExposedClassObject();
+        refClass = (REFLECTCLASSBASEREF) pMT->GetExposedClassObject();
     }
 
     _ASSERTE(refClass != NULL);
@@ -279,14 +283,14 @@ FCIMPL1(Object*, ObjectNative::GetExistingClass, Object* thisRef) {
         FCThrow(kNullReferenceException);
 
     
-    EEClass* pClass = thisRef->GetTrueMethodTable()->GetClass();
+    MethodTable *pMT = thisRef->GetTrueMethodTable();
 
     // For marshalbyref classes, let's just punt for the moment
-    if (pClass->IsMarshaledByRef())
+    if (pMT->GetClass()->IsMarshaledByRef())
         return 0;
 
     OBJECTREF refClass;
-    if (pClass->IsArrayClass()) {
+    if (pMT->GetClass()->IsArrayClass()) {
         // This code is essentially a duplicate of the code in GetClass, done for perf reasons.
         ArrayBase* array = (ArrayBase*) thisRef;
         TypeHandle arrayType;
@@ -300,7 +304,7 @@ FCIMPL1(Object*, ObjectNative::GetExistingClass, Object* thisRef) {
         HELPER_METHOD_FRAME_END();
     }
     else 
-        refClass = pClass->GetExistingExposedClassObject();
+        refClass = pMT->GetExistingExposedClassObject();
     return OBJECTREFToObject(refClass);
 }
 FCIMPLEND

@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -28,7 +33,7 @@
 // object. (Note: we don't need a specific typedef for the exception,
 // since knowing that its an object is enough.)
 //
-static const COR_SIGNATURE g_elementTypeClass = ELEMENT_TYPE_CLASS;
+static const CorElementType g_elementTypeObject = ELEMENT_TYPE_OBJECT;
 
 /* ------------------------------------------------------------------------- *
  * Managed Thread classes
@@ -272,12 +277,14 @@ HRESULT CordbThread::GetCurrentException(ICorDebugValue **ppExceptionObject)
 
     if (module == NULL)
         goto Exit;
+    
+    CordbType *typ;
+    hr = CordbType::MkNullaryType(module->GetAppDomain(), g_elementTypeObject, &typ);
+    if (FAILED(hr))
+        return hr;
 
     hr = CordbValue::CreateValueByType(  GetAppDomain(),
-                                         module,
-                                         sizeof(g_elementTypeClass),
-                                         &g_elementTypeClass,
-                                         NULL,
+                                         typ,
 #ifndef RIGHT_SIDE_ONLY
                                          (REMOTE_PTR) pThread->GetThrowableAsHandle(),
 #else
@@ -579,7 +586,8 @@ HRESULT CordbThread::CreateEval(ICorDebugEval **ppEval)
 
 HRESULT CordbThread::RefreshStack(void)
 {
-    HRESULT hr = S_OK;
+	CordbCode *pCode = NULL;
+	HRESULT hr = S_OK;
     unsigned int totalTraceCount = 0;
     unsigned int inProgressFrameCount = 0; //so we can CleanupStack w/o bombing
     unsigned int inProgressChainCount = 0; //so we can CleanupStack w/o bombing
@@ -588,8 +596,6 @@ HRESULT CordbThread::RefreshStack(void)
     CordbNativeFrame **f = NULL;
     CordbChain **c = NULL;
     CordbChain *chain = NULL;
-    CordbCode* pCode = NULL;
-
 
 #ifdef RIGHT_SIDE_ONLY
     if (m_framesFresh)
@@ -773,82 +779,26 @@ HRESULT CordbThread::RefreshStack(void)
             else
             {
                 DebuggerIPCE_FuncData* currentFuncData = &currentSTRData->v.funcData;
+                DebuggerIPCE_JITFuncData* currentJITFuncData = &currentSTRData->v.jitFuncData;
 
                 // Find the CordbModule for this function. Note: this check is actually appdomain independent.
                 CordbAppDomain *pAppDomain = GetAppDomain();
-                CordbModule* pFunctionModule = pAppDomain->LookupModule(currentFuncData->funcDebuggerModuleToken);
-                _ASSERTE(pFunctionModule != NULL);
 
-                // Does this function already exist?
-                CordbFunction *pFunction = NULL;
-            
-                pFunction = pFunctionModule->LookupFunction(currentFuncData->funcMetadataToken);
+				CordbFunction *pFunction = NULL;
+				if (FAILED(hr = CordbFunction::LookupOrCreateFromFuncData(m_process, pAppDomain, currentFuncData, &pFunction)))
+				{
+                    goto exit;
+				}
 
-                if (pFunction == NULL)
-                {
-                    // New function. Go ahead and create it.
-                    hr = pFunctionModule->CreateFunction(currentFuncData->funcMetadataToken,
-                                                         currentFuncData->funcRVA,
-                                                         &pFunction);
-
-                    _ASSERTE( SUCCEEDED(hr) || !"FAILURE" );
-                    if (!SUCCEEDED(hr))
-                        goto exit;
-
-                    pFunction->SetLocalVarToken(currentFuncData->localVarSigToken);
-                }
-            
-                _ASSERTE(pFunction != NULL);
-
-                // Does this function have a class?
-                if ((pFunction->m_class == NULL) && (currentFuncData->classMetadataToken != mdTypeDefNil))
-                {
-                    // No. Go ahead and create the class.
-                    CordbAppDomain *pAppDomain = GetAppDomain();
-                    CordbModule* pClassModule = pAppDomain->LookupModule(currentFuncData->funcDebuggerModuleToken);
-                    _ASSERTE(pClassModule != NULL);
-
-                    // Does the class already exist?
-                    CordbClass* pClass = pClassModule->LookupClass(currentFuncData->classMetadataToken);
-
-                    if (pClass == NULL)
-                    {
-                        // New class. Create it now.
-                        hr = pClassModule->CreateClass(currentFuncData->classMetadataToken, &pClass);
-                        _ASSERTE(SUCCEEDED(hr) || !"FAILURE");
-
-                        if (!SUCCEEDED(hr))
-                            goto exit;
-                    }
-                
-                    _ASSERTE(pClass != NULL);
-                    pFunction->m_class = pClass;
-                }
-
-                if (FAILED(hr = pFunction->GetCodeByVersion(FALSE, bNativeCode, currentFuncData->nativenVersion, &pCode)))
-                {
+				CordbJITInfo *pInfo;
+				if (FAILED(hr = CordbJITInfo::LookupOrCreateFromJITData(pFunction,currentFuncData, currentJITFuncData, &pInfo)))
+				{
                     _ASSERTE( !"FAILURE" );
                     goto exit;
                 }
 
-                if (pCode == NULL)
-                {
-                    LOG((LF_CORDB,LL_INFO10000,"R:CT::RSCreating code w/ ver:0x%x, token:0x%x\n",
-                         currentFuncData->nativenVersion,
-                         currentFuncData->CodeVersionToken));
+				_ASSERTE(pInfo != NULL);
 
-                    hr = pFunction->CreateCode(bNativeCode,
-                                               currentFuncData->nativeStartAddressPtr,
-                                               currentFuncData->nativeSize,
-                                               &pCode, currentFuncData->nativenVersion,
-                                               currentFuncData->CodeVersionToken,
-                                               currentFuncData->ilToNativeMapAddr,
-                                               currentFuncData->ilToNativeMapSize);
-                    
-                    _ASSERTE( SUCCEEDED(hr) || !"FAILURE" );
-                    if (!SUCCEEDED(hr))
-                        goto exit;
-                }
 
                 // Lookup the appdomain that the thread was in when it was executing code for this frame. We pass this
                 // to the frame when we create it so we can properly resolve locals in that frame later.
@@ -859,9 +809,8 @@ HRESULT CordbThread::RefreshStack(void)
                 // Create the native frame.
                 CordbNativeFrame* nativeFrame = new CordbNativeFrame(chain,
                                                                      currentSTRData->fp,
-                                                                     pFunction,
-                                                                     pCode,
-                                                                     (UINT_PTR) currentFuncData->nativeOffset,
+                                                                     pInfo,
+                                                                     (UINT_PTR) currentJITFuncData->nativeOffset,
                                                                      &(currentSTRData->rd),
                                                                      currentSTRData->quicklyUnwound,
                                                                      (CordbFrame**)f - chain->m_start,
@@ -873,11 +822,6 @@ HRESULT CordbThread::RefreshStack(void)
                     hr = E_OUTOFMEMORY;
                     goto exit;
                 }
-                else if (pCode) 
-                {
-                    pCode->Release();
-                    pCode = NULL;
-                }
 
                 // Addref for the thread
                 nativeFrame->AddRef();
@@ -886,9 +830,11 @@ HRESULT CordbThread::RefreshStack(void)
                 *f++ = nativeFrame;
                 inProgressFrameCount++;
 
-                if (currentSTRData->v.ILIP != NULL)
+		// Step 2. Find or create the IL Code, and the JITILFrame.
+		if (currentSTRData->v.ILIP != NULL)
                 {
-                    if (FAILED(hr=pFunction->GetCodeByVersion(FALSE, bILCode,
+
+                    if (FAILED(hr=pFunction->GetCodeByVersion(FALSE, 
                         currentFuncData->ilnVersion, &pCode)))
                     {
                         _ASSERTE( !"FAILURE" );
@@ -900,29 +846,29 @@ HRESULT CordbThread::RefreshStack(void)
                         LOG((LF_CORDB,LL_INFO10000,"R:CT::RSCreating code"
                             "w/ ver:0x%x,token:0x%x\n", 
                             currentFuncData->ilnVersion,
-                            currentFuncData->CodeVersionToken));
+                            currentJITFuncData->nativeCodeVersionToken));
                             
                         hr = pFunction->CreateCode(
-                                               bILCode,
                                                currentFuncData->ilStartAddress,
                                                currentFuncData->ilSize,
                                                &pCode, currentFuncData->ilnVersion,
-                                               currentFuncData->CodeVersionToken,
-                                               NULL, 0);
+                                               currentFuncData->CodeVersionToken);
                         _ASSERTE( SUCCEEDED(hr) || !"FAILURE" );
                         if (!SUCCEEDED(hr))
                             goto exit;
                     }
 
-                    CordbJITILFrame* JITILFrame =
+
+					CordbJITILFrame* JITILFrame =
                       new CordbJITILFrame(nativeFrame, pCode,
                                           (UINT_PTR) currentSTRData->v.ILIP
                                           - (UINT_PTR) currentFuncData->ilStartAddress,
                                           currentSTRData->v.mapping,
-                                          currentFuncData->fVarArgs,
-                                          currentFuncData->rpSig,
-                                          currentFuncData->cbSig,
-                                          currentFuncData->rpFirstArg);
+                                          currentSTRData->v.fVarArgs,
+                                          currentSTRData->v.rpSig,
+                                          currentSTRData->v.cbSig,
+                                          currentSTRData->v.rpFirstArg, 
+					  currentJITFuncData->methodDesc);
 
                     if (!JITILFrame)
                     {
@@ -1046,7 +992,7 @@ const bool SetIP_fNative = FALSE;
 HRESULT CordbThread::SetIP( bool fCanSetIPOnly,
                             REMOTE_PTR debuggerModule, 
                             mdMethodDef mdMethod, 
-                            void *versionToken, 
+                            void *nativeCodeVersionToken, 
                             SIZE_T offset, 
                             bool fIsIL)
 {
@@ -1069,15 +1015,15 @@ HRESULT CordbThread::SetIP( bool fCanSetIPOnly,
     event->SetIP.debuggerThreadToken = m_debuggerThreadToken;
     event->SetIP.debuggerModule = debuggerModule;
     event->SetIP.mdMethod = mdMethod;
-    event->SetIP.versionToken = versionToken;
+    event->SetIP.nativeCodeVersionToken = nativeCodeVersionToken;
     event->SetIP.offset = offset;
     event->SetIP.fIsIL = fIsIL;
     event->SetIP.firstExceptionHandler = m_firstExceptionHandler;
     
     LOG((LF_CORDB, LL_INFO10000, "[%x] CT::SIP: Info:thread:0x%x"
-        "mod:0x%x  MethodDef:0x%x VerTok:0x%x offset:0x%x  il?:0x%x\n", 
+        "mod:0x%x  MethodDef:0x%x NativeTok:0x%x offset:0x%x  il?:0x%x\n", 
         GetCurrentThreadId(),m_debuggerThreadToken, debuggerModule,
-        mdMethod, versionToken,offset, fIsIL));
+        mdMethod, nativeCodeVersionToken,offset, fIsIL));
 
     LOG((LF_CORDB, LL_INFO10000, "[%x] CT::SIP: sizeof(DebuggerIPCEvent):0x%x **********\n",
         sizeof(DebuggerIPCEvent)));
@@ -1320,11 +1266,12 @@ HRESULT CordbThread::GetObject(ICorDebugValue **ppThreadObject)
         return (CORPROF_E_NOT_YET_AVAILABLE);
 #endif
     
+	CordbType *typ;
+    hr = CordbType::MkNullaryType(GetAppDomain(), g_elementTypeObject, &typ);
+	if (FAILED(hr))
+		return hr;
     hr = CordbValue::CreateValueByType(GetAppDomain(),
-                                         module,
-                                         sizeof(g_elementTypeClass),
-                                         &g_elementTypeClass,
-                                         NULL,
+                                         typ,
                                          pObjectHandle, NULL,
                                          true,
                                          NULL,
@@ -1767,20 +1714,17 @@ HRESULT CordbContext::QueryInterface(REFIID id, void **pInterface)
  * ------------------------------------------------------------------------- */
 
 CordbFrame::CordbFrame(CordbChain *chain, void *id,
-                       CordbFunction *function, CordbCode* code,
+                       bool native,
                        SIZE_T ip, UINT iFrameInChain,
                        CordbAppDomain *currentAppDomain)
   : CordbBase((UINT_PTR)id, enumCordbFrame),
     m_ip(ip),
     m_thread(chain->m_thread),
-    m_function(function),
-    m_code(code),
     m_chain(chain),
     m_iThisFrame(iFrameInChain),
-    m_currentAppDomain(currentAppDomain)
+    m_currentAppDomain(currentAppDomain),
+    m_native(native)
 {
-    if (m_code)
-        m_code->AddRef();
 }
 
 /*
@@ -1788,12 +1732,9 @@ CordbFrame::CordbFrame(CordbChain *chain, void *id,
 
     UNKNOWN:
         CordbThread            *m_thread;
-        CordbFunction          *m_function;
         CordbChain             *m_chain;
         CordbAppDomain         *m_currentAppDomain;
         
-    RESOLVED:
-        CordbCode              *m_code; // Neutered
 */
 
 CordbFrame::~CordbFrame()
@@ -1805,12 +1746,6 @@ void CordbFrame::Neuter()
 {
     AddRef();
     {    
-        if (m_code)
-        {
-            m_code->Neuter();
-            m_code->Release();
-        } 
-        
         CordbBase::Neuter();
     }
     Release();
@@ -1847,7 +1782,9 @@ HRESULT CordbFrame::GetCode(ICorDebugCode **ppCode)
 {
     VALIDATE_POINTER_TO_OBJECT(ppCode, ICorDebugCode **);
     
-    *ppCode = (ICorDebugCode*)m_code;
+	*ppCode = m_native 
+		? ((CordbNativeFrame *)this)->m_jitinfo->m_nativecode 
+		: ((CordbILFrame *)this)->m_code;
     (*ppCode)->AddRef();
 
     return S_OK;;
@@ -1865,7 +1802,9 @@ HRESULT CordbFrame::GetFunction(ICorDebugFunction **ppFunction)
 {
     VALIDATE_POINTER_TO_OBJECT(ppFunction, ICorDebugFunction **);
     
-    *ppFunction = (ICorDebugFunction*)m_function;
+    *ppFunction = m_native 
+		? ((CordbNativeFrame *)this)->m_jitinfo->m_function 
+		: ((CordbILFrame *)this)->m_function;
     (*ppFunction)->AddRef();
 
     return S_OK;
@@ -1875,7 +1814,7 @@ HRESULT CordbFrame::GetFunctionToken(mdMethodDef *pToken)
 {
     VALIDATE_POINTER_TO_OBJECT(pToken, mdMethodDef *);
     
-    *pToken = m_function->m_token;
+    *pToken = GetFunction()->m_token;
 
     return S_OK;
 }
@@ -1938,6 +1877,13 @@ HRESULT CordbFrame::CreateStepper(ICorDebugStepper **ppStepper)
 
     return S_OK;
 #endif //RIGHT_SIDE_ONLY    
+}
+
+CordbFunction *CordbFrame::GetFunction()
+{
+	return m_native 
+		? ((CordbNativeFrame *)this)->m_jitinfo->m_function 
+		: ((CordbILFrame *)this)->m_function;
 }
 
 /* ------------------------------------------------------------------------- *
@@ -2079,15 +2025,32 @@ CordbILFrame::CordbILFrame(CordbChain *chain, void *id,
                            CordbFunction *function, CordbCode* code,
                            SIZE_T ip, void* sp, const void **localMap,
                            void* argMap, void* frameToken, bool active,
-                           CordbAppDomain *currentAppDomain) 
-  : CordbFrame(chain, id, function, code, ip, active, currentAppDomain),
-    m_sp(sp), m_localMap(localMap), m_argMap(argMap),
-    m_frameToken(frameToken)
+                           CordbAppDomain *currentAppDomain,
+				           const Instantiation &inst) 
+  : CordbFrame(chain, id, false, ip, active, currentAppDomain),
+    m_sp(sp),
+    m_function(function),
+    m_code(code),
+    m_localMap(localMap),
+    m_argMap(argMap),
+    m_frameToken(frameToken),
+    m_inst(inst)
 {
+	if (m_code)
+		m_code->AddRef();
 }
 
 CordbILFrame::~CordbILFrame()
 {
+}
+
+void CordbILFrame::Neuter()
+{
+	AddRef();
+	if (m_code)
+		m_code->Neuter();
+    CordbFrame::Neuter();
+	Release();
 }
 
 HRESULT CordbILFrame::QueryInterface(REFIID id, void **pInterface)
@@ -2107,6 +2070,31 @@ HRESULT CordbILFrame::QueryInterface(REFIID id, void **pInterface)
     AddRef();
     return S_OK;
 }
+
+HRESULT CordbILFrame::EnumerateTypeParameters(ICorDebugTypeEnum **ppTypeEnum)
+{
+    VALIDATE_POINTER_TO_OBJECT(ppTypeEnum, ICorDebugTypeEnum **);
+
+#ifdef RIGHT_SIDE_ONLY
+    CORDBRequireProcessStateOKAndSync(GetProcess(), GetAppDomain());
+#else 
+    // For the Virtual Right Side (In-proc debugging), we'll always be synched, but not neccessarily b/c we've gotten a
+    // synch message.
+    CORDBRequireProcessStateOK(GetProcess());
+#endif    
+
+    ICorDebugTypeEnum *icdTPE = new CordbTypeEnum(0,NULL);
+    if ( icdTPE == NULL )
+    {
+        (*ppTypeEnum) = NULL;
+        return E_OUTOFMEMORY;
+    }
+    
+    (*ppTypeEnum) = icdTPE;
+    icdTPE->AddRef();
+    return S_OK;
+}
+
 
 HRESULT CordbILFrame::GetIP(ULONG32 *pnOffset,
                             CorDebugMappingResult *pMappingResult)
@@ -2210,10 +2198,8 @@ HRESULT CordbILFrame::GetLocalVariable(DWORD dwIndex, ICorDebugValue **ppValue)
 #endif    
 
     // Get the type of this argument from the function
-    PCCOR_SIGNATURE pvSigBlob;
-    ULONG cbSigBlob;
-
-    HRESULT hr = m_function->GetArgumentType(dwIndex, &cbSigBlob, &pvSigBlob);
+    CordbType *argType;
+    HRESULT hr = m_function->GetLocalVariableType(dwIndex, m_inst, &argType);
 
     if (!SUCCEEDED(hr))
         return hr;
@@ -2237,9 +2223,7 @@ HRESULT CordbILFrame::GetLocalVariable(DWORD dwIndex, ICorDebugValue **ppValue)
 
     ICorDebugValue* pValue;
     hr = CordbValue::CreateValueByType(GetCurrentAppDomain(),
-                                       m_function->GetModule(),
-                                       cbSigBlob, pvSigBlob,
-                                       NULL,
+                                       argType,
                                        pRmtLocalValue, NULL,
                                        false,
                                        NULL,
@@ -2251,64 +2235,6 @@ HRESULT CordbILFrame::GetLocalVariable(DWORD dwIndex, ICorDebugValue **ppValue)
     
     return hr;
 }
-
-HRESULT CordbILFrame::GetLocalVariableWithType(ULONG cbSigBlob,
-                                               PCCOR_SIGNATURE pvSigBlob,
-                                               DWORD dwIndex, 
-                                               ICorDebugValue **ppValue)
-{
-#ifdef RIGHT_SIDE_ONLY
-    CORDBRequireProcessStateOKAndSync(GetProcess(), GetAppDomain());
-#else 
-    // For the Virtual Right Side (In-proc debugging), we'll
-    // always be synched, but not neccessarily b/c we've
-    // gotten a synch message.
-    CORDBRequireProcessStateOK(GetProcess());
-#endif    
-
-    //Get rid of funky modifiers
-    ULONG cb = _skipFunkyModifiersInSignature(pvSigBlob);
-    if( cb != 0)
-    {
-        _ASSERTE( (int)cb > 0 );
-        cbSigBlob -= cb;
-        pvSigBlob = &pvSigBlob[cb];
-    }
-
-    //
-    // local map address indexed by dwIndex gives us the address of the
-    // pointer to the local variable.
-    //
-    CordbProcess *process = m_function->m_module->m_process;
-    REMOTE_PTR ppRmtLocalValue = &(((const void**) m_localMap)[dwIndex]);
-
-    REMOTE_PTR pRmtLocalValue;
-    BOOL succ = ReadProcessMemoryI(process->m_handle,
-                                  ppRmtLocalValue,
-                                  &pRmtLocalValue,
-                                  sizeof(void*),
-                                  NULL);
-
-    if (!succ)
-        return HRESULT_FROM_WIN32(GetLastError());
-
-    ICorDebugValue* pValue;
-    HRESULT hr = CordbValue::CreateValueByType(GetCurrentAppDomain(),
-                                               m_function->GetModule(),
-                                               cbSigBlob, pvSigBlob,
-                                               NULL,
-                                               pRmtLocalValue, NULL,
-                                               false,
-                                               NULL,
-                                               NULL,
-                                               &pValue);
-
-    if (SUCCEEDED(hr))
-        *ppValue = pValue;
-    
-    return hr;
-}
-
 HRESULT CordbILFrame::EnumerateArguments(ICorDebugValueEnum **ppValueEnum)
 {
     VALIDATE_POINTER_TO_OBJECT(ppValueEnum, ICorDebugValueEnum **);
@@ -2350,10 +2276,8 @@ HRESULT CordbILFrame::GetArgument(DWORD dwIndex, ICorDebugValue **ppValue)
 #endif    
 
     // Get the type of this argument from the function
-    PCCOR_SIGNATURE pvSigBlob;
-    ULONG cbSigBlob;
-
-    HRESULT hr = m_function->GetArgumentType(dwIndex, &cbSigBlob, &pvSigBlob);
+    CordbType *argType;
+    HRESULT hr = m_function->GetArgumentType(dwIndex, m_inst, &argType);
 
     if (!SUCCEEDED(hr))
         return hr;
@@ -2377,73 +2301,12 @@ HRESULT CordbILFrame::GetArgument(DWORD dwIndex, ICorDebugValue **ppValue)
 
     ICorDebugValue* pValue;
     hr = CordbValue::CreateValueByType(GetCurrentAppDomain(),
-                                       m_function->GetModule(),
-                                       cbSigBlob, pvSigBlob,
-                                       NULL,
+                                       argType,
                                        pRmtArgValue, NULL,
                                        false,
                                        NULL,
                                        NULL,
                                        &pValue);
-
-    if (SUCCEEDED(hr))
-        *ppValue = pValue;
-    else
-        *ppValue = NULL;
-    
-    return hr;
-}
-
-HRESULT CordbILFrame::GetArgumentWithType(ULONG cbSigBlob,
-                                          PCCOR_SIGNATURE pvSigBlob,
-                                          DWORD dwIndex, 
-                                          ICorDebugValue **ppValue)
-{
-#ifdef RIGHT_SIDE_ONLY
-    CORDBRequireProcessStateOKAndSync(GetProcess(), GetAppDomain());
-#else 
-    // For the Virtual Right Side (In-proc debugging), we'll
-    // always be synched, but not neccessarily b/c we've
-    // gotten a synch message.
-    CORDBRequireProcessStateOK(GetProcess());
-#endif    
-
-    //Get rid of funky modifiers
-    ULONG cb = _skipFunkyModifiersInSignature(pvSigBlob);
-    if( cb != 0)
-    {
-        _ASSERTE( (int)cb > 0 );
-        cbSigBlob -= cb;
-        pvSigBlob = &pvSigBlob[cb];
-    }
-
-    //
-    // arg map address indexed by dwIndex gives us the address of the
-    // pointer to the argument.
-    //
-    CordbProcess *process = m_function->m_module->m_process;
-    REMOTE_PTR ppRmtArgValue = &(((const void**) m_argMap)[dwIndex]);
-
-    REMOTE_PTR pRmtArgValue;
-    BOOL succ = ReadProcessMemoryI(process->m_handle,
-                                  ppRmtArgValue,
-                                  &pRmtArgValue,
-                                  sizeof(void*),
-                                  NULL);
-
-    if (!succ)
-        return HRESULT_FROM_WIN32(GetLastError());
-
-    ICorDebugValue* pValue;
-    HRESULT hr = CordbValue::CreateValueByType(GetCurrentAppDomain(),
-                                               m_function->GetModule(),
-                                               cbSigBlob, pvSigBlob,
-                                               NULL,
-                                               pRmtArgValue, NULL,
-                                               false,
-                                               NULL,
-                                               NULL,
-                                               &pValue);
 
     if (SUCCEEDED(hr))
         *ppValue = pValue;
@@ -2514,8 +2377,9 @@ CordbValueEnum::CordbValueEnum(CordbFrame *frame, ValueEnumMode mode,
     case ARGS:  
         {
             //sig is lazy-loaded: force it to be there
-            m_frame->m_function->LoadSig();
-            m_iMax = frame->m_function->m_argCount;
+            CordbFunction * func = m_frame->GetFunction();
+			func->LoadSig();
+            m_iMax = func->m_argCount;
 
             if (frameSrc == JIT_IL_FRAME)
             {
@@ -2525,15 +2389,16 @@ CordbValueEnum::CordbValueEnum(CordbFrame *frame, ValueEnumMode mode,
                 if (jil->m_fVarArgFnx && jil->m_sig != NULL)
                     m_iMax = jil->m_argCount;
                 else
-                    m_iMax = frame->m_function->m_argCount;
+                    m_iMax = func->m_argCount;
             }
             break;
         }
     case LOCAL_VARS:
         {
             //locals are lazy-loaded: force them to be there
-            m_frame->m_function->LoadLocalVarSig();
-            m_iMax = m_frame->m_function->m_localVarCount;
+            CordbFunction * func = m_frame->GetFunction();
+			func->LoadLocalVarSig();
+            m_iMax = func->m_localVarCount;
             break;
         }   
     }
@@ -2705,20 +2570,23 @@ HRESULT CordbValueEnum::Next(ULONG celt, ICorDebugValue *values[], ULONG *pceltF
 
 
 
+
 /* ------------------------------------------------------------------------- *
  * Native Frame class
  * ------------------------------------------------------------------------- */
 
 
 CordbNativeFrame::CordbNativeFrame(CordbChain *chain, void *id,
-                                   CordbFunction *function, CordbCode* code,
+                                   CordbJITInfo *jitinfo, 
                                    SIZE_T ip, DebuggerREGDISPLAY* rd,
                                    bool quicklyUnwound, 
                                    UINT iFrameInChain,
                                    CordbAppDomain *currentAppDomain) 
-  : CordbFrame(chain, id, function, code, ip, iFrameInChain, currentAppDomain),
-    m_rd(*rd), m_quicklyUnwound(quicklyUnwound), m_JITILFrame(NULL)
+  : CordbFrame(chain, id, true, ip, iFrameInChain, currentAppDomain),
+    m_rd(*rd), m_quicklyUnwound(quicklyUnwound), m_JITILFrame(NULL), m_jitinfo(jitinfo)
 {
+	if (m_jitinfo)
+		m_jitinfo->AddRef();
 }
 
 /*
@@ -2737,7 +2605,12 @@ void CordbNativeFrame::Neuter()
 {
     AddRef();
     {
-        if (m_JITILFrame != NULL)
+		if (m_jitinfo) 
+		{
+			m_jitinfo->Release();
+			m_jitinfo = NULL;
+		}
+		if (m_JITILFrame != NULL)
         {
             // AddRef() called in CordbThread::RefreshStack before being assigned to
             // CordbNativeFrame::m_JITILFrame by RefreshStack.
@@ -2818,9 +2691,9 @@ HRESULT CordbNativeFrame::CanSetIP(ULONG32 nOffset)
 
     HRESULT hr = m_chain->m_thread->SetIP(
                     SetIP_fCanSetIPOnly,
-                    m_function->m_module->m_debuggerModuleToken,
-                    m_function->m_token, 
-                    m_code->m_CodeVersionToken,
+                    m_jitinfo->m_function->m_module->m_debuggerModuleToken,
+                    m_jitinfo->m_function->m_token, 
+                    m_jitinfo->m_nativecode->m_nativeCodeVersionToken,
                     nOffset, 
                     SetIP_fNative );
    
@@ -2853,9 +2726,9 @@ HRESULT CordbNativeFrame::SetIP(ULONG32 nOffset)
 
     HRESULT hr = m_chain->m_thread->SetIP(
                     SetIP_fSetIP,
-                    m_function->m_module->m_debuggerModuleToken,
-                    m_function->m_token, 
-                    m_code->m_CodeVersionToken,
+                    m_jitinfo->m_function->m_module->m_debuggerModuleToken,
+                    m_jitinfo->m_function->m_token, 
+                    m_jitinfo->m_nativecode->m_nativeCodeVersionToken,
                     nOffset, 
                     SetIP_fNative );
     
@@ -2901,9 +2774,9 @@ HRESULT CordbNativeFrame::GetRegisterSet(ICorDebugRegisterSet **ppRegisters)
 // frames current register display. This is usually used to build a
 // ICorDebugValue from.
 //
-LPVOID CordbNativeFrame::GetAddressOfRegister(CorDebugRegister regNum)
+SIZE_T *CordbNativeFrame::GetAddressOfRegister(CorDebugRegister regNum)
 {
-    LPVOID ret = 0;
+    SIZE_T *ret = NULL;
 
     switch (regNum)
     {
@@ -2995,13 +2868,89 @@ void *CordbNativeFrame::GetLeftSideAddressOfRegister(CorDebugRegister regNum)
     return ret;
 }
 
+
 HRESULT CordbNativeFrame::GetLocalRegisterValue(CorDebugRegister reg, 
-                                                ULONG cbSigBlob,
-                                                PCCOR_SIGNATURE pvSigBlob,
+                                     ULONG cbSigBlob,
+                                     PCCOR_SIGNATURE pvSigBlob,
+                                     ICorDebugValue **ppValue)
+{ 
+    VALIDATE_POINTER_TO_OBJECT_ARRAY(pvSigBlob, BYTE, cbSigBlob, true, false);
+	CordbType *typ;
+    HRESULT hr = CordbType::SigToType(m_JITILFrame->GetModule(), pvSigBlob, Instantiation(), &typ);
+	if (FAILED(hr))
+		return hr;
+	return GetLocalRegisterValue(reg, typ, ppValue); 
+}
+
+HRESULT CordbNativeFrame::GetLocalDoubleRegisterValue(CorDebugRegister highWordReg, 
+                                           CorDebugRegister lowWordReg, 
+                                           ULONG cbSigBlob,
+										   PCCOR_SIGNATURE pvSigBlob,
+                                           ICorDebugValue **ppValue)
+{ 
+    if (cbSigBlob == 0)
+        return E_INVALIDARG;
+	CordbType *typ;
+    HRESULT hr = CordbType::SigToType(m_JITILFrame->GetModule(), pvSigBlob, Instantiation(), &typ);
+	if (FAILED(hr))
+		return hr;
+    //VALIDATE_POINTER_TO_OBJECT_ARRAY(pvSigBlob, BYTE, cbSigBlob, true, false);
+	return GetLocalDoubleRegisterValue(highWordReg, lowWordReg, typ, ppValue); 
+}
+
+HRESULT CordbNativeFrame::GetLocalMemoryValue(CORDB_ADDRESS address,
+                                   ULONG cbSigBlob,
+								   PCCOR_SIGNATURE pvSigBlob,
+                                   ICorDebugValue **ppValue)
+{ 
+    VALIDATE_POINTER_TO_OBJECT_ARRAY(pvSigBlob, BYTE, cbSigBlob, true, false);
+	CordbType *typ;
+    HRESULT hr = CordbType::SigToType(m_JITILFrame->GetModule(), pvSigBlob, Instantiation(), &typ);
+	if (FAILED(hr))
+		return hr;
+	return GetLocalMemoryValue(address, typ, ppValue); 
+}
+
+HRESULT CordbNativeFrame::GetLocalRegisterMemoryValue(CorDebugRegister highWordReg,
+                                           CORDB_ADDRESS lowWordAddress, 
+                                           ULONG cbSigBlob,
+										   PCCOR_SIGNATURE pvSigBlob,
+                                           ICorDebugValue **ppValue)
+{ 
+    if (cbSigBlob == 0)
+        return E_INVALIDARG;
+    VALIDATE_POINTER_TO_OBJECT_ARRAY(pvSigBlob, BYTE, cbSigBlob, true, true);
+	CordbType *typ;
+    HRESULT hr = CordbType::SigToType(m_JITILFrame->GetModule(), pvSigBlob, Instantiation(), &typ);
+	if (FAILED(hr))
+		return hr;
+	return GetLocalRegisterMemoryValue(highWordReg, lowWordAddress, typ, ppValue); 
+}
+
+
+HRESULT CordbNativeFrame::GetLocalMemoryRegisterValue(CORDB_ADDRESS highWordAddress,
+                                           CorDebugRegister lowWordRegister,
+                                           ULONG cbSigBlob,
+										   PCCOR_SIGNATURE pvSigBlob,
+                                           ICorDebugValue **ppValue)
+{ 
+    if (cbSigBlob == 0)
+        return E_INVALIDARG;
+    VALIDATE_POINTER_TO_OBJECT_ARRAY(pvSigBlob, BYTE, cbSigBlob, true, true);
+	CordbType *typ;
+    HRESULT hr = CordbType::SigToType(m_JITILFrame->GetModule(), pvSigBlob, Instantiation(), &typ);
+	if (FAILED(hr))
+		return hr;
+	return GetLocalMemoryRegisterValue(highWordAddress, lowWordRegister, typ, ppValue); 
+}
+
+
+
+HRESULT CordbNativeFrame::GetLocalRegisterValue(CorDebugRegister reg, 
+                                                CordbType *type,
                                                 ICorDebugValue **ppValue)
 {
     VALIDATE_POINTER_TO_OBJECT(ppValue, ICorDebugValue **);
-    VALIDATE_POINTER_TO_OBJECT_ARRAY(pvSigBlob, BYTE, cbSigBlob, true, false);
     
 #ifdef RIGHT_SIDE_ONLY
     CORDBRequireProcessStateOKAndSync(GetProcess(), GetAppDomain());
@@ -3011,15 +2960,6 @@ HRESULT CordbNativeFrame::GetLocalRegisterValue(CorDebugRegister reg,
     // gotten a synch message.
     CORDBRequireProcessStateOK(GetProcess());
 #endif    
-
-    //Get rid of funky modifiers
-    ULONG cb = _skipFunkyModifiersInSignature(pvSigBlob);
-    if( cb != 0)
-    {
-        _ASSERTE( (int)cb > 0 );
-        cbSigBlob -= cb;
-        pvSigBlob = &pvSigBlob[cb];
-    }
 
 #ifdef _X86_
     // Floating point registers are special...
@@ -3041,9 +2981,7 @@ HRESULT CordbNativeFrame::GetLocalRegisterValue(CorDebugRegister reg,
 
     ICorDebugValue *pValue;
     HRESULT hr = CordbValue::CreateValueByType(GetCurrentAppDomain(),
-                                               m_function->GetModule(),
-                                               cbSigBlob, pvSigBlob,
-                                               NULL,
+                                               type,
                                                NULL, pLocalValue,
                                                false,
                                                &ra,
@@ -3059,30 +2997,18 @@ HRESULT CordbNativeFrame::GetLocalRegisterValue(CorDebugRegister reg,
 HRESULT CordbNativeFrame::GetLocalDoubleRegisterValue(
                                             CorDebugRegister highWordReg, 
                                             CorDebugRegister lowWordReg, 
-                                            ULONG cbSigBlob,
-                                            PCCOR_SIGNATURE pvSigBlob,
+                                            CordbType *type,
                                             ICorDebugValue **ppValue)
 {
-    if (cbSigBlob == 0)
-        return E_INVALIDARG;
     VALIDATE_POINTER_TO_OBJECT(ppValue, ICorDebugValue **);
-    VALIDATE_POINTER_TO_OBJECT_ARRAY(pvSigBlob, BYTE, cbSigBlob, true, false);
     
-    //Get rid of funky modifiers
-    ULONG cb = _skipFunkyModifiersInSignature(pvSigBlob);
-    ULONG cbSigBlobNoMod = cbSigBlob;
-    PCCOR_SIGNATURE pvSigBlobNoMod = pvSigBlob;
-    if( cb != 0)
-    {
-        _ASSERTE( (int)cb > 0 );
-        cbSigBlobNoMod -= cb;
-        pvSigBlobNoMod = &pvSigBlobNoMod[cb];
-    }
+	//Get rid of funky modifiers
+	CorElementType et = type->SkipFunkyModifiers()->m_elementType;
 
-    if ((*pvSigBlobNoMod != ELEMENT_TYPE_I8) &&
-        (*pvSigBlobNoMod != ELEMENT_TYPE_U8) &&
-        (*pvSigBlobNoMod != ELEMENT_TYPE_R8) &&
-		(*pvSigBlobNoMod != ELEMENT_TYPE_VALUETYPE))
+    if ((et != ELEMENT_TYPE_I8) &&
+        (et != ELEMENT_TYPE_U8) &&
+        (et != ELEMENT_TYPE_R8) &&
+		(et != ELEMENT_TYPE_VALUETYPE))
         return E_INVALIDARG;
 
 #ifdef RIGHT_SIDE_ONLY
@@ -3099,8 +3025,8 @@ HRESULT CordbNativeFrame::GetLocalDoubleRegisterValue(
     // We've got both halves of the data in this process, so we
     // simply create a generic value from the two words of data.
     //
-    LPVOID highWordAddr = GetAddressOfRegister(highWordReg);
-    LPVOID lowWordAddr = GetAddressOfRegister(lowWordReg);
+    SIZE_T *highWordAddr = GetAddressOfRegister(highWordReg);
+    SIZE_T *lowWordAddr = GetAddressOfRegister(lowWordReg);
     _ASSERTE(!(highWordAddr == NULL && lowWordAddr == NULL));
 
     // Remember the register info as we create the value.
@@ -3112,13 +3038,11 @@ HRESULT CordbNativeFrame::GetLocalDoubleRegisterValue(
     ra.u.reg2Addr = GetLeftSideAddressOfRegister(lowWordReg);
     ra.frame = this;
     
-	if (*pvSigBlobNoMod == ELEMENT_TYPE_VALUETYPE)
+	if (et == ELEMENT_TYPE_VALUETYPE)
 	{
 		ICorDebugValue *pValue;
 		HRESULT hr = CordbValue::CreateValueByType(GetCurrentAppDomain(),
-												m_function->GetModule(),
-												cbSigBlob, pvSigBlob,
-												NULL,
+												type,
 												NULL, NULL,
 												false,
 												&ra,
@@ -3132,12 +3056,10 @@ HRESULT CordbNativeFrame::GetLocalDoubleRegisterValue(
 	else
 	{
 		CordbGenericValue *pGenValue = new CordbGenericValue(GetCurrentAppDomain(),
-															m_function->GetModule(),
-															cbSigBlob,
-															pvSigBlob,
-															*(DWORD *)highWordAddr,
-															*(DWORD *)lowWordAddr,
-															&ra);
+															type,
+															*highWordAddr,
+															*lowWordAddr,
+															&ra); 
 
 		if (pGenValue != NULL)
 		{
@@ -3163,12 +3085,10 @@ HRESULT CordbNativeFrame::GetLocalDoubleRegisterValue(
 
 HRESULT 
 CordbNativeFrame::GetLocalMemoryValue(CORDB_ADDRESS address,
-                                      ULONG cbSigBlob,
-                                      PCCOR_SIGNATURE pvSigBlob,
+                                      CordbType *type,
                                       ICorDebugValue **ppValue)
 {
     VALIDATE_POINTER_TO_OBJECT(ppValue, ICorDebugValue **);
-    VALIDATE_POINTER_TO_OBJECT_ARRAY(pvSigBlob, BYTE, cbSigBlob, true, false);
     
 #ifdef RIGHT_SIDE_ONLY
     CORDBRequireProcessStateOKAndSync(GetProcess(), GetAppDomain());
@@ -3179,13 +3099,11 @@ CordbNativeFrame::GetLocalMemoryValue(CORDB_ADDRESS address,
     CORDBRequireProcessStateOK(GetProcess());
 #endif    
 
-    _ASSERTE(m_function != NULL);
+    _ASSERTE(m_jitinfo->m_function != NULL);
 
     ICorDebugValue *pValue;
     HRESULT hr = CordbValue::CreateValueByType(GetCurrentAppDomain(),
-                                               m_function->GetModule(),
-                                               cbSigBlob, pvSigBlob,
-                                               NULL,
+                                               type,
                                                (REMOTE_PTR) address, NULL,
                                                false,
                                                NULL,
@@ -3201,27 +3119,16 @@ CordbNativeFrame::GetLocalMemoryValue(CORDB_ADDRESS address,
 HRESULT 
 CordbNativeFrame::GetLocalRegisterMemoryValue(CorDebugRegister highWordReg,
                                               CORDB_ADDRESS lowWordAddress,
-                                              ULONG cbSigBlob,
-                                              PCCOR_SIGNATURE pvSigBlob,
+                                              CordbType *type,
                                               ICorDebugValue **ppValue)
 {
-    if (cbSigBlob == 0)
-        return E_INVALIDARG;
     VALIDATE_POINTER_TO_OBJECT(ppValue, ICorDebugValue **);
-    VALIDATE_POINTER_TO_OBJECT_ARRAY(pvSigBlob, BYTE, cbSigBlob, true, true);
         
-    //Get rid of funky modifiers
-    ULONG cb = _skipFunkyModifiersInSignature(pvSigBlob);
-    PCCOR_SIGNATURE pvSigBlobNoMod = pvSigBlob;
-    if( cb != 0)
-    {
-        _ASSERTE( (int)cb > 0 );
-        pvSigBlobNoMod = &pvSigBlobNoMod[cb];
-    }
+	CorElementType et = type->SkipFunkyModifiers()->m_elementType;
 
-    if ((*pvSigBlobNoMod != ELEMENT_TYPE_I8) &&
-        (*pvSigBlobNoMod != ELEMENT_TYPE_U8) &&
-        (*pvSigBlobNoMod != ELEMENT_TYPE_R8))
+    if ((et != ELEMENT_TYPE_I8) &&
+        (et != ELEMENT_TYPE_U8) &&
+        (et != ELEMENT_TYPE_R8))
         return E_INVALIDARG;
     
 #ifdef RIGHT_SIDE_ONLY
@@ -3260,9 +3167,7 @@ CordbNativeFrame::GetLocalRegisterMemoryValue(CorDebugRegister highWordReg,
     ra.frame = this;
 
     CordbGenericValue *pGenValue = new CordbGenericValue(GetCurrentAppDomain(),
-                                                         m_function->GetModule(),
-                                                         cbSigBlob,
-                                                         pvSigBlob,
+                                                         type,
                                                          *(DWORD *)highWordAddr,
                                                          lowWord,
                                                          &ra);
@@ -3291,27 +3196,16 @@ CordbNativeFrame::GetLocalRegisterMemoryValue(CorDebugRegister highWordReg,
 HRESULT 
 CordbNativeFrame::GetLocalMemoryRegisterValue(CORDB_ADDRESS highWordAddress,
                                               CorDebugRegister lowWordRegister,
-                                              ULONG cbSigBlob,
-                                              PCCOR_SIGNATURE pvSigBlob,
+                                              CordbType *type,
                                               ICorDebugValue **ppValue)
 {
-    if (cbSigBlob == 0)
-        return E_INVALIDARG;
     VALIDATE_POINTER_TO_OBJECT(ppValue, ICorDebugValue **);
-    VALIDATE_POINTER_TO_OBJECT_ARRAY(pvSigBlob, BYTE, cbSigBlob, true, false);
         
-    //Get rid of funky modifiers
-    ULONG cb = _skipFunkyModifiersInSignature(pvSigBlob);
-    PCCOR_SIGNATURE pvSigBlobNoMod = pvSigBlob;
-    if( cb != 0)
-    {
-        _ASSERTE( (int)cb > 0 );
-        pvSigBlobNoMod = &pvSigBlobNoMod[cb];
-    }
+	CorElementType et = type->SkipFunkyModifiers()->m_elementType;
 
-    if ((*pvSigBlobNoMod != ELEMENT_TYPE_I8) &&
-        (*pvSigBlobNoMod != ELEMENT_TYPE_U8) &&
-        (*pvSigBlobNoMod != ELEMENT_TYPE_R8))
+    if ((et != ELEMENT_TYPE_I8) &&
+        (et != ELEMENT_TYPE_U8) &&
+        (et != ELEMENT_TYPE_R8))
         return E_INVALIDARG;
     
 #ifdef RIGHT_SIDE_ONLY
@@ -3350,9 +3244,7 @@ CordbNativeFrame::GetLocalMemoryRegisterValue(CORDB_ADDRESS highWordAddress,
     ra.frame = this;
 
     CordbGenericValue *pGenValue = new CordbGenericValue(GetCurrentAppDomain(),
-                                                         m_function->GetModule(),
-                                                         cbSigBlob,
-                                                         pvSigBlob,
+                                                         type,
                                                          highWord,
                                                          *(DWORD *)lowWordAddr,
                                                          &ra);
@@ -3621,11 +3513,22 @@ CordbJITILFrame::CordbJITILFrame(CordbNativeFrame *nativeFrame,
                                  bool fVarArgFnx,
                                  void *sig,
                                  ULONG cbSig,
-                                 void *rpFirstArg)
-  : CordbBase(0, enumCordbJITILFrame), m_nativeFrame(nativeFrame), m_ilCode(code), m_ip(ip),
-    m_mapping(mapping), m_fVarArgFnx(fVarArgFnx), m_argCount(0),
-    m_sig((PCCOR_SIGNATURE)sig), m_cbSig(cbSig), m_rpFirstArg(rpFirstArg),
-    m_rgNVI(NULL)
+                                 void *rpFirstArg,
+								 void *methodDesc)
+  : CordbBase(0, enumCordbJITILFrame),
+    m_nativeFrame(nativeFrame),
+    m_ilCode(code),
+    m_ip(ip),
+    m_mapping(mapping),
+    m_fVarArgFnx(fVarArgFnx),
+    m_argCount(0),
+    m_sig((PCCOR_SIGNATURE)sig),
+    m_cbSig(cbSig),
+    m_rpFirstArg(rpFirstArg),
+    m_rgNVI(NULL),
+    m_methodDesc(methodDesc),
+    m_tyParReps(),
+    m_tyParRepsLoaded(false)
 {
     if (m_fVarArgFnx == true)
     {
@@ -3687,6 +3590,7 @@ CordbJITILFrame::CordbJITILFrame(CordbNativeFrame *nativeFrame,
         void *            m_rpFirstArg;
         PCCOR_SIGNATURE   m_sig; // Deleted in ~CordbJITILFrame
         ICorJitInfo::NativeVarInfo * m_rgNVI; // Deleted in ~CordbJITILFrame
+        CordbClass **m_repTyPars; 
 */
 
 CordbJITILFrame::~CordbJITILFrame()
@@ -3696,6 +3600,8 @@ CordbJITILFrame::~CordbJITILFrame()
 
     if (m_rgNVI != NULL)
         delete [] m_rgNVI;
+    if(m_tyParReps.m_ppInst)
+        delete [] m_tyParReps.m_ppInst;
 }
 
 // Neutered by CordbNativeFrame
@@ -3706,9 +3612,125 @@ void CordbJITILFrame::Neuter()
         // If this class ever inherits from the CordbFrame we'll need a call
         // to CordbFrame::Neuter() here instead of to CordbBase::Neuter();
         CordbBase::Neuter();
+		// GENERICS: Frames include pointers across to other types that specify the
+		// representation instantiation - reduce the reference counts on these....
+		for (unsigned int i = 0; i < m_tyParReps.m_cInst; i++) {
+			m_tyParReps.m_ppInst[i]->Release();
+		}
     }
     Release();
 }
+
+HRESULT CordbJITILFrame::LoadTyParRepresentations()
+{
+
+	// GENERICS: The non-generic case, or the case where we've already feched the
+	// typar-reps, is easy.
+	if (m_tyParRepsLoaded)
+		return S_OK;
+	if (m_methodDesc == NULL) 
+	{
+		m_tyParReps = Instantiation(0, NULL,0);
+		m_tyParRepsLoaded = true;
+		return S_OK;
+	}
+
+	// GENERICS: Find the representation-instantiation for a generic method
+	// <REVIEW> dsyme: check if this is the right Sync... </REVIEW>
+	CORDBSyncFromWin32StopIfNecessary(GetProcess());
+
+	INPROC_LOCK();
+
+	HRESULT hr = S_OK;
+	unsigned int repTyparCount = 0;
+	unsigned int repClassTyparCount = 0;
+	CordbType **ppRepTypars = NULL;
+	if (m_methodDesc != NULL) 
+	{
+		// GENERICS: We've got a remote address that points to a method desc.
+		// This method descriptor may be shared for multiple
+		// methods, but all such methods will share the
+		// same representations for the type parameters.
+		// We need to send to the left side to get real information about
+		// the method desc, including the representation type parameters.
+		// These are always available for all MethodDesc's.
+		DebuggerIPCEvent event2;
+		// GENERICS: Collect up the class type parameters
+		GetProcess()->InitIPCEvent(&event2, 
+			DB_IPCE_GET_METHOD_DESC_REPPARAMS, 
+			false,
+			(void *)(GetCurrentAppDomain()->m_id));
+		event2.GetMethodDescParams.methodDesc = m_methodDesc;
+
+		hr = GetProcess()->m_cordb->SendIPCEvent(GetProcess(), &event2,sizeof(DebuggerIPCEvent));
+
+		// Stop now if we can't even send the event.
+		if (!SUCCEEDED(hr)) {
+			_ASSERTE( !"FAILURE" );
+			goto exit;
+		}
+
+		// Wait for events to return from the RC. We expect at least one
+		// class info result event.  GENERICS @TODO: sned and wait for more events...
+		DebuggerIPCEvent *retEvent2 = (DebuggerIPCEvent *) _alloca(CorDBIPC_BUFFER_SIZE);
+
+#ifdef RIGHT_SIDE_ONLY
+		hr = GetProcess()->m_cordb->WaitForIPCEventFromProcess(GetProcess(), 
+			GetCurrentAppDomain(),
+			retEvent2);
+#else 
+		hr = GetProcess()->m_cordb->GetFirstContinuationEvent(GetProcess(),retEvent2);
+#endif //RIGHT_SIDE_ONLY    
+
+		if (!SUCCEEDED(hr)) {
+			_ASSERTE( !"FAILURE" );
+			goto exit;
+		}
+
+		_ASSERTE(retEvent2->type == DB_IPCE_GET_METHOD_DESC_REPPARAMS_RESULT);
+
+		repTyparCount = retEvent2->GetMethodDescParamsResult.repTyParCount;
+		repClassTyparCount = retEvent2->GetMethodDescParamsResult.repClassTyParCount;
+
+		ppRepTypars = new CordbType *[repTyparCount];
+		if (ppRepTypars == NULL) {
+			hr = E_OUTOFMEMORY;
+			_ASSERTE( !"FAILURE" );
+			goto exit;
+		}
+
+		DebuggerIPCE_ExpandedTypeData *currentTyParData =
+			&(retEvent2->GetMethodDescParamsResult.repTyParData[0]);
+		for (unsigned int i = 0; i < repTyparCount;i++)
+		{
+			// @review dsyme: check appdomain here...
+			hr = CordbType::TypeDataToType(GetCurrentAppDomain(), 
+				currentTyParData,
+				&ppRepTypars[i]);
+			if (!SUCCEEDED(hr)){
+				_ASSERTE( !"FAILURE" );
+				goto exit;
+			}
+			// We add a ref as the instantiation will be stored away in the
+			// ref-counted data structure associated with the JITILFrame
+			ppRepTypars[i]->AddRef();
+			currentTyParData++;
+		}
+	}
+	m_tyParReps = Instantiation(repTyparCount, ppRepTypars,repClassTyparCount);
+	m_tyParRepsLoaded = true;
+
+exit:
+#ifndef RIGHT_SIDE_ONLY    
+    GetProcess()->ClearContinuationEvents();
+#endif
+    
+    INPROC_UNLOCK();
+    
+    return hr;
+
+}
+
 
 HRESULT CordbJITILFrame::QueryInterface(REFIID id, void **pInterface)
 {
@@ -3727,6 +3749,34 @@ HRESULT CordbJITILFrame::QueryInterface(REFIID id, void **pInterface)
     AddRef();
     return S_OK;
 }
+
+
+HRESULT CordbJITILFrame::EnumerateTypeParameters(ICorDebugTypeEnum **ppTypeParameterEnum)
+{
+    VALIDATE_POINTER_TO_OBJECT(ppTypeParameterEnum, ICorDebugTypeEnum **);
+
+#ifdef RIGHT_SIDE_ONLY
+    CORDBRequireProcessStateOKAndSync(GetProcess(), GetAppDomain());
+#else 
+    // For the Virtual Right Side (In-proc debugging), we'll always be synched, but not neccessarily b/c we've gotten a
+    // synch message.
+    CORDBRequireProcessStateOK(GetProcess());
+#endif    
+
+	HRESULT hr;
+	IfFailRet(LoadTyParRepresentations());
+	ICorDebugTypeEnum *icdTPE = new CordbTypeEnum(this->m_tyParReps.m_cInst, this->m_tyParReps.m_ppInst);
+    if ( icdTPE == NULL )
+    {
+        (*ppTypeParameterEnum) = NULL;
+        return E_OUTOFMEMORY;
+    }
+    
+    (*ppTypeParameterEnum) = icdTPE;
+    icdTPE->AddRef();
+    return S_OK;
+}
+
 
 HRESULT CordbJITILFrame::GetChain(ICorDebugChain **ppChain)
 {
@@ -3752,7 +3802,7 @@ HRESULT CordbJITILFrame::GetFunction(ICorDebugFunction **ppFunction)
 {
     VALIDATE_POINTER_TO_OBJECT(ppFunction, ICorDebugFunction **);
     
-    *ppFunction = (ICorDebugFunction*)m_nativeFrame->m_function;
+    *ppFunction = (ICorDebugFunction*)m_nativeFrame->m_jitinfo->m_function;
     (*ppFunction)->AddRef();
 
     return S_OK;
@@ -3762,7 +3812,7 @@ HRESULT CordbJITILFrame::GetFunctionToken(mdMethodDef *pToken)
 {
     VALIDATE_POINTER_TO_OBJECT(pToken, mdMethodDef *);
     
-    *pToken = m_nativeFrame->m_function->m_token;
+    *pToken = m_nativeFrame->m_jitinfo->m_function->m_token;
 
     return S_OK;
 }
@@ -3843,9 +3893,9 @@ HRESULT CordbJITILFrame::CanSetIP(ULONG32 nOffset)
 
     HRESULT hr = m_nativeFrame->m_chain->m_thread->SetIP(
                     SetIP_fCanSetIPOnly,
-                    m_nativeFrame->m_function->m_module->m_debuggerModuleToken,
-                    m_nativeFrame->m_function->m_token, 
-                    m_nativeFrame->m_code->m_CodeVersionToken,
+                    m_nativeFrame->m_jitinfo->m_function->m_module->m_debuggerModuleToken,
+                    m_nativeFrame->m_jitinfo->m_function->m_token, 
+                    m_nativeFrame->m_jitinfo->m_nativecode->m_nativeCodeVersionToken,
                     nOffset, 
                     SetIP_fIL );
 
@@ -3872,9 +3922,9 @@ HRESULT CordbJITILFrame::SetIP(ULONG32 nOffset)
 
     HRESULT hr = m_nativeFrame->m_chain->m_thread->SetIP(
                     SetIP_fSetIP,
-                    m_nativeFrame->m_function->m_module->m_debuggerModuleToken,
-                    m_nativeFrame->m_function->m_token, 
-                    m_nativeFrame->m_code->m_CodeVersionToken,
+                    m_nativeFrame->m_jitinfo->m_function->m_module->m_debuggerModuleToken,
+					m_nativeFrame->m_jitinfo->m_function->m_token, 
+					m_nativeFrame->m_jitinfo->m_nativecode->m_nativeCodeVersionToken,
                     nOffset, 
                     SetIP_fIL );
     
@@ -3941,45 +3991,22 @@ HRESULT CordbJITILFrame::FabricateNativeInfo(DWORD dwIndex,
  
     mdTypeDef md;
     ULONG32 cbType = _sizeOfElementInstance(&m_sig[cb], &md);
-    CordbClass *cc;
 
 #ifdef _X86_ // STACK_GROWS_DOWN_ON_ARGS_WALK
     // The the rpCur pointer starts off in the right spot for the
     // first argument, but thereafter we have to decrement it
     // before getting the variable's location from it.  So increment
     // it here to be consistent later.
-    
-    if (md != mdTokenNil)
-    {
-        
-        if (TypeFromToken(md)==mdtTypeRef)
-        {
-            hr = m_ilCode->m_function->GetModule()
-                ->ResolveTypeRef(md, &cc);
-                
-            if (FAILED(hr))
-                return hr;
-        }
-        else
-        {
-            _ASSERTE( TypeFromToken(md)==mdtTypeDef );
-            hr = m_ilCode->m_function->GetModule()->
-                LookupClassByToken(md, &cc);
-            
-            if (FAILED(hr))
-                return hr;                
-        }
 
-        hr = cc->GetObjectSize(&cbType);
-        if (FAILED(hr))
-            return hr;
+    CordbType *argType;
 
-#ifdef _DEBUG        
-        bool ValClassCheck;
-        cc->IsValueClass(&ValClassCheck);
-        _ASSERTE( ValClassCheck == true);
-#endif // _DEBUG        
-    }
+    IfFailRet( LoadTyParRepresentations() );
+
+    IfFailRet( CordbType::SigToType(GetModule(), &m_sig[cb], m_tyParReps, &argType) );
+
+    hr = argType->GetObjectSize(&cbType);
+    if (FAILED(hr)) 
+        return hr;
     
     rpCur += max(cbType, cbArchitectureMin);
 #endif
@@ -3997,41 +4024,15 @@ HRESULT CordbJITILFrame::FabricateNativeInfo(DWORD dwIndex,
         m_rgNVI[i].varNumber = i;
         m_rgNVI[i].loc.vlType = ICorDebugInfo::VLT_FIXED_VA;
 
-        // Ugly code to get size of thingee, including value type thingees
-        cbType = _sizeOfElementInstance(&m_sig[cb], &md);           
-        if (md != mdTokenNil)
-        {
-            if (TypeFromToken(md)==mdtTypeRef)
-            {
-                hr = m_ilCode->m_function->GetModule()
-                    ->ResolveTypeRef(md, &cc);
-                
-                if (FAILED(hr))
-                    return hr;
-            }
-            else
-            {
-                _ASSERTE( TypeFromToken(md)==mdtTypeDef );
-                hr = m_ilCode->m_function->GetModule()->
-                    LookupClassByToken(md, &cc);
-            
-                if (FAILED(hr))
-                    return hr;                
-            }
+		IfFailRet( LoadTyParRepresentations() );
 
-            _ASSERTE( cc != NULL );
-            hr = cc->GetObjectSize(&cbType);
-            
-            if (FAILED(hr))
-                return hr;
-
-#ifdef _DEBUG        
-            bool ValClassCheck;
-            cc->IsValueClass(&ValClassCheck);
-            _ASSERTE( ValClassCheck == true);
-#endif // _DEBUG
-        }
-
+		hr = CordbType::SigToType(GetModule(), &m_sig[cb], m_tyParReps, &argType);
+		if (FAILED(hr)) 
+			return hr;
+        hr = argType->GetObjectSize(&cbType);
+		if (FAILED(hr)) 
+			return hr;
+		
 #ifdef _X86_ // STACK_GROWS_DOWN_ON_ARGS_WALK
         rpCur -= max(cbType, cbArchitectureMin);
         m_rgNVI[i].loc.vlFixedVarArg.vlfvOffset = (BYTE *)m_rpFirstArg - rpCur;
@@ -4055,13 +4056,11 @@ HRESULT CordbJITILFrame::FabricateNativeInfo(DWORD dwIndex,
 HRESULT CordbJITILFrame::ILVariableToNative(DWORD dwIndex,
                                             SIZE_T ip,
                                         ICorJitInfo::NativeVarInfo **ppNativeInfo)
-{
-    CordbFunction *pFunction =  m_ilCode->m_function;
-    
+{    
     // We keep the fixed argument native var infos in the
     // CordbFunction, which only is an issue for var args info:
     if (!m_fVarArgFnx || //not  a var args function
-        dwIndex < pFunction->m_argumentCount || // var args,fixed arg
+        dwIndex < m_nativeFrame->m_jitinfo->m_argumentCount || // var args,fixed arg
            // note that this include the implicit 'this' for nonstatic fnxs
         dwIndex >= m_argCount ||// var args, local variable
         m_sig == NULL ) //we don't have any VA info
@@ -4075,10 +4074,10 @@ HRESULT CordbJITILFrame::ILVariableToNative(DWORD dwIndex,
             m_sig != NULL)
         {
             dwIndex -= m_argCount;
-            dwIndex += pFunction->m_argumentCount;
+            dwIndex += m_nativeFrame->m_jitinfo->m_argumentCount;
         }
 
-        return pFunction->ILVariableToNative(dwIndex,
+        return m_nativeFrame->m_jitinfo->ILVariableToNative(dwIndex,
                                              m_nativeFrame->m_ip,
                                              ppNativeInfo);
     }
@@ -4087,9 +4086,10 @@ HRESULT CordbJITILFrame::ILVariableToNative(DWORD dwIndex,
 }   
 
 HRESULT CordbJITILFrame::GetArgumentType(DWORD dwIndex,
-                                         ULONG *pcbSigBlob,
-                                         PCCOR_SIGNATURE *ppvSigBlob)
+                                         CordbType **res)
 {
+	HRESULT hr;
+   	IfFailRet( LoadTyParRepresentations() );
     if (m_fVarArgFnx && m_sig != NULL)
     {
         ULONG cArgs;
@@ -4103,8 +4103,9 @@ HRESULT CordbJITILFrame::GetArgumentType(DWORD dwIndex,
             {
                 // Return the signature for the 'this' pointer for the
                 // class this method is in.
-                return m_ilCode->m_function->m_class
-                    ->GetThisSignature(pcbSigBlob, ppvSigBlob);
+				//
+
+                return m_ilCode->m_function->m_class->GetThisType(m_tyParReps, res);
             }
             else
                 dwIndex--;
@@ -4118,15 +4119,13 @@ HRESULT CordbJITILFrame::GetArgumentType(DWORD dwIndex,
         cb += _skipFunkyModifiersInSignature(&m_sig[cb]);
         cb += _detectAndSkipVASentinel(&m_sig[cb]);
         
-        *pcbSigBlob = m_cbSig - cb;
-        *ppvSigBlob = &(m_sig[cb]);
-        return S_OK;
+		return CordbType::SigToType(GetModule(), &m_sig[cb], m_tyParReps, res);
     }
     else
     {
         return m_ilCode->m_function->GetArgumentType(dwIndex,
-                                                     pcbSigBlob,
-                                                     ppvSigBlob);
+                                                     m_tyParReps,
+													 res);
     }
 }
 
@@ -4134,8 +4133,7 @@ HRESULT CordbJITILFrame::GetArgumentType(DWORD dwIndex,
 // GetNativeVariable uses the JIT variable information to delegate to
 // the native frame when the value is really created.
 //
-HRESULT CordbJITILFrame::GetNativeVariable(ULONG cbSigBlob,
-                                           PCCOR_SIGNATURE pvSigBlob,
+HRESULT CordbJITILFrame::GetNativeVariable(CordbType *type,
                                            ICorJitInfo::NativeVarInfo *pJITInfo,
                                            ICorDebugValue **ppValue)
 {
@@ -4146,7 +4144,7 @@ HRESULT CordbJITILFrame::GetNativeVariable(ULONG cbSigBlob,
     case ICorJitInfo::VLT_REG:
         hr = m_nativeFrame->GetLocalRegisterValue(
                                  g_JITToCorDbgReg[pJITInfo->loc.vlReg.vlrReg],
-                                 cbSigBlob, pvSigBlob, ppValue);
+                                 type, ppValue);
         break;
 
     case ICorJitInfo::VLT_STK:
@@ -4159,7 +4157,7 @@ HRESULT CordbJITILFrame::GetNativeVariable(ULONG cbSigBlob,
                                     pJITInfo->loc.vlStk.vlsOffset);
 
             hr = m_nativeFrame->GetLocalMemoryValue(pRemoteValue,
-                                                    cbSigBlob, pvSigBlob,
+                                                    type,
                                                     ppValue);
         }
         break;
@@ -4168,7 +4166,7 @@ HRESULT CordbJITILFrame::GetNativeVariable(ULONG cbSigBlob,
         hr = m_nativeFrame->GetLocalDoubleRegisterValue(
                             g_JITToCorDbgReg[pJITInfo->loc.vlRegReg.vlrrReg2],
                             g_JITToCorDbgReg[pJITInfo->loc.vlRegReg.vlrrReg1],
-                            cbSigBlob, pvSigBlob, ppValue);
+                            type, ppValue);
         break;
 
     case ICorJitInfo::VLT_REG_STK:
@@ -4183,7 +4181,7 @@ HRESULT CordbJITILFrame::GetNativeVariable(ULONG cbSigBlob,
             hr = m_nativeFrame->GetLocalMemoryRegisterValue(
                           pRemoteValue,
                           g_JITToCorDbgReg[pJITInfo->loc.vlRegStk.vlrsReg],
-                          cbSigBlob, pvSigBlob, ppValue);
+                          type, ppValue);
         }
         break;
 
@@ -4198,7 +4196,7 @@ HRESULT CordbJITILFrame::GetNativeVariable(ULONG cbSigBlob,
 
             hr = m_nativeFrame->GetLocalRegisterMemoryValue(
                           g_JITToCorDbgReg[pJITInfo->loc.vlStkReg.vlsrReg],
-                          pRemoteValue, cbSigBlob, pvSigBlob, ppValue);
+                          pRemoteValue, type, ppValue);
         }
         break;
 
@@ -4212,7 +4210,7 @@ HRESULT CordbJITILFrame::GetNativeVariable(ULONG cbSigBlob,
                                     pJITInfo->loc.vlStk2.vls2Offset);
 
             hr = m_nativeFrame->GetLocalMemoryValue(pRemoteValue,
-                                                    cbSigBlob, pvSigBlob,
+                                                    type,
                                                     ppValue);
         }
         break;
@@ -4224,7 +4222,7 @@ HRESULT CordbJITILFrame::GetNativeVariable(ULONG cbSigBlob,
     case ICorJitInfo::VLT_MEMORY:
         hr = m_nativeFrame->GetLocalMemoryValue(
                                 PTR_TO_CORDB_ADDRESS(pJITInfo->loc.vlMemory.rpValue),
-                                cbSigBlob, pvSigBlob,
+                                type,
                                 ppValue);
         break;
 
@@ -4246,7 +4244,7 @@ HRESULT CordbJITILFrame::GetNativeVariable(ULONG cbSigBlob,
 #endif
 
         hr = m_nativeFrame->GetLocalMemoryValue(pRemoteValue,
-                                                cbSigBlob, pvSigBlob,
+                                                type,
                                                 ppValue);
                                                 
         break;
@@ -4309,7 +4307,7 @@ HRESULT CordbJITILFrame::GetLocalVariable(DWORD dwIndex,
     // loaded from the left side.
     //
 
-    HRESULT hr = pFunction->LoadNativeInfo();
+    HRESULT hr = m_nativeFrame->m_jitinfo->LoadNativeInfo();
 
     if (SUCCEEDED(hr))
     {
@@ -4320,7 +4318,7 @@ HRESULT CordbJITILFrame::GetLocalVariable(DWORD dwIndex,
         }
         else
         {
-            cArgs = pFunction->m_argumentCount;
+            cArgs = m_nativeFrame->m_jitinfo->m_argumentCount;
         }
 
         hr = ILVariableToNative(dwIndex + cArgs,
@@ -4329,21 +4327,21 @@ HRESULT CordbJITILFrame::GetLocalVariable(DWORD dwIndex,
 
         if (SUCCEEDED(hr))
         {
-            // Get the type of this argument from the function
-            ULONG cbSigBlob;
-            PCCOR_SIGNATURE pvSigBlob;
+	        IfFailRet( LoadTyParRepresentations() );
 
-            hr = pFunction->GetLocalVariableType(dwIndex,&cbSigBlob, &pvSigBlob);
+            // Get the type of this argument from the function
+            CordbType *type;
+            hr = pFunction->GetLocalVariableType(dwIndex,m_tyParReps,&type);
 
             if (SUCCEEDED(hr))
-                hr = GetNativeVariable(cbSigBlob, pvSigBlob,
-                                       pNativeInfo, ppValue);
+                hr = GetNativeVariable(type, pNativeInfo, ppValue);
         }
     }
 
     return hr;
 }
 
+/*
 HRESULT CordbJITILFrame::GetLocalVariableWithType(ULONG cbSigBlob,
                                                   PCCOR_SIGNATURE pvSigBlob,
                                                   DWORD dwIndex, 
@@ -4387,7 +4385,7 @@ HRESULT CordbJITILFrame::GetLocalVariableWithType(ULONG cbSigBlob,
         }
         else
         {
-            cArgs = pFunction->m_argumentCount;
+            cArgs = m_argumentCount;
         }
 
         hr =ILVariableToNative(dwIndex + cArgs,
@@ -4400,6 +4398,7 @@ HRESULT CordbJITILFrame::GetLocalVariableWithType(ULONG cbSigBlob,
 
     return hr;
 }
+*/
 
 HRESULT CordbJITILFrame::EnumerateArguments(ICorDebugValueEnum **ppValueEnum)
 {
@@ -4440,14 +4439,13 @@ HRESULT CordbJITILFrame::GetArgument(DWORD dwIndex, ICorDebugValue **ppValue)
     CORDBRequireProcessStateOK(GetProcess());
 #endif    
 
-    CordbFunction *pFunction = m_ilCode->m_function;
     ICorJitInfo::NativeVarInfo *pNativeInfo;
 
     //
     // First, make sure that we've got the jitted variable location data
     // loaded from the left side.
     //
-    HRESULT hr = pFunction->LoadNativeInfo();
+    HRESULT hr = m_nativeFrame->m_jitinfo->LoadNativeInfo();
 
     if (SUCCEEDED(hr))
     {
@@ -4456,20 +4454,19 @@ HRESULT CordbJITILFrame::GetArgument(DWORD dwIndex, ICorDebugValue **ppValue)
         if (SUCCEEDED(hr))
         {
             // Get the type of this argument from the function
-            ULONG cbSigBlob;
-            PCCOR_SIGNATURE pvSigBlob;
+            CordbType *type;
 
-            hr = GetArgumentType(dwIndex, &cbSigBlob, &pvSigBlob);
+            hr = GetArgumentType(dwIndex, &type);
 
             if (SUCCEEDED(hr))
-                hr = GetNativeVariable(cbSigBlob, pvSigBlob,
-                                       pNativeInfo, ppValue);
+                hr = GetNativeVariable(type, pNativeInfo, ppValue);
         }
     }
 
     return hr;
 }
 
+/*
 HRESULT CordbJITILFrame::GetArgumentWithType(ULONG cbSigBlob,
                                              PCCOR_SIGNATURE pvSigBlob,
                                              DWORD dwIndex, 
@@ -4516,6 +4513,7 @@ HRESULT CordbJITILFrame::GetArgumentWithType(ULONG cbSigBlob,
 
     return hr;
 }
+*/
 
 HRESULT CordbJITILFrame::GetStackDepth(ULONG32 *pDepth)
 {
@@ -4558,8 +4556,13 @@ HRESULT CordbJITILFrame::GetStackValue(DWORD dwIndex, ICorDebugValue **ppValue)
  * ------------------------------------------------------------------------- */
 
 CordbEval::CordbEval(CordbThread *pThread)
-    : CordbBase(0), m_thread(pThread), m_complete(false),
-      m_successful(false), m_aborted(false), m_resultAddr(NULL),
+    : CordbBase(0),
+      m_thread(pThread),
+      m_function(NULL),
+      m_complete(false),
+      m_successful(false),
+      m_aborted(false),
+      m_resultAddr(NULL),
       m_resultType(ELEMENT_TYPE_VOID),
       m_resultDebuggerModuleToken(NULL),
       m_resultAppDomainToken(NULL),
@@ -4646,8 +4649,6 @@ HRESULT CordbEval::GatherArgInfo(ICorDebugValue *pValue,
 {
     CORDB_ADDRESS addr;
     CorElementType ty;
-    ICorDebugClass *pClass = NULL;
-    ICorDebugModule *pModule = NULL;
     bool needRelease = false;
 
     pValue->GetType(&ty);
@@ -4682,7 +4683,7 @@ HRESULT CordbEval::GatherArgInfo(ICorDebugValue *pValue,
     pValue->GetAddress(&addr);
             
     argData->argAddr = (void*)addr;
-    argData->argType = ty;
+	argData->argType.elementType = ty;
     argData->argRefsInHandles = false;
     argData->argIsLiteral = false;
 
@@ -4692,6 +4693,7 @@ HRESULT CordbEval::GatherArgInfo(ICorDebugValue *pValue,
                 
     switch(ty)
     {
+
     case ELEMENT_TYPE_CLASS:
     case ELEMENT_TYPE_OBJECT:
     case ELEMENT_TYPE_STRING:
@@ -4713,12 +4715,8 @@ HRESULT CordbEval::GatherArgInfo(ICorDebugValue *pValue,
     case ELEMENT_TYPE_VALUETYPE:
         // A value class object
         cv = (CordbValue*)(CordbVCObjectValue*)(ICorDebugObjectValue*)pValue;
-
-        ((CordbVCObjectValue*)(ICorDebugObjectValue*)pValue)->GetClass(&pClass);
-        _ASSERTE(pClass);
-        pClass->GetModule(&pModule);
-        argData->GetClassInfo.classDebuggerModuleToken = ((CordbModule *)pModule)->m_debuggerModuleToken;
-        pClass->GetToken(&(argData->GetClassInfo.classMetadataToken));
+    
+        cv->m_type->TypeToTypeData(&argData->argType);
         break;
 
     default:
@@ -4729,17 +4727,12 @@ HRESULT CordbEval::GatherArgInfo(ICorDebugValue *pValue,
         // buffer area so the left side can get it.
         CordbGenericValue *gv = (CordbGenericValue*)pValue;
         argData->argIsLiteral = gv->CopyLiteralData(argData->argLiteralData);
+        break;
     }
 
     // Is it enregistered?
     if (addr == NULL)
         cv->GetRegisterInfo(argData);
-
-    // clean up
-    if (pClass)
-        pClass->Release();
-    if (pModule)
-        pModule->Release();
 
     // Release pValue if we got it via a dereference from above.
     if (needRelease)
@@ -5107,7 +5100,8 @@ HRESULT CordbEval::NewArray(CorElementType elementType,
         return hr;
     
     // Arg check...
-    if ((elementType == ELEMENT_TYPE_VOID) || (rank == 0) || (dims == NULL))
+    if ((elementType == ELEMENT_TYPE_VOID) || (rank == 0) || (dims == NULL) ||
+		(elementType == ELEMENT_TYPE_WITH) || (elementType == ELEMENT_TYPE_VAR) || (elementType == ELEMENT_TYPE_MVAR))
         return E_INVALIDARG;
 
     // If you want a class, you gotta pass a class.
@@ -5142,19 +5136,19 @@ HRESULT CordbEval::NewArray(CorElementType elementType,
 
     event.FuncEval.arrayRank = rank;
     event.FuncEval.arrayDataLen = dataLen;
-    event.FuncEval.arrayElementType = elementType;
+    event.FuncEval.arrayType.elementType = elementType;
 
     if (pElementClass != NULL)
     {
         CordbClass *c = (CordbClass*)pElementClass;
 
-        event.FuncEval.arrayClassMetadataToken = c->m_id;
-        event.FuncEval.arrayClassDebuggerModuleToken = c->GetModule()->m_debuggerModuleToken;
+        event.FuncEval.arrayType.metadataToken = c->m_id;
+        event.FuncEval.arrayType.debuggerModuleToken = c->GetModule()->m_debuggerModuleToken;
     }
     else
     {
-        event.FuncEval.arrayClassMetadataToken = mdTypeDefNil;
-        event.FuncEval.arrayClassDebuggerModuleToken = NULL;
+        event.FuncEval.arrayType.metadataToken = mdTypeDefNil;
+        event.FuncEval.arrayType.debuggerModuleToken = NULL;
     }
 
     // Note: no function or module here...
@@ -5270,27 +5264,27 @@ HRESULT CordbEval::GetResult(ICorDebugValue **ppResult)
 
     // Make a ICorDebugValue out of the result. We need the
     // CordbModule that the result is relative to, so find the
-    // appdomain, then the module within that app domain.
+    // appdomain.
+	// GENERICS: we no longer need the module, as we don't have to interpret
+	// any signature w.r.t. a module.  We could probably eliminate m_resultDebuggerModuleToken
+	// altogether from the messages.
     CordbAppDomain *appdomain;
-    CordbModule *module;
 
     if (m_resultDebuggerModuleToken != NULL)
     {
         appdomain = (CordbAppDomain*) m_thread->GetProcess()->m_appDomains.GetBase((ULONG)m_resultAppDomainToken);
         _ASSERTE(appdomain != NULL);
-
-        module = (CordbModule*) appdomain->LookupModule(m_resultDebuggerModuleToken);
     }
     else
     {
-        // Some results from CreateString and CreateArray wont have a module. But that's okay, any module will do.
         appdomain = m_thread->GetAppDomain();
-        module = m_thread->GetAppDomain()->GetAnyModule();
     }
 
-    _ASSERTE(module != NULL);
+	CordbType *typ;
+	hr = CordbType::MkNullaryType(appdomain, m_resultType, &typ);
+    if (FAILED(hr))
+        return hr;
 
-    COR_SIGNATURE ResultType = m_resultType;
     bool resultInHandle =
         ((m_resultType == ELEMENT_TYPE_CLASS) ||
         (m_resultType == ELEMENT_TYPE_SZARRAY) ||
@@ -5300,10 +5294,7 @@ HRESULT CordbEval::GetResult(ICorDebugValue **ppResult)
 
     // Now that we have the module, go ahead and create the result.
     hr = CordbValue::CreateValueByType(appdomain,
-                                       module,
-                                       sizeof(ResultType),
-                                       &ResultType,
-                                       NULL,
+                                       typ,
                                        m_resultAddr,
                                        NULL,
                                        resultInHandle,
@@ -5334,22 +5325,29 @@ HRESULT CordbEval::CreateValue(CorElementType elementType,
                                ICorDebugClass *pElementClass,
                                ICorDebugValue **ppValue)
 {
+	CordbType *typ;
+	HRESULT hr = CordbType::MkNonGenericType(m_thread->GetAppDomain(), elementType, (CordbClass *) pElementClass, &typ);
+    if (FAILED(hr))
+        return hr;
+	return CreateValue(typ, ppValue);
+}
+    
+HRESULT CordbEval::CreateValue(CordbType *pType,
+                               ICorDebugValue **ppValue)
+{
     HRESULT hr = S_OK;
     
     VALIDATE_POINTER_TO_OBJECT(ppValue, ICorDebugValue **);
 
+    CorElementType elementType = pType->m_elementType;
     if (((elementType < ELEMENT_TYPE_BOOLEAN) ||
          (elementType > ELEMENT_TYPE_R8)) &&
-        (elementType != ELEMENT_TYPE_CLASS))
+        !(elementType == ELEMENT_TYPE_CLASS))
         return E_INVALIDARG;
-
-    COR_SIGNATURE et = elementType;
 
     if (elementType == ELEMENT_TYPE_CLASS)
     {
-        CordbReferenceValue *rv = new CordbReferenceValue(
-                                                1,
-                                                &et);
+        CordbReferenceValue *rv = new CordbReferenceValue(pType);
         
         if (rv)
         {
@@ -5369,9 +5367,7 @@ HRESULT CordbEval::CreateValue(CorElementType elementType,
     else
     {
         // Create a generic value.
-        CordbGenericValue *gv = new CordbGenericValue(
-                                             1,
-                                             &et);
+        CordbGenericValue *gv = new CordbGenericValue(pType);
 
         if (gv)
         {
@@ -5392,3 +5388,153 @@ HRESULT CordbEval::CreateValue(CorElementType elementType,
     return hr;
 }
     
+/* ------------------------------------------------------------------------- *
+ * TypeParameter Enumerator class
+ *
+ * Used by CordbJITILFrame for EnumLocalVars & EnumArgs.
+ * NOTE NOTE NOTE WE ASSUME THAT when a frameSrc of type JIT_IL_FRAME is used,
+ * that the 'frame' argument is actually the CordbJITILFrame's native frame
+ * member variable.
+ * ------------------------------------------------------------------------- */
+
+CordbTypeEnum::CordbTypeEnum(unsigned int cTypars, CordbType **ppTypars) :
+    CordbBase(0)
+{
+    m_ppTypars = ppTypars;
+    
+    m_iCurrent = 0;
+    m_iMax = cTypars; 
+	for (unsigned int i = 0; i < m_iMax; i++) 
+		m_ppTypars[i]->AddRef();
+}
+
+
+CordbTypeEnum::~CordbTypeEnum() 
+{
+	for (unsigned int i = 0; i < m_iMax; i++) 
+		m_ppTypars[i]->Release();
+}
+
+HRESULT CordbTypeEnum::QueryInterface(REFIID id, void **pInterface)
+{
+    if (id == IID_ICorDebugEnum)
+        *pInterface = (ICorDebugEnum*)this;
+    else if (id == IID_ICorDebugTypeEnum)
+        *pInterface = (ICorDebugTypeEnum*)this;
+    else if (id == IID_IUnknown)
+        *pInterface = (IUnknown*)(ICorDebugTypeEnum*)this;
+    else
+    {
+        *pInterface = NULL;
+        return E_NOINTERFACE;
+    }
+
+    AddRef();
+    return S_OK;
+}
+
+HRESULT CordbTypeEnum::Skip(ULONG celt)
+{
+    INPROC_LOCK();
+
+    HRESULT hr = E_FAIL;
+    if ( (m_iCurrent+celt) < m_iMax ||
+         celt == 0)
+    {
+        m_iCurrent += celt;
+        hr = S_OK;
+    }
+
+    INPROC_UNLOCK();
+    
+    return hr;
+}
+
+HRESULT CordbTypeEnum::Reset(void)
+{
+    m_iCurrent = 0;
+    return S_OK;
+}
+
+HRESULT CordbTypeEnum::Clone(ICorDebugEnum **ppEnum)
+{
+    VALIDATE_POINTER_TO_OBJECT(ppEnum, ICorDebugEnum **);
+
+    HRESULT hr = S_OK;
+    INPROC_LOCK();
+    
+    CordbTypeEnum *pCVE = new CordbTypeEnum( m_iMax, m_ppTypars );
+    if ( pCVE == NULL )
+    {
+        (*ppEnum) = NULL;
+        hr = E_OUTOFMEMORY;
+        goto LExit;
+    }
+
+    pCVE->AddRef();
+    (*ppEnum) = (ICorDebugEnum*)pCVE;
+
+LExit:
+    INPROC_UNLOCK();
+    
+    return hr;
+}
+
+HRESULT CordbTypeEnum::GetCount(ULONG *pcelt)
+{
+    VALIDATE_POINTER_TO_OBJECT(pcelt, ULONG *);
+    
+    if( pcelt == NULL)
+        return E_INVALIDARG;
+    
+    (*pcelt) = m_iMax;
+    return S_OK;
+}
+
+//
+// In the event of failure, the current pointer will be left at
+// one element past the troublesome element.  Thus, if one were
+// to repeatedly ask for one element to iterate through the
+// array, you would iterate exactly m_iMax times, regardless
+// of individual failures.
+HRESULT CordbTypeEnum::Next(ULONG celt, ICorDebugType *values[], ULONG *pceltFetched)
+{
+    VALIDATE_POINTER_TO_OBJECT_ARRAY(values, ICorDebugClass *, 
+        celt, true, true);
+    VALIDATE_POINTER_TO_OBJECT(pceltFetched, ULONG *);
+
+    if (!pceltFetched && (celt != 1))
+        return E_INVALIDARG;
+    
+    HRESULT hr = S_OK;
+
+    INPROC_LOCK();
+    
+    int iMax = min( m_iMax, m_iCurrent+celt);
+    int i;
+    for (i = m_iCurrent; i< iMax;i++)
+    {
+     	//printf("CordbTypeEnum::Next, returning = 0x%08x.\n", m_ppTypars[i]);
+		values[i-m_iCurrent] = m_ppTypars[i];
+		values[i-m_iCurrent]->AddRef();
+    }
+
+    int count = (i - m_iCurrent);
+    
+    if ( FAILED( hr ) )
+    {   //we failed: +1 pushes us past troublesome element
+        m_iCurrent += 1 + count;
+    }
+    else
+    {
+        m_iCurrent += count;
+    }
+
+    if (pceltFetched)
+        *pceltFetched = count;
+    
+    INPROC_UNLOCK();
+    
+    return hr;
+}
+

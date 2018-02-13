@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -213,9 +218,11 @@ AGGSYM *IMPORTER::ImportOneTypeBase(PINFILESYM infile, DWORD scope, mdTypeDef to
     PSYM symConflict;                  // Possibly conflicting symbol.
     mdToken tkExtends;
 
+    IMetaDataImport *metaimport = infile->metaimport[scope];
+
     // Get namespace, name, and flags for the type.
     TimerStart(TIME_IMI_GETTYPEDEFPROPS);
-    CheckHR(infile->metaimport[scope]->GetTypeDefProps(token,
+    CheckHR(metaimport->GetTypeDefProps(token,
             fullNameText, lengthof(fullNameText), &cchFullNameText,      // Type name
             pFlags,                                                      // Flags
             &tkExtends                                                   // Extends
@@ -255,7 +262,7 @@ AGGSYM *IMPORTER::ImportOneTypeBase(PINFILESYM infile, DWORD scope, mdTypeDef to
 
         // Get the class this class is nested within.
         TimerStart(TIME_IMI_GETNESTEDCLASSPROPS);
-        CheckHR(infile->metaimport[scope]->GetNestedClassProps(token, &tkOuter), infile);
+        CheckHR(metaimport->GetNestedClassProps(token, &tkOuter), infile);
         TimerStop(TIME_IMI_GETNESTEDCLASSPROPS);
 
         parent = ResolveTypeRef(infile, scope, tkOuter, false);
@@ -348,6 +355,9 @@ AGGSYM *IMPORTER::ImportOneType(PINFILESYM infile, DWORD scope, mdTypeDef token)
     if (!sym)
         return NULL;
 
+    IMetaDataImport *metaimport = infile->metaimport[scope];
+    WCHAR fullNameText[MAX_FULLNAME_SIZE];  // full name of type.
+    ULONG cchFullNameText;
     sym->access = AccessFromTypeFlags(flags, sym);
 
     if (isValueType) {
@@ -369,6 +379,55 @@ AGGSYM *IMPORTER::ImportOneType(PINFILESYM infile, DWORD scope, mdTypeDef token)
     sym->isComImport = !!IsTdImport(flags);
 
 	ASSERT(!(sym->isEnum && (sym->isStruct || sym->isClass || sym->isDelegate)));
+
+    // Set the type variables for the sym, but not the bounds.
+    mdGenericPar typars[8];
+
+    HCORENUM enumTyPars = 0;
+    PTYVARSYM * ppTypeFormals = NULL;
+    unsigned int cTypeFormals = 0;
+    ULONG cTyPars;
+    do {
+        TimerStart(TIME_IMI_ENUMFORMALTYPARS);
+        CheckHR(metaimport->EnumGenericPars(&enumTyPars, sym->tokenImport, typars, lengthof(typars), &cTyPars), infile);
+        TimerStop(TIME_IMI_ENUMFORMALTYPARS);
+
+        // Process each typar
+        if (cTyPars) {
+            cTypeFormals += cTyPars;
+            PTYVARSYM * ppTypeFormalsNew = (TYVARSYM **) _alloca(cTypeFormals * sizeof(PTYVARSYM));
+            if (ppTypeFormals) 
+                memcpy(ppTypeFormalsNew, ppTypeFormals, (cTypeFormals - cTyPars) * sizeof(PTYVARSYM));
+            ppTypeFormals = ppTypeFormalsNew;
+        }
+        for (unsigned int iTyPar = 0; iTyPar < cTyPars; ++iTyPar) {
+            mdToken parent;
+            ULONG pulSequence;
+            mdToken bound = mdTokenNil;
+            TimerStart(TIME_IMI_GETFORMALTYPARPROPS); 
+            CheckHR(metaimport->GetGenericParProps(
+                        typars[iTyPar],
+                        &pulSequence,
+					    NULL, // flags
+                        &parent,
+					    NULL, // kind
+					    &bound,
+                        fullNameText, 
+                        lengthof(fullNameText),
+                        &cchFullNameText), infile);
+            TimerStop(TIME_IMI_GETFORMALTYPARPROPS);
+            PNAME tyvarName = compiler()->namemgr->AddString(fullNameText);
+            TYVARSYM * tyvar = compiler()->symmgr.CreateTyVar(tyvarName, sym);
+            tyvar->access = ACC_PRIVATE;
+            tyvar->num = pulSequence;
+            tyvar->parseTree = NULL;
+            tyvar->boundTokenImport = bound;
+            ppTypeFormals[iTyPar] = tyvar;
+        }
+    } while (cTyPars > 0);
+    metaimport->CloseEnum(enumTyPars);
+    sym->ppTypeFormals = (TYVARSYM **) compiler()->symmgr.AllocParams(cTypeFormals, (TYPESYM **) ppTypeFormals);
+    sym->cTypeFormals = cTypeFormals;
 
     return sym;
 }
@@ -777,6 +836,27 @@ bool IMPORTER::GetTypeRefFullName(PINFILESYM inputfile, DWORD scope, mdToken tok
 }
 
 
+PTYPESYM IMPORTER::ResolveTypeRefOrSpec(PINFILESYM inputfile, DWORD scope, mdToken token, bool mustExist,
+                                 unsigned short cClassTypeFormals, PTYVARSYM *ppClassTypeFormals,
+                                 unsigned short cMethTypeFormals, PTYVARSYM *ppMethTypeFormals
+                                        )
+{
+    if (TypeFromToken(token) == mdtTypeSpec) {
+        ASSERT(inputfile->metaimport[scope]);
+        IMetaDataImport * metaimport = inputfile->metaimport[scope];
+        PCCOR_SIGNATURE sig;
+        ULONG sigsz;
+        TimerStart(TIME_IMI_GETTYPEREFPROPS);
+        CheckHR(metaimport->GetTypeSpecFromToken(token,&sig,&sigsz), inputfile);
+        TimerStop(TIME_IMI_GETTYPEREFPROPS);
+
+        return ImportSigType(inputfile, scope, &sig, false, false, NULL, mustExist, cClassTypeFormals, ppClassTypeFormals, cMethTypeFormals, ppMethTypeFormals);
+
+    } else {
+        return ResolveTypeRef(inputfile, scope, token, mustExist);
+    }
+}
+
 /*
  * Resolves a typeref or typedef to an actual class. If the class is unknown, then NULL is returned (but
  * no error is reported to the user.)  If mustExist is true then NEVER creates ANY symbols
@@ -800,7 +880,7 @@ PAGGSYM IMPORTER::ResolveTypeRef(PINFILESYM inputfile, DWORD scope, mdToken toke
 		    inputfile);
         TimerStop(TIME_IMI_GETTYPEREFPROPS);
     }
-    else {
+    else if (TypeFromToken(token) == mdtTypeDef) {
         TimerStart(TIME_IMI_GETTYPEDEFPROPS);
         CheckHR(metaimport->GetTypeDefProps(token,
                 fullNameText, lengthof(fullNameText), &cchFullNameText,      // Type name
@@ -815,6 +895,8 @@ PAGGSYM IMPORTER::ResolveTypeRef(PINFILESYM inputfile, DWORD scope, mdToken toke
             CheckHR(metaimport->GetNestedClassProps(token, &tkResolutionScope), inputfile);
             TimerStop(TIME_IMI_GETNESTEDCLASSPROPS);
         }
+    } else {
+        return NULL;
     }
 
     // Resolve the type name.
@@ -834,17 +916,17 @@ PAGGSYM IMPORTER::ResolveTypeRef(PINFILESYM inputfile, DWORD scope, mdToken toke
 
 
 /*
- * Resolve a base class or interface name. Similar to ResolveTypeRef,
+ * Resolve a base class or interface name. Similar to ResolveTypeRefOrSpec,
  * but reports error on failure, and forces the base class or interface to
  * be declared.
  */
-PAGGSYM IMPORTER::ResolveBaseRef(PINFILESYM inputfile, DWORD scope, mdToken tokenBase, PAGGSYM symDerived)
+PTYPESYM IMPORTER::ResolveBaseRef(PINFILESYM inputfile, DWORD scope, mdToken tokenBase, PAGGSYM symDerived)
 {
     ASSERT(inputfile->metaimport[scope]);
     IMetaDataImport * metaimport = inputfile->metaimport[scope];
-    PAGGSYM symBase;
+    PTYPESYM symBase;
 
-    symBase = ResolveTypeRef(inputfile, scope, tokenBase, true);
+    symBase = ResolveTypeRefOrSpec(inputfile, scope, tokenBase, true, symDerived->cTypeFormals, symDerived->ppTypeFormals);
 
     if (! symBase) {
         // Couldn't resolve base class. Give a good error message.
@@ -913,7 +995,7 @@ void IMPORTER::GetTypeRefAssemblyName(PINFILESYM inputfile, DWORD scope, mdToken
 /*
  * Imports an interface declared on a class or interface.
  */
-PAGGSYM IMPORTER::ImportInterface(PINFILESYM inputfile, DWORD scope, mdInterfaceImpl tokenIntf, PAGGSYM symDerived)
+PTYPESYM IMPORTER::ImportInterface(PINFILESYM inputfile, DWORD scope, mdInterfaceImpl tokenIntf, PAGGSYM symDerived)
 {
     ASSERT(inputfile->metaimport[scope]);
     IMetaDataImport * metaimport = inputfile->metaimport[scope];
@@ -984,14 +1066,29 @@ void IMPORTER::SetAccessLevel(PSYM sym, DWORD flags)
  * Signatures don't distinguish between ref and out parameters,
  * so we just return the base type and return that some byref is present
  * via the returned isByref flags.
+ *
+ * In the case of generics this is complicated by the fact that type variables
+ * (which become TYVARSYMs) must "point" directly to the TYVARSYM corresponding to
+ * the declaration of the type variable.  For example, a generic class C<T> has one child
+ * TYVARSYM for the declaration of T.  All uses of T inside that class must point directly
+ * to (i.e. actually are) that TYVARSYM.  Similarly for methods.  As such, we pass
+ * arrays corresponding to the type variables that are in scope, similar to the arrays
+ * passed into SubstType.
+ *
  */
 PTYPESYM IMPORTER::ImportSigType(PINFILESYM inputfile, DWORD scope, PCCOR_SIGNATURE * sigPtr,
                                  bool canBeVoid, bool canBeByref,
-                                 bool *isCmodOpt, bool mustExist)
+                                 bool *isCmodOpt, bool mustExist,
+                                 // Class and method type arguments that are in scope.
+                                 // Could be concatenated but it's somehow simpler not to.
+                                 unsigned short cClassTypeFormals, PTYVARSYM *ppClassTypeFormals,
+                                 unsigned short cMethTypeFormals, PTYVARSYM *ppMethTypeFormals
+                                 )
 {
     ASSERT(inputfile->metaimport[scope]);
     PCCOR_SIGNATURE sig = *sigPtr;
     PTYPESYM sym = NULL;
+    PAGGSYM agg = NULL;
     mdTypeRef token;
 
     switch (*sig++) {
@@ -1065,22 +1162,62 @@ PTYPESYM IMPORTER::ImportSigType(PINFILESYM inputfile, DWORD scope, PCCOR_SIGNAT
     case ELEMENT_TYPE_CLASS:
         // Element of class or struct type.
         token = CorSigUncompressToken(sig);  // updates sig.
-        sym = ResolveTypeRef(inputfile, scope, token, mustExist);
+        agg = ResolveTypeRef(inputfile, scope, token, mustExist);
 
         // ELEMENT_TYPE_CLASS followe by value type means the "boxed" version, which 
         // we don't support. Check for this case and return NULL.
-        if (sym && sym->isStructType())
+        if (agg && agg->isStructType())
             sym = NULL;
+        else 
+            sym = agg;
         break;
 
     case ELEMENT_TYPE_SZARRAY:
         // Single-dimensional array with 0 lower bound
-        sym = ImportSigType(inputfile, scope, &sig, false, false, isCmodOpt, mustExist);  // Get element type.
+        sym = ImportSigType(inputfile, scope, &sig, false, false, isCmodOpt, mustExist, cClassTypeFormals, ppClassTypeFormals, cMethTypeFormals, ppMethTypeFormals);  // Get element type.
         if (sym) {
             sym = compiler()->symmgr.GetArray(sym, 1);
         }
         break;
 
+    case ELEMENT_TYPE_VAR: {
+        unsigned char b = (*sig++); 
+        if (b < cClassTypeFormals && ppClassTypeFormals) 
+            sym = ppClassTypeFormals[b];
+        else 
+            sym = NULL;
+        break;
+    }                       
+    case ELEMENT_TYPE_MVAR: {
+        unsigned char b = (*sig++);
+        if (b < cMethTypeFormals && ppMethTypeFormals)
+            sym = ppMethTypeFormals[b];
+        else 
+            sym = NULL;
+        break;
+    }                       
+    case ELEMENT_TYPE_WITH: {
+        // Instantiated generic type
+        unsigned char b = (*sig++);
+        token = CorSigUncompressToken(sig);  // updates sig.
+        unsigned int cArgs = (unsigned int) CorSigUncompressData(sig);
+        AGGSYM *agg = ResolveTypeRef(inputfile, scope, token, false);
+        PTYPESYM * ppArgs = (TYPESYM **) _alloca(cArgs * sizeof(PTYPESYM));
+        for (unsigned int i = 0; i<cArgs; i++) {
+            ppArgs[i] = ImportSigType(inputfile, scope, &sig, false, false, isCmodOpt, mustExist, cClassTypeFormals, ppClassTypeFormals, cMethTypeFormals, ppMethTypeFormals);  // Get element type.
+        }
+        PTYPESYM *ppArgsUnique = compiler()->symmgr.AllocParams(cArgs, ppArgs);
+        // ELEMENT_TYPE_CLASS followed by value type means the "boxed" version, which 
+        // we don't support. Check for this case and return NULL.
+        if (b == ELEMENT_TYPE_CLASS && agg && agg->isStructType())
+            sym = NULL;
+        else if (agg && ppArgsUnique) {
+            sym = compiler()->symmgr.GetInstAgg(agg,cArgs,ppArgsUnique);
+        } else {
+            sym = NULL;
+        }
+        break;
+    }
 
     case ELEMENT_TYPE_ARRAY:
         // Multi-dimensional array. We only support arrays
@@ -1090,12 +1227,11 @@ PTYPESYM IMPORTER::ImportSigType(PINFILESYM inputfile, DWORD scope, PCCOR_SIGNAT
         bool badArray;
 
         badArray = false;
-        sym = ImportSigType(inputfile, scope, &sig, false, false, isCmodOpt, mustExist);  // Get element type.
+        sym = ImportSigType(inputfile, scope, &sig, false, false, isCmodOpt, mustExist, cClassTypeFormals, ppClassTypeFormals, cMethTypeFormals, ppMethTypeFormals);  // Get element type.
 
         rank = CorSigUncompressData(sig);  // Get rank.
         if (rank == 0) {
             // Unknown rank -- we don't support at all 
-            sym = NULL;
             break;
         }
 
@@ -1125,14 +1261,14 @@ PTYPESYM IMPORTER::ImportSigType(PINFILESYM inputfile, DWORD scope, PCCOR_SIGNAT
 
     case ELEMENT_TYPE_PTR:
         // Pointer type. Note that void * is a valid type here.
-        sym = ImportSigType(inputfile, scope, &sig, true, false, isCmodOpt, mustExist);
+        sym = ImportSigType(inputfile, scope, &sig, true, false, isCmodOpt, mustExist, cClassTypeFormals, ppClassTypeFormals, cMethTypeFormals, ppMethTypeFormals);
         if (sym != NULL)
             sym = compiler()->symmgr.GetPtrType(sym);
         break;
 
     case ELEMENT_TYPE_BYREF:
         // Byref param - could be ref or out, so just return indication of that.
-        sym = ImportSigType(inputfile, scope, &sig, false, false, isCmodOpt, mustExist);
+        sym = ImportSigType(inputfile, scope, &sig, false, false, isCmodOpt, mustExist, cClassTypeFormals, ppClassTypeFormals, cMethTypeFormals, ppMethTypeFormals);
         if (canBeByref && sym)
             sym = compiler()->symmgr.GetParamModifier(sym, false);
         else
@@ -1143,7 +1279,7 @@ PTYPESYM IMPORTER::ImportSigType(PINFILESYM inputfile, DWORD scope, PCCOR_SIGNAT
         token = CorSigUncompressToken(sig);  // Ignore the following optional token
 
         // get the 'real' type here
-        sym = ImportSigType(inputfile, scope, &sig, canBeVoid, canBeByref, isCmodOpt, mustExist);
+        sym = ImportSigType(inputfile, scope, &sig, canBeVoid, canBeByref, isCmodOpt, mustExist, cClassTypeFormals, ppClassTypeFormals, cMethTypeFormals, ppMethTypeFormals);
         if (isCmodOpt) {
             *isCmodOpt = true;
         }
@@ -1154,7 +1290,7 @@ PTYPESYM IMPORTER::ImportSigType(PINFILESYM inputfile, DWORD scope, PCCOR_SIGNAT
         token = CorSigUncompressToken(sig);  // Ignore the following optional token
 
         // get the 'real' type here
-        ImportSigType(inputfile, scope, &sig, canBeVoid, canBeByref, isCmodOpt, mustExist);
+        ImportSigType(inputfile, scope, &sig, canBeVoid, canBeByref, isCmodOpt, mustExist, cClassTypeFormals, ppClassTypeFormals, cMethTypeFormals, ppMethTypeFormals);
 
         // We aren't required to understand this, since we don't, just return NULL.
         sym = NULL;
@@ -1164,7 +1300,7 @@ PTYPESYM IMPORTER::ImportSigType(PINFILESYM inputfile, DWORD scope, PCCOR_SIGNAT
         // Something we don't know about.
         if (CorIsModifierElementType((CorElementType) *(sig - 1))) {
             // Consume what is modified.
-            ImportSigType(inputfile, scope, &sig, true, true, isCmodOpt, mustExist);
+            ImportSigType(inputfile, scope, &sig, true, true, isCmodOpt, mustExist, cClassTypeFormals, ppClassTypeFormals, cMethTypeFormals, ppMethTypeFormals);
         }
         sym = NULL;
     }
@@ -1180,7 +1316,7 @@ PTYPESYM IMPORTER::ImportSigType(PINFILESYM inputfile, DWORD scope, PCCOR_SIGNAT
  */
 PTYPESYM IMPORTER::ImportFieldType(PINFILESYM inputfile, DWORD scope, PCCOR_SIGNATURE sig
                                    , bool * isVolatile
-                                   )
+                                   , unsigned short cClassTypeFormals, PTYVARSYM *ppClassTypeFormals)
 {
     ASSERT(inputfile->metaimport[scope]);
     PTYPESYM sym;
@@ -1205,7 +1341,7 @@ PTYPESYM IMPORTER::ImportFieldType(PINFILESYM inputfile, DWORD scope, PCCOR_SIGN
         }
     }
 
-    sym = ImportSigType(inputfile, scope, &sig, false, false, NULL, false);
+    sym = ImportSigType(inputfile, scope, &sig, false, false, NULL, false, cClassTypeFormals, ppClassTypeFormals);
 
     return sym;
 }
@@ -1414,7 +1550,7 @@ void IMPORTER::ImportField(PINFILESYM inputfile, AGGSYM * parent, mdFieldDef tok
     name = compiler()->namemgr->AddString(fieldnameText, cchFieldnameText - 1);
 
     // Import the type of the field.
-    type = ImportFieldType(inputfile, scope, signature, &isVolatile);
+    type = ImportFieldType(inputfile, scope, signature, &isVolatile, ((flags & fdStatic) ? 0 : parent->cTypeFormals), ((flags & fdStatic) ? NULL : parent->ppTypeFormals));
 
     // Enums are a bit special. Non-static fields serve only to record the
     // underlying integral type, and are otherwise ignored. Static fields are
@@ -1946,16 +2082,20 @@ int IMPORTER::GetSignatureCParams(PCCOR_SIGNATURE sig)
  * if the signature has a type we don't handle.
  */
 void IMPORTER::ImportMethodOrPropSignature(PINFILESYM inputfile, mdMethodDef token,
-                                           PCCOR_SIGNATURE sig, PMETHPROPSYM sym)
+                                           PCCOR_SIGNATURE sig, PMETHPROPSYM sym,
+                                           unsigned short cMethTypeFormals, PTYVARSYM *ppMethTypeFormals)
 {
     ASSERT(inputfile->metaimport);
-
+    ASSERT(sym->parent->kind == SK_AGGSYM);
     bool isBogus = false;
     bool isVarargs = false;
     bool isCmodOpt = false;
     bool isParams = false;
     ImportSignature(inputfile, sym->getImportScope(), token, sig, (sym->kind == SK_METHSYM), sym->isStatic, &sym->retType, 
-                    &sym->cParams, &sym->params, &isBogus, &isVarargs, &isParams, &isCmodOpt);
+                    &sym->cParams, &sym->params, &isBogus, &isVarargs, &isParams, &isCmodOpt,
+                    (sym->isStatic ? 0 : sym->parent->asAGGSYM()->cTypeFormals), (sym->isStatic ? NULL : sym->parent->asAGGSYM()->ppTypeFormals),
+                    cMethTypeFormals, ppMethTypeFormals
+                    );
     sym->isBogus = isBogus;
     sym->isVarargs = isVarargs;
     sym->isParamArray = isParams;
@@ -1975,7 +2115,10 @@ void IMPORTER::ImportSignature(
     bool *isBogus,
     bool *isVarargs,
     bool *isParams,
-    bool *isCmodOpt)
+    bool *isCmodOpt,
+    unsigned short cClassTypeFormals, PTYVARSYM *ppClassTypeFormals,
+    unsigned short cMethTypeFormals, PTYVARSYM *ppMethTypeFormals
+                                   )
 {
     ASSERT(inputfile->metaimport[scope]);
     IMetaDataImport * metaimport = inputfile->metaimport[scope];
@@ -1989,11 +2132,12 @@ void IMPORTER::ImportSignature(
 
     // Deal with calling convention. Must be default or varargs for methods, default or property for properties.
     callConv = *sig++;
-    if (((callConv & IMAGE_CEE_CS_CALLCONV_MASK) != IMAGE_CEE_CS_CALLCONV_DEFAULT) &&
+    if ((!(callConv & IMAGE_CEE_CS_CALLCONV_GENERIC) || !isMethod) &&
+        ((callConv & IMAGE_CEE_CS_CALLCONV_MASK) != IMAGE_CEE_CS_CALLCONV_DEFAULT) &&
         ((callConv & IMAGE_CEE_CS_CALLCONV_MASK) != IMAGE_CEE_CS_CALLCONV_UNMGD) &&
         ((callConv & IMAGE_CEE_CS_CALLCONV_MASK) != IMAGE_CEE_CS_CALLCONV_PROPERTY || isMethod) &&
         ((callConv & IMAGE_CEE_CS_CALLCONV_MASK) != IMAGE_CEE_CS_CALLCONV_VARARG || !isMethod))
-    {
+	{
         *isBogus = true;        // We don't support that calling convention.
         *retType = compiler()->symmgr.GetErrorSym();
         return;
@@ -2016,13 +2160,16 @@ void IMPORTER::ImportSignature(
     if ((callConv & IMAGE_CEE_CS_CALLCONV_MASK) == IMAGE_CEE_CS_CALLCONV_VARARG) {
         *isVarargs = true;
     }
+    if (callConv & IMAGE_CEE_CS_CALLCONV_GENERIC) {
+        ASSERT(((unsigned short) CorSigUncompressData(sig)) == cMethTypeFormals);
+    }
 
     // Get param count.
     *cParams = (unsigned short) CorSigUncompressData(sig);
     unsigned short cParamsVarArgs = *cParams + ((*isVarargs) ? 1 : 0);
-
+    
     // Get return type.
-    *retType = ImportSigType(inputfile, scope, &sig, true, false, isCmodOpt, false);
+    *retType = ImportSigType(inputfile, scope, &sig, true, false, isCmodOpt, false, cClassTypeFormals, ppClassTypeFormals, cMethTypeFormals, ppMethTypeFormals);
     if (! *retType) {
         *isBogus = true;
         *retType = compiler()->symmgr.GetErrorSym();
@@ -2041,7 +2188,7 @@ void IMPORTER::ImportSignature(
         if (*isBogus)
             type = NULL;  // something went wrong earlier -- don't continue reading types.
         else
-            type = ImportSigType(inputfile, scope, &sig, false, true, isCmodOpt, false);
+            type = ImportSigType(inputfile, scope, &sig, false, true, isCmodOpt, false, cClassTypeFormals, ppClassTypeFormals, cMethTypeFormals, ppMethTypeFormals);
 
         // check for out param
         if (type && type->kind == SK_PARAMMODSYM && type->asPARAMMODSYM()->isRef && isMethod) {
@@ -2229,8 +2376,9 @@ void IMPORTER::ImportMethod(PINFILESYM inputfile, AGGSYM * parent, mdMethodDef t
     sym->isVirtual = sym->isVirtual && !sym->isStatic;
 
 
+    DefineMethodTypeFormals(inputfile, tokenMethod, (sym->isStatic ? 0 : parent->cTypeFormals), sym, &(sym->cTypeFormals), (&sym->ppTypeFormals));
     // Set the method signature.
-    ImportMethodOrPropSignature(inputfile, tokenMethod, signature, sym);
+    ImportMethodOrPropSignature(inputfile, tokenMethod, signature, sym, sym->cTypeFormals, sym->ppTypeFormals);
 
 
     //
@@ -2524,7 +2672,7 @@ void IMPORTER::ImportEvent(PINFILESYM inputfile, PAGGSYM parent, mdEvent tokenEv
     event->tokenImport = tokenEvent;
 
     // Get the event type.
-    event->type = ResolveTypeRef(inputfile, scope, tokenEventType, false);
+    event->type = ResolveTypeRefOrSpec(inputfile, scope, tokenEventType, false, parent->cTypeFormals, parent->ppTypeFormals);
 
     // Find the accessor methods. They must be present, and have a signature of void XXX(EventType handler);
     methAdd = methRemove = NULL;
@@ -2658,7 +2806,7 @@ ACCESS IMPORTER::AccessFromTypeFlags(unsigned flags, const AGGSYM * sym)
     }
 }
 
-void IMPORTER::GetBaseTokenAndFlags(AGGSYM *sym, AGGSYM  **base, DWORD *flags)
+void IMPORTER::GetBaseTokenAndFlags(AGGSYM *sym, TYPESYM  **base, DWORD *flags)
 {
     SETLOCATIONSTAGE(IMPORT);
     SETLOCATIONSYM(sym);
@@ -2719,9 +2867,8 @@ bool IMPORTER::HasIfaceListChanged(AGGSYM *sym)
             CheckHR(metaimport->GetInterfaceImplProps(tokens[iToken], NULL, &tokenInterface), inputfile);
             TimerStop(TIME_IMI_GETINTERFACEIMPLPROPS);
 
-            if (ifaceList->sym->asAGGSYM()->tokenImport != tokenInterface  &&
-                ifaceList->sym->asAGGSYM() != ResolveTypeRef(inputfile, sym->getImportScope(), tokenInterface, true)) return true;
-
+            if (ifaceList->sym->asTYPESYM()->underlyingAggregate()->tokenImport != tokenInterface  &&
+                ifaceList->sym->asTYPESYM()->underlyingAggregate() != ResolveTypeRef(inputfile, sym->getImportScope(), tokenInterface, true)) return true;
             ifaceList = ifaceList->next;
         }
     } while (cTokens > 0);
@@ -2745,7 +2892,7 @@ bool IMPORTER::ResolveInheritance(AGGSYM *sym)
     IMetaDataImport * metaimport;
     PINFILESYM inputfile;
     DWORD flags, scope;
-    AGGSYM *base = NULL;
+    TYPESYM *base = NULL;
 
     HCORENUM corenum;           // For enumerating tokens.
     mdToken tokens[32];
@@ -2759,6 +2906,21 @@ bool IMPORTER::ResolveInheritance(AGGSYM *sym)
     scope = sym->getImportScope();
     metaimport = inputfile->metaimport[scope];
     ASSERT(metaimport);
+
+
+    // Set the bounds for each type variable.  The TYVARSYMs for the 
+    // type variables have already been created in the AddOneType step above.
+    // We cannot (and do not want to) resolve the bounds until a little later.
+        FOREACHCHILD(sym, elem)
+            if (elem->kind == SK_TYVARSYM) {
+                TYVARSYM *tyvar = elem->asTYVARSYM();
+			    if (!tyvar->boundTokenImport) {
+				    tyvar->bound = compiler()->symmgr.GetPredefType(PT_OBJECT, false);
+                } else {	       
+				    tyvar->bound = ResolveTypeRefOrSpec(inputfile, scope, tyvar->boundTokenImport, false, sym->cTypeFormals, sym->ppTypeFormals);
+			    }
+			}
+        ENDFOREACHCHILD
 
 
     // Import base class. Set fundemental type.
@@ -2786,7 +2948,7 @@ bool IMPORTER::ResolveInheritance(AGGSYM *sym)
     if (sym->isClass || sym->isStruct) {
         if (base) {
             // this is for incremental rebuild
-            if (!compiler()->clsDeclRec.resolveInheritanceRec(base))
+            if (!compiler()->clsDeclRec.resolveInheritanceRec(base->underlyingAggregate()))
             {
                 sym->isResolvingBaseClasses = false;
                 return false;
@@ -2851,7 +3013,7 @@ bool IMPORTER::ResolveInheritance(AGGSYM *sym)
                     // Import the type of the field.
                     PTYPESYM type;
                     bool dummy;
-                    type = ImportFieldType(inputfile, scope, signature, &dummy);
+                    type = ImportFieldType(inputfile, scope, signature, &dummy, 0, NULL);
 
                     // Assuming its an integral type, use it to set the
                     // enum base type.
@@ -2884,7 +3046,7 @@ bool IMPORTER::ResolveInheritance(AGGSYM *sym)
 
     // Set inherited bits.
     if (sym->baseClass) {
-        AGGSYM * baseClass = sym->baseClass;
+        AGGSYM * baseClass = sym->baseClass->underlyingAggregate();
         if (baseClass->isAttribute)
             sym->isAttribute = true;
         if (baseClass->isSecurityAttribute)
@@ -2892,6 +3054,7 @@ bool IMPORTER::ResolveInheritance(AGGSYM *sym)
         if (baseClass->isMarshalByRef)
             sym->isMarshalByRef = true;
     }
+
 
     // Import interfaces.
     sym->ifaceList = 0;                     // Start with empty interface list.
@@ -2907,12 +3070,12 @@ bool IMPORTER::ResolveInheritance(AGGSYM *sym)
         // Process each interface.
         for (iToken = 0; iToken < cTokens; ++iToken) {
             // Get the interface.
-            AGGSYM* symIface = ImportInterface(inputfile, scope, tokens[iToken], sym);
+            TYPESYM* symIface = ImportInterface(inputfile, scope, tokens[iToken], sym);
 
             // Add to the interface list if interesting.
             if (symIface) {
                 // this is for incremental rebuild
-                if (!compiler()->clsDeclRec.resolveInheritanceRec(symIface))
+                if (!compiler()->clsDeclRec.resolveInheritanceRec(symIface->underlyingAggregate()))
                 {
                     sym->isResolvingBaseClasses = false;
                     sym->ifaceList = NULL;
@@ -3179,7 +3342,7 @@ void IMPORTER::DefineImportedType(AGGSYM * sym)
     }
 
     if (sym->baseClass) {
-        sym->hasConversion |= sym->baseClass->hasConversion;
+        sym->hasConversion |= sym->baseClass->underlyingAggregate()->hasConversion;
     }
 
     if (sym->isEnum && sym->underlyingType == NULL) {
@@ -3204,8 +3367,8 @@ void IMPORTER::DefineImportedType(AGGSYM * sym)
     }
     else if (sym->isAttribute)
     {
-        sym->attributeClass = sym->baseClass->attributeClass;
-        sym->isMultipleAttribute = sym->baseClass->isMultipleAttribute;
+        sym->attributeClass = sym->baseClass->underlyingAggregate()->attributeClass;
+        sym->isMultipleAttribute = sym->baseClass->underlyingAggregate()->isMultipleAttribute;
     }
 
     if (inputfile->isSource)
@@ -3446,9 +3609,8 @@ MEMBVARSYM * IMPORTER::ReadExistingField(PINFILESYM inputfile, AGGSYM *cls, mdTo
     if (!sym) return NULL;
 
     // Import the type of the field.
-    if (sym->type != ImportFieldType(inputfile, scope, signature, &isVolatile)) return NULL;
+    if (sym->type != ImportFieldType(inputfile, scope, signature, &isVolatile, cls->cTypeFormals, cls->ppTypeFormals)) return NULL;
     if (!!sym->isVolatile != !!isVolatile) return NULL;
-
     // static must match because we can't reset the siganture
     // and the signature includes staticness
     if (!!sym->isStatic != !!(flags & fdStatic)) return NULL;
@@ -3460,6 +3622,72 @@ MEMBVARSYM * IMPORTER::ReadExistingField(PINFILESYM inputfile, AGGSYM *cls, mdTo
 
     return sym;
 }
+
+
+void IMPORTER::DefineMethodTypeFormals(PINFILESYM inputfile, mdToken methodToken, unsigned short cClassTypeFormals, PARENTSYM *sym, unsigned short *cMethTypeFormals, TYVARSYM ***ppMethTypeFormals) 
+{
+    DWORD scope = sym->getImportScope();
+    ASSERT(inputfile->metaimport[scope]);
+
+    IMetaDataImport * metaimport = inputfile->metaimport[scope];
+
+    ULONG cchFullNameText;
+    WCHAR fullNameText[MAX_FULLNAME_SIZE];  // full name of type var
+    // Set the type variables for the sym, but not the bounds.
+    mdGenericPar typars[8];
+    HCORENUM enumTyPars = 0;
+    ULONG cTyPars = 0;
+    PTYVARSYM * ppTypeFormals = NULL;
+    unsigned int cTypeFormals = 0;
+    do {
+        TimerStart(TIME_IMI_ENUMFORMALTYPARS);
+        CheckHR(metaimport->EnumGenericPars(&enumTyPars, methodToken, typars, lengthof(typars), &cTyPars), inputfile);
+        TimerStop(TIME_IMI_ENUMFORMALTYPARS);
+
+        // Process each typar
+        if (cTyPars) {
+            cTypeFormals += cTyPars;
+            PTYVARSYM * ppTypeFormalsNew = (TYVARSYM **) _alloca(cTypeFormals * sizeof(PTYVARSYM));
+            if (ppTypeFormals) 
+                memcpy(ppTypeFormalsNew, ppTypeFormals, (cTypeFormals - cTyPars) * sizeof(PTYVARSYM));
+            ppTypeFormals = ppTypeFormalsNew;
+        }
+        for (unsigned int iTyPar = 0; iTyPar < cTyPars; ++iTyPar) {
+            ULONG pulSequence;
+            mdToken parent;
+            mdToken bound = mdTokenNil; // GENERICS: TODO: emit constraints
+            TimerStart(TIME_IMI_GETFORMALTYPARPROPS); 
+            CheckHR(metaimport->GetGenericParProps(
+                        typars[iTyPar],
+                        &pulSequence,     
+			            NULL, // flags
+                        &parent,
+			            NULL, // kind
+			            &bound,
+                        fullNameText, 
+                        lengthof(fullNameText),
+                        &cchFullNameText), inputfile);
+            TimerStop(TIME_IMI_GETFORMALTYPARPROPS);
+            PNAME tyvarName = compiler()->namemgr->AddString(fullNameText);
+            TYVARSYM * tyvar = compiler()->symmgr.CreateTyVar(tyvarName, sym);
+            tyvar->access = ACC_PRIVATE;
+            tyvar->num = pulSequence;
+            tyvar->parseTree = NULL;
+            tyvar->boundTokenImport = bound;
+            ppTypeFormals[pulSequence] = tyvar;
+			    if (!tyvar->boundTokenImport) {
+				    tyvar->bound = compiler()->symmgr.GetPredefType(PT_OBJECT, false);
+                } else {	       
+				    tyvar->bound = ResolveTypeRefOrSpec(inputfile, scope, tyvar->boundTokenImport, false, cTypeFormals, ppTypeFormals);
+			    }
+        }
+    } while (cTyPars > 0);
+    metaimport->CloseEnum(enumTyPars);
+    *ppMethTypeFormals = (TYVARSYM **) compiler()->symmgr.AllocParams(cTypeFormals, (TYPESYM **) ppTypeFormals);
+    *cMethTypeFormals = cTypeFormals;
+
+}
+
 
 /*
  * Match the methodToken with a SYM which must already exist in the given cls.
@@ -3500,9 +3728,26 @@ METHSYM * IMPORTER::ReadExistingMethod(PINFILESYM inputfile, AGGSYM *cls, mdToke
     if (cchMethodnameText <= 1)
         return NULL;
         
+    // Presuming the method is generic, we need to define the method's formal type parameters before
+    // we can accurately read in the signature.  This is problematic, because we then want to use the
+    // signature to go searching for an existing symbol!  The trick is to use a dummy set of type parameters
+    // to read in the signature and then substitute through on a case by case basis as we compare signatures.
+    //
+    // This sounds slow, but substitution causes essentially zero overhead for non-generic classes and methods.
+    //
+    // <REVIEW>The dummy set of type parameters are all parented off the class - it doesn't really matter where they
+    // are parented from.  We should probably get rid of the symbols, but I'm not sure we can even do that??
+    // I also don't think it matters if we create multiple such symbols.</REVIEW>
+    unsigned short cMethTypeFormals;
+    TYVARSYM **ppMethTypeFormals;
+    bool isStatic = (flags & mdStatic) ? true : false;
+    DefineMethodTypeFormals(inputfile, methodToken, (isStatic ? 0 : cls->cTypeFormals), cls, &cMethTypeFormals, &ppMethTypeFormals);
+
     // Set the method signature.
-    ImportSignature(inputfile, scope, methodToken, signature, true, !!(flags & mdStatic),
-                    &retType, &cParams, &paramTypes, &isBogus, &isVarargs, &isParams, NULL);
+    ImportSignature(inputfile, scope, methodToken, signature, true, isStatic,
+        &retType, &cParams, &paramTypes, &isBogus, &isVarargs, &isParams, NULL,
+        (isStatic ? 0 : cls->cTypeFormals), (isStatic ? 0 : cls->ppTypeFormals),
+        cMethTypeFormals, ppMethTypeFormals);
     if (isBogus) return NULL;
 
     // If the name contains a '.', and is not a "special" name, then we won't be able to access if,
@@ -3527,8 +3772,12 @@ METHSYM * IMPORTER::ReadExistingMethod(PINFILESYM inputfile, AGGSYM *cls, mdToke
             METHSYM *explicitImpl = sym->explicitImpl->asMETHSYM();
             if (explicitImpl->name == name &&
                 explicitImpl->getClass() == parent && 
-                explicitImpl->params == paramTypes &&
-                explicitImpl->retType == retType &&
+                explicitImpl->cTypeFormals == cMethTypeFormals &&
+			    // GENERICS: The substitutions are needed to normalize  the dummy type variables for the method
+			    // type parameters, changing them to be the type variables in the symbol we are comparing
+			    // against.  We can then perform the comparison between the types and parameter lists.
+                compiler()->symmgr.SubstParamsUsingType(explicitImpl->cParams, explicitImpl->params, sym->explicitImplMethodInType) == compiler()->symmgr.SubstParams(cParams, paramTypes, (isStatic ? 0 : cls->cTypeFormals), NULL, explicitImpl->cTypeFormals, (TYPESYM **) explicitImpl->ppTypeFormals) &&
+                compiler()->symmgr.SubstTypeUsingType(explicitImpl->retType, sym->explicitImplMethodInType) == compiler()->symmgr.SubstType(retType, (isStatic ? 0 : cls->cTypeFormals), NULL, explicitImpl->cTypeFormals, (TYPESYM **) explicitImpl->ppTypeFormals) &&
                 !!explicitImpl->isVarargs == !!isVarargs &&
                 (explicitImpl->isPropertyAccessor || !!explicitImpl->isParamArray == !!isParams))
             {
@@ -3546,18 +3795,26 @@ METHSYM * IMPORTER::ReadExistingMethod(PINFILESYM inputfile, AGGSYM *cls, mdToke
     //
     // find method, and check signature
     //
+    // GENERICS: At each comparison, if the method we are searching for is generic, then we
+    // must replace the dummy type variables introduced above with the type variables for the method we are comparing against.
     SYM *searchSym = NULL;
+    TYPESYM *whereToSearchAndMethodInType = cls;
     do
     {
-        searchSym = compiler()->clsDeclRec.findNextName(name, (AGGSYM*)cls, searchSym);
-        if (!searchSym || searchSym->parent != (AGGSYM*)cls || searchSym->kind != SK_METHSYM) {
+        searchSym = compiler()->clsDeclRec.findNextName(name, &whereToSearchAndMethodInType, searchSym);
+        // only search in this class...
+        if (!searchSym || searchSym->parent != cls || searchSym->kind != SK_METHSYM) {
             return NULL;
         }
         sym = searchSym->asMETHSYM();
-    } while ((sym->params           != paramTypes) || 
-             (sym->retType          != retType) || 
+    } while ((sym->cTypeFormals != cMethTypeFormals) ||
+			    // GENERICS: The substitutions are needed to normalize  the dummy type variables for the method
+			    // type parameters, changing them to be the type variables in the symbol we are comparing
+			    // against.  We can then perform the comparison between the types and parameter lists.
+             (sym->params != compiler()->symmgr.SubstParams(cParams, paramTypes, (isStatic ? 0 : cls->cTypeFormals), NULL, sym->cTypeFormals, (TYPESYM **) sym->ppTypeFormals)) || 
+             (sym->retType != compiler()->symmgr.SubstType(retType, (isStatic ? 0 : cls->cTypeFormals), NULL, sym->cTypeFormals, (TYPESYM **) sym->ppTypeFormals)) || 
              (!!sym->isStatic       != !!(flags & mdStatic)) || 
-             (!!sym->isVarargs      != !!isVarargs));
+             (!!sym->isVarargs != !!isVarargs) || (sym->isParamArray != isParams));
 
     sym->tokenImport = sym->tokenEmit = methodToken;
 
@@ -3641,9 +3898,10 @@ PROPSYM * IMPORTER::ReadExistingProperty(PINFILESYM inputfile, AGGSYM *cls, mdTo
         return NULL;
     name = compiler()->namemgr->AddString(propnameText, cchPropnameText - 1);
 
-    // Get the property signature.
+    // Get the property signature.  There are no method type parameters (properties may not be generic)
     ImportSignature(inputfile, scope, propertyToken, signature, false, false,
-                    &retType, &cParams, &paramTypes, &isBogus, &isVarargs, &isParams, NULL);
+                    &retType, &cParams, &paramTypes, &isBogus, &isVarargs, &isParams, NULL,
+                    cls->cTypeFormals, cls->ppTypeFormals);
     if (isBogus) return NULL;
 
     if (cParams != 0) {
@@ -3657,12 +3915,15 @@ PROPSYM * IMPORTER::ReadExistingProperty(PINFILESYM inputfile, AGGSYM *cls, mdTo
     // find property, and check signature
     //
     SYM *searchSym = NULL;
+    TYPESYM *whereToSearchAndMethodInType = cls;
     do 
     {
-        searchSym = compiler()->clsDeclRec.findNextName(name, cls, searchSym);
+        searchSym = compiler()->clsDeclRec.findNextName(name, &whereToSearchAndMethodInType, searchSym);
         if (searchSym && searchSym->kind == SK_EVENTSYM) continue;
         if (!searchSym || searchSym->parent != cls || searchSym->kind != SK_PROPSYM) return NULL;
         sym = searchSym->asPROPSYM();
+		// GENERICS: just to note that the comparisons below do NOT need a substitution as properties cannot be generic.
+		// (c.f. cases for methods elsewhere in this file where a substitution is needed)
     } while (sym->params != paramTypes);
     if (sym->retType != retType) return NULL;
     if (!!sym->isVarargs != !!isVarargs) return NULL;
@@ -3760,7 +4021,7 @@ AGGSYM *IMPORTER::HasTypeDefChanged(PINFILESYM infile, DWORD scope, mdTypeDef to
 /*
  * Check this type to see if it has had an interface change.
  */
-bool IMPORTER::HasInterfaceChange(const AGGSYM *sym)
+bool IMPORTER::HasInterfaceChange(AGGSYM *sym)
 {
     IMetaDataImport * metaimport;
     PINFILESYM inputfile;
@@ -3939,7 +4200,7 @@ bool IMPORTER::HasInterfaceChange(const AGGSYM *sym)
 /*
  * check a field to see if it has changed since the last incremental build
  */
-bool IMPORTER::HasFieldChanged(PINFILESYM inputfile, const AGGSYM *parent, mdToken tokenField, unsigned *cFields)
+bool IMPORTER::HasFieldChanged(PINFILESYM inputfile, AGGSYM *parent, mdToken tokenField, unsigned *cFields)
 {
     DWORD scope = parent->getImportScope();
     ASSERT(inputfile->isSource && inputfile->metaimport[scope]);
@@ -3978,7 +4239,7 @@ bool IMPORTER::HasFieldChanged(PINFILESYM inputfile, const AGGSYM *parent, mdTok
     name = compiler()->namemgr->AddString(fieldnameText, cchFieldnameText - 1);
 
     // Import the type of the field.
-    type = ImportFieldType(inputfile, scope, signature, &isVolatile);
+    type = ImportFieldType(inputfile, scope, signature, &isVolatile, parent->cTypeFormals, parent->ppTypeFormals);
     if (!type) return true;
 
     // handle "special" enum meber
@@ -4113,7 +4374,7 @@ bool IMPORTER::HasFieldChanged(PINFILESYM inputfile, const AGGSYM *parent, mdTok
 /*
  * Checks that a method impl record will be reused. Returns true if not reused.
  */
-bool IMPORTER::HasMethodImplExist(PINFILESYM inputfile, const AGGSYM *cls, mdToken bodyToken, mdToken declToken)
+bool IMPORTER::HasMethodImplExist(PINFILESYM inputfile, AGGSYM *cls, mdToken bodyToken, mdToken declToken)
 {
     DWORD scope = cls->getImportScope();
     ASSERT(inputfile->isSource && inputfile->metaimport[scope]);
@@ -4159,9 +4420,19 @@ bool IMPORTER::HasMethodImplExist(PINFILESYM inputfile, const AGGSYM *cls, mdTok
     ifaceNameLength = wcsrchr(methodnameText, L'.') - methodnameText;
     methodName = compiler()->namemgr->AddString(methodnameText + ifaceNameLength + 1);
 
+    // See notes in ReadExistingMethod() to understand why we create these dummy type formals here, in order
+    // to search accurately for the method below.  We probably don't strictly need this, unless we are supporting MethodImpls
+	// for generic methods (something that we can do).
+    unsigned short cMethTypeFormals;
+    TYVARSYM **ppMethTypeFormals;
+    bool isStatic = (flags & mdStatic) ? true : false;
+    DefineMethodTypeFormals(inputfile, bodyToken, (isStatic ? 0 : cls->cTypeFormals), cls, &cMethTypeFormals, &ppMethTypeFormals);
+
     // Set the method signature.
-    ImportSignature(inputfile, scope, bodyToken, signature, true, !!(flags & mdStatic),
-                    &retType, &cParams, &paramTypes, &isBogus, &isVarargs, &isParams, NULL);
+    ImportSignature(inputfile, scope, bodyToken, signature, true, isStatic,
+                    &retType, &cParams, &paramTypes, &isBogus, &isVarargs, &isParams, NULL,
+                    cls->cTypeFormals, cls->ppTypeFormals,
+					cMethTypeFormals, ppMethTypeFormals);
     if (isBogus) return true;
 
     // check for possible accessor
@@ -4195,7 +4466,12 @@ bool IMPORTER::HasMethodImplExist(PINFILESYM inputfile, const AGGSYM *cls, mdTok
         if (searchSym->kind == SK_METHSYM) {
 
             const METHSYM * sym = searchSym->asMETHSYM();
-            if (sym->params != paramTypes || sym->retType != retType) {
+            if ((sym->cTypeFormals != cMethTypeFormals) ||
+			    // GENERICS: The substitutions are needed to normalize  the dummy type variables for the method
+			    // type parameters, changing them to be the type variables in the symbol we are comparing
+			    // against.  We can then perform the comparison between the types and parameter lists.
+                (sym->params != compiler()->symmgr.SubstParams(cParams, paramTypes, (isStatic ? 0 : cls->cTypeFormals), NULL, sym->cTypeFormals, (TYPESYM **) sym->ppTypeFormals)) || 
+                (sym->retType != compiler()->symmgr.SubstType(retType, (isStatic ? 0 : cls->cTypeFormals), NULL, sym->cTypeFormals, (TYPESYM **) sym->ppTypeFormals))) {
                 continue;
             }
             if (!sym->parseTree->InGroup(NG_METHOD)) {
@@ -4203,7 +4479,7 @@ bool IMPORTER::HasMethodImplExist(PINFILESYM inputfile, const AGGSYM *cls, mdTok
                 continue;
             }
             BASENODE * nameTree = sym->parseTree->asANYMETHOD()->pName;
-            if (methodName != nameTree->asDOT()->p2->asNAME()->pName) {
+            if (methodName != nameTree->asDOT()->p2->asANYNAME()->pName) {
                 continue;
             }
             ifaceNameTree = nameTree->asDOT()->p1;
@@ -4220,13 +4496,14 @@ bool IMPORTER::HasMethodImplExist(PINFILESYM inputfile, const AGGSYM *cls, mdTok
                     if ((sym->cParams + 1) != cParams) {
                         continue;
                     }
-		    int i;
+
+                    int i;
                     for (i = 0; i < sym->cParams; i += 1) {
-                        if (sym->params[i] != paramTypes[i]) {
+                            if (sym->params[i] != paramTypes[i]) { // GENERICS: No substitution needed as properties may NOT themselves be generic
                             continue;
                         }
                     }
-                    if (sym->retType != paramTypes[i]) {
+                    if (sym->retType != paramTypes[i]) { // GENERICS: No substitution needed as properties may NOT themselves be generic
                         continue;
                     }
                 }
@@ -4236,12 +4513,12 @@ bool IMPORTER::HasMethodImplExist(PINFILESYM inputfile, const AGGSYM *cls, mdTok
                 if (propertyName != nameTree->asDOT()->p2->asNAME()->pName) {
                     continue;
                 }
-                if (couldBeSet && (!paramTypes || sym->retType != paramTypes[0] || retType->kind != SK_VOIDSYM)) {
+                if (couldBeSet && (!paramTypes || sym->retType != paramTypes[0] || retType->kind != SK_VOIDSYM)) { // GENERICS: No substitution needed as properties may NOT themselves be generic
                     continue;
                 }
                 ifaceNameTree = nameTree->asDOT()->p1;
             }
-            if (couldBeGet && (sym->retType != retType || sym->params != paramTypes)) {
+            if (couldBeGet && (sym->retType != retType || sym->params != paramTypes)) { // GENERICS: No substitution needed as properties may NOT themselves be generic
                 continue;
             }
 
@@ -4260,7 +4537,7 @@ bool IMPORTER::HasMethodImplExist(PINFILESYM inputfile, const AGGSYM *cls, mdTok
             if (eventName != nameTree->asDOT()->p2->asNAME()->pName) {
                 continue;
             }
-            if (sym->type != paramTypes[0]) {
+            if (sym->type != paramTypes[0]) { // GENERICS: No substitution needed as events may NOT themselves be generic
                 continue;
             }
             ifaceNameTree = nameTree->asDOT()->p1;
@@ -4288,7 +4565,7 @@ bool IMPORTER::HasMethodImplExist(PINFILESYM inputfile, const AGGSYM *cls, mdTok
 /*
  * Check this method to see if it has changed since the last incremental build
  */
-bool IMPORTER::HasMethodChanged(PINFILESYM inputfile, const AGGSYM *cls, mdToken methodToken, unsigned * cMethods)
+bool IMPORTER::HasMethodChanged(PINFILESYM inputfile, AGGSYM *cls, mdToken methodToken, unsigned * cMethods)
 {
     DWORD scope = cls->getImportScope();
     ASSERT(inputfile->isSource && inputfile->metaimport[scope]);
@@ -4337,20 +4614,38 @@ bool IMPORTER::HasMethodChanged(PINFILESYM inputfile, const AGGSYM *cls, mdToken
 
     name = compiler()->namemgr->AddString(methodnameText, cchMethodnameText - 1);
 
+	bool isStatic = (flags & mdStatic) ? true : false; 
+
+    // See notes in ReadExistingMethod() to understand why we create these dummy type formals here, in order
+    // to search accurately for the method below.
+    unsigned short cMethTypeFormals;
+    TYVARSYM **ppMethTypeFormals;
+    DefineMethodTypeFormals(inputfile, methodToken, (isStatic ? 0 : cls->cTypeFormals), cls, &cMethTypeFormals, &ppMethTypeFormals);
+
     // Set the method signature.
-    ImportSignature(inputfile, scope, methodToken, signature, true, !!(flags & mdStatic),
-                    &retType, &cParams, &paramTypes, &isBogus, &isVarargs, &isParams, NULL);
+    ImportSignature(inputfile, scope, methodToken, signature, true, isStatic,
+                    &retType, &cParams, &paramTypes, &isBogus, &isVarargs, &isParams, NULL, 
+                    (isStatic ? 0 : cls->cTypeFormals), (isStatic ? NULL : cls->ppTypeFormals),
+                    cMethTypeFormals, ppMethTypeFormals);
+
     if (isBogus) return true;
 
     //
     // find method, and check signature
     //
-    SYM *searchSym = compiler()->symmgr.LookupGlobalSym(name, (AGGSYM*)cls, MASK_ALL);
+    SYM *searchSym = compiler()->symmgr.LookupGlobalSym(name, cls, MASK_ALL);
     if (searchSym && searchSym->kind != SK_METHSYM) {
         sym = NULL;
     } else {
         sym = searchSym->asMETHSYM();
-        while (sym && (sym->params != paramTypes || sym->retType != retType)) {
+        while (sym && 
+			   ((sym->cTypeFormals != cMethTypeFormals) ||
+			    // GENERICS: The substitutions are needed to normalize  the dummy type variables for the method
+			    // type parameters, changing them to be the type variables in the symbol we are comparing
+			    // against.  We can then perform the comparison between the types and parameter lists.
+                (sym->params != compiler()->symmgr.SubstParams(cParams, paramTypes, (isStatic ? 0 : cls->cTypeFormals), NULL, sym->cTypeFormals, (TYPESYM **) sym->ppTypeFormals)) || 
+                (sym->retType != compiler()->symmgr.SubstType(retType, (isStatic ? 0 : cls->cTypeFormals), NULL, sym->cTypeFormals, (TYPESYM **) sym->ppTypeFormals))))
+         {
             searchSym = compiler()->symmgr.LookupNextSym(searchSym, searchSym->parent, MASK_ALL);
             sym = searchSym->asMETHSYM();
         }
@@ -4482,7 +4777,7 @@ ACCESS IMPORTER::GetAccessOfMethod(mdToken methodToken, AGGSYM *cls)
 /*
  * returns true if this property has changed since the last incremental build
  */
-bool IMPORTER::HasPropertyChanged(PINFILESYM inputfile, const AGGSYM *cls, mdToken propertyToken, unsigned * cProperties)
+bool IMPORTER::HasPropertyChanged(PINFILESYM inputfile, AGGSYM *cls, mdToken propertyToken, unsigned * cProperties)
 {
     DWORD scope = cls->getImportScope();
     ASSERT(inputfile->isSource && inputfile->metaimport[scope]);
@@ -4494,7 +4789,7 @@ bool IMPORTER::HasPropertyChanged(PINFILESYM inputfile, const AGGSYM *cls, mdTok
     PCCOR_SIGNATURE signature;
     ULONG cbSignature;
     PNAME name, realName;
-    const PROPSYM *sym;
+    const PROPSYM *sym = NULL;
     mdToken tokenSetter, tokenGetter;
 
     bool isBogus = false;
@@ -4530,10 +4825,10 @@ bool IMPORTER::HasPropertyChanged(PINFILESYM inputfile, const AGGSYM *cls, mdTok
     if (cchPropnameText <= 1)
         return true;
     name = compiler()->namemgr->AddString(propnameText, cchPropnameText - 1);
-
     // Get the property signature.
     ImportSignature(inputfile, scope, propertyToken, signature, false, false,
-                    &retType, &cParams, &paramTypes, &isBogus, &isVarargs, &isParams, NULL);
+                    &retType, &cParams, &paramTypes, &isBogus, &isVarargs, &isParams, NULL,
+                    cls->cTypeFormals, cls->ppTypeFormals);
     if (isBogus) return true;
 
     if (cParams > 0) {
@@ -4546,12 +4841,11 @@ bool IMPORTER::HasPropertyChanged(PINFILESYM inputfile, const AGGSYM *cls, mdTok
     //
     // find property, and check signature
     //
-    sym = NULL;
-    SYM *searchSym = compiler()->symmgr.LookupGlobalSym(name, (AGGSYM*)cls, MASK_ALL);
+    SYM *searchSym = compiler()->symmgr.LookupGlobalSym(name, cls, MASK_ALL);;
     while (searchSym) {
         if (searchSym->kind == SK_PROPSYM) {
             sym = searchSym->asPROPSYM();
-            if (sym->params == paramTypes) break;
+            if (sym->params == paramTypes) break; // GENERICS: TODO: check this comparison.  This looks like exactly the kind of place where we should be applying a substitution.
             sym = NULL;
         } else if (searchSym->kind != SK_EVENTSYM) {
             break;
@@ -4601,7 +4895,7 @@ bool IMPORTER::HasPropertyChanged(PINFILESYM inputfile, const AGGSYM *cls, mdTok
 /*
  * returns true if this event has changed since the last incremental build
  */
-bool IMPORTER::HasEventChanged(PINFILESYM inputfile, const AGGSYM *cls, mdToken tokenEvent, unsigned *cEvents)
+bool IMPORTER::HasEventChanged(PINFILESYM inputfile, AGGSYM *cls, mdToken tokenEvent, unsigned *cEvents)
 {
     DWORD scope = cls->getImportScope();
     ASSERT(inputfile->isSource && inputfile->metaimport[scope]);
@@ -4652,7 +4946,7 @@ bool IMPORTER::HasEventChanged(PINFILESYM inputfile, const AGGSYM *cls, mdToken 
         return true;
 
     // Get the event type.
-    type = ResolveTypeRef(inputfile, scope, tokenEventType, false);
+    type = ResolveTypeRefOrSpec(inputfile, scope, tokenEventType, false, cls->cTypeFormals, cls->ppTypeFormals);
     if (type != event->type)  return true;
 
     // Find the accessor methods. 

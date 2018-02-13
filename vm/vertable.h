@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -256,9 +261,9 @@ VEROPCODE(CEE_STELEM_I8,                "84[8:")
 VEROPCODE(CEE_STELEM_R4,                "r4[r:")
 VEROPCODE(CEE_STELEM_R8,                "d4[d:")
 VEROPCODE(CEE_STELEM_REF,               "!")
-VEROPCODE(CEE_UNUSED2,                  "!")
-VEROPCODE(CEE_UNUSED3,                  "!")
-VEROPCODE(CEE_UNUSED4,                  "!")
+VEROPCODE(CEE_LDELEM,               "!")
+VEROPCODE(CEE_STELEM,               "!")
+VEROPCODE(CEE_UNBOX_ANY,                "!")
 VEROPCODE(CEE_UNUSED5,                  "!")
 VEROPCODE(CEE_UNUSED6,                  "!")
 VEROPCODE(CEE_UNUSED7,                  "!")

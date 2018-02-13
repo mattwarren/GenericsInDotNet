@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -178,8 +183,9 @@ HRESULT ProfToEEInterfaceImpl::IsArrayClass(
         // If there is no associated class with this type, then there's no problem
         // because AsClass returns NULL which is the default we want to return in
         // this case.
+        // Note that for generic code we always return uninstantiated ClassIDs and FunctionIDs
         if (pBaseClassId != NULL)
-            *pBaseClassId = (ClassID) pArr->GetTypeParam().AsPtr();
+            *pBaseClassId = (ClassID) pArr->GetTypeParam().GetGenericTypeDefinition().AsPtr();
 
         // If they want the number of dimensions of the array
         if (pcRank != NULL)
@@ -200,8 +206,9 @@ HRESULT ProfToEEInterfaceImpl::IsArrayClass(
         // If there is no associated class with this type, then there's no problem
         // because AsClass returns NULL which is the default we want to return in
         // this case.
+        // Note that for generic code we always return uninstantiated ClassIDs and FunctionIDs
         if (pBaseClassId != NULL)
-            *pBaseClassId = (ClassID) pArr->GetElementTypeHandle().AsPtr();
+            *pBaseClassId = (ClassID) pArr->GetElementTypeHandle().GetGenericTypeDefinition().AsPtr();
 
         // If they want the number of dimensions of the array
         if (pcRank != NULL)
@@ -263,8 +270,9 @@ HRESULT ProfToEEInterfaceImpl::GetFunctionFromIP(LPCBYTE ip, FunctionID *pFuncti
         _ASSERTE(pMethodDesc != NULL);
 
         // Only fill out the value if they want one
+        // Note that for generic code we always return uninstantiated ClassIDs and FunctionIDs
         if (pFunctionId)
-            *pFunctionId = (FunctionID) pMethodDesc;
+            *pFunctionId = (FunctionID) pMethodDesc->StripClassAndMethodInstantiation();
     }
 
     // IP does not belong to a JIT manager
@@ -335,6 +343,13 @@ HRESULT ProfToEEInterfaceImpl::GetCodeInfo(FunctionID functionId, LPCBYTE *pStar
         pStart = &start;
 
     // If the function isn't jitted, can't get any info on it.
+
+    // Note that for generic code this will always fail: For this
+    // version of the API the FunctionIDs
+    // are always _uninstantiated_ generic method descriptors
+    // or method descriptors in uninstantiated generic classes.  These
+    // may be JITted more than once and we don't want to prejudice profiling by which
+    // copy of the code we return, so we just return none.
     if (!pMDesc->IsJitted())
     {
         hr = CORPROF_E_FUNCTION_NOT_COMPILED;
@@ -1047,8 +1062,11 @@ HRESULT ProfToEEInterfaceImpl::GetFunctionInfo(
 
     if (pClassId != NULL)
     {
+        // Note that for generic code we always return uninstantiated ClassIDs and FunctionIDs.
+        // This should actually always be uninstantiated anyway, given we're fetching it off 
+        // a generic function ID, but we call GetGenericTypeDefinition just in case.
         if (pClass != NULL)
-            *pClassId = (ClassID) TypeHandle(pClass).AsPtr();
+            *pClassId = (ClassID) TypeHandle(pClass).GetGenericTypeDefinition().AsPtr();
 
         else
             *pClassId = PROFILER_GLOBAL_CLASS;
@@ -1256,8 +1274,9 @@ HRESULT ProfToEEInterfaceImpl::GetClassFromObject(
     Object *pObj = reinterpret_cast<Object *>(objectId);
 
     // Set the out param and indicate success
+    // Note that for generic code we always return uninstantiated ClassIDs and FunctionIDs
     if (pClassId)
-        *pClassId = (ClassID) pObj->GetTypeHandle().AsPtr();
+        *pClassId = (ClassID) pObj->GetTypeHandle().GetGenericTypeDefinition().AsPtr();
 
     return (S_OK);
 }
@@ -1739,7 +1758,7 @@ BOOL HeapWalkHelper(Object* pBO, void* pv)
     }
 
     HRESULT hr = g_profControlBlock.pProfInterface->
-        ObjectReference((ObjectID) pBO, (ClassID) pBO->GetTypeHandle().AsPtr(),
+        ObjectReference((ObjectID) pBO, (ClassID) pBO->GetTypeHandle().GetGenericTypeDefinition().AsPtr(),
                         cNumRefs, (ObjectID *)arrObjRef);
 
     // If the data was not allocated on the stack, need to clean it up.
@@ -1760,7 +1779,7 @@ BOOL AllocByClassHelper(Object* pBO, void* pv)
 #endif
     // Pass along the call
     g_profControlBlock.pProfInterface->AllocByClass(
-        (ObjectID) pBO, (ClassID) pBO->GetTypeHandle().AsPtr(), pv);
+        (ObjectID) pBO, (ClassID) pBO->GetTypeHandle().GetGenericTypeDefinition().AsPtr(), pv);
 
     _ASSERTE(SUCCEEDED(hr));
 

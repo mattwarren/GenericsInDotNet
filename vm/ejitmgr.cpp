@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -527,27 +532,29 @@ EE_ILEXCEPTION_CLAUSE*  EconoJitManager::GetNextEHClause(METHODTOKEN MethodToken
 
 }
 
-void  EconoJitManager::ResolveEHClause(METHODTOKEN MethodToken,
+TypeHandle  EconoJitManager::ResolveEHClause(METHODTOKEN MethodToken,
                                        EH_CLAUSE_ENUMERATOR* pEnumState, 
-                                       EE_ILEXCEPTION_CLAUSE* pEHclause)
+                                       EE_ILEXCEPTION_CLAUSE* pEHclause,
+                                       CrawlFrame *pCf)
 {
     // Resolve to class if defined in an *already loaded* scope. Don't cache in ejit for now
     JittedMethodInfo* jittedMethodInfo = (JittedMethodInfo*) MethodToken;
     Module *pModule = JitMethodInfo2MethodDesc(jittedMethodInfo)->GetModule();
-    
+    TypeHandle typeHnd = TypeHandle();
     m_pHeapCritSec->Enter();
-    if (! HasCachedEEClass(pEHclause))
+    if (! HasCachedTypeHandle(pEHclause))
     {
         NameHandle name(pModule, (mdToken)pEHclause->ClassToken);
         name.SetTokenNotToLoad(tdAllTypes);
-        TypeHandle typeHnd = pModule->GetClassLoader()->LoadTypeHandle(&name);
+        typeHnd = pModule->GetClassLoader()->LoadTypeHandle(&name);
         if (!typeHnd.IsNull())
         {
-            pEHclause->pEEClass = typeHnd.GetClass();
-            SetHasCachedEEClass(pEHclause);
+            pEHclause->exnType = typeHnd.AsMethodTable();
+            SetHasCachedTypeHandle(pEHclause);
         }
     }
     m_pHeapCritSec->Leave();
+    return typeHnd;
 }
 
 void* EconoJitManager::GetGCInfo(METHODTOKEN methodToken)

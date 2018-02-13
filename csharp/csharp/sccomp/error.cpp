@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -501,6 +506,11 @@ LPCWSTR COMPILER::ErrNameNode(BASENODE *name)
         return ErrName(name->asNAME()->pName);
     }
 
+    if (name->kind == NK_GENERICNAME) {
+        // generic name part
+        return ErrName(name->asANYNAME()->pName);
+    }
+
     // we have a dotted name
 
     // now, find the first name:
@@ -514,8 +524,8 @@ LPCWSTR COMPILER::ErrNameNode(BASENODE *name)
     //
     // add the first name, unless this is a fully qualified name
     //
-    if (first->asNAME()->pName != namemgr->GetPredefName(PN_EMPTY)) {
-        wcscpy(errBufferNext, first->asNAME()->pName->text);
+    if (first->asANYNAME()->pName != namemgr->GetPredefName(PN_EMPTY)) {
+        wcscpy(errBufferNext, first->asANYNAME()->pName->text);
         errBufferNext += wcslen(errBufferNext);
     }
 
@@ -525,11 +535,11 @@ LPCWSTR COMPILER::ErrNameNode(BASENODE *name)
     do {
         // loop until we add all the names
         first = first->pParent;
-        ASSERT(first->kind == NK_DOT && first->asDOT()->p2->kind == NK_NAME);
+        ASSERT(first->kind == NK_DOT && first->asDOT()->p2->IsAnyName());
 
         wcscpy(errBufferNext, L".");
         errBufferNext += 1;
-        wcscpy(errBufferNext, first->asDOT()->p2->asNAME()->pName->text);
+        wcscpy(errBufferNext, first->asDOT()->p2->asANYNAME()->pName->text);
         errBufferNext += wcslen(errBufferNext);
 
         // is this the rightmost name?
@@ -588,11 +598,13 @@ LPWSTR COMPILER::ErrSK(SYMKIND sk)
     switch (sk) {
     case SK_METHSYM: id = IDS_SK_METHOD; break;
     case SK_AGGSYM: id = IDS_SK_CLASS; break;
+    case SK_INSTAGGSYM: id = IDS_SK_GCLASS; break;
     case SK_NSSYM: id = IDS_SK_NAMESPACE; break;
     case SK_MEMBVARSYM: id = IDS_SK_FIELD; break;
     case SK_LOCVARSYM: id = IDS_SK_VAIRABLE; break;
     case SK_PROPSYM: id = IDS_SK_PROPERTY; break;
     case SK_EVENTSYM: id = IDS_SK_EVENT; break;
+    case SK_TYVARSYM: id = IDS_SK_TYVAR; break;
     default : ASSERT(!"impossible sk"); id = IDS_SK_UNKNOWN;
     }
 
@@ -949,6 +961,7 @@ DO_INDEXER:
 
     case SK_INFILESYM:
     case SK_OUTFILESYM:
+    case SK_TYVARSYM:
     case SK_LOCVARSYM:
 APPENDNAME:
         // Generate symbol name.
@@ -1019,6 +1032,28 @@ APPENDNAME:
         }
 
         *cur++ = L']';
+        *cur = L'\0';
+        break;
+    }
+
+    case SK_INSTAGGSYM: {
+        
+        // Generate the element type..
+        PTYPESYM rootType = sym->asINSTAGGSYM()->rootType();
+        ErrSym(rootType);
+        // Advance beyond the element type just generated.
+        cur = errstr + wcslen(errstr);
+        
+        // Add <...>
+        *cur++ = L'<';
+        errBufferNext = cur;
+        for (unsigned int i = 0; i< sym->asINSTAGGSYM()->cArgs; i++) { 
+            if (i != 0) *errBufferNext++ = L',';
+            ErrSym(sym->asINSTAGGSYM()->ppArgs[i]);
+            errBufferNext--;
+        }
+        cur = errBufferNext;
+        *cur++ = L'>';
         *cur = L'\0';
         break;
     }

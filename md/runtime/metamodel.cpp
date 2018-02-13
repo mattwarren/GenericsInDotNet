@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -328,6 +333,11 @@ const mdToken CMiniMdBase::mdtResolutionScope[4] = {
     mdtTypeRef
 };
 
+const mdToken CMiniMdBase::mdtTypeOrMethodDef[2] = {
+    mdtTypeDef,
+    mdtMethodDef
+};
+
 const int CMiniMdBase::m_cb[] = {0,1,1,2,2,3,3,3,3,4,4,4,4,4,4,4,4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5}; 
 
 //*****************************************************************************
@@ -489,7 +499,7 @@ void CMiniMdBase::InitColsForTable(     //
             switch (iCdTkn)
             {
             case CDTKN_TypeDefOrRef:
-                cRecs = max(Schema.m_cRecs[TBL_TypeDef],Schema.m_cRecs[TBL_TypeRef]);
+                cRecs = max(Schema.m_cRefs[TBL_TypeSpec],max(Schema.m_cRecs[TBL_TypeDef],Schema.m_cRecs[TBL_TypeRef]));
                 break;
             case CDTKN_HasSemantic:
                 cRecs = max(Schema.m_cRecs[TBL_Event],Schema.m_cRecs[TBL_Property]);

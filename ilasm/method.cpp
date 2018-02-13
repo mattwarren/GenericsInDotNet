@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -25,14 +30,10 @@ Method::Method(Assembler *pAssembler, Class *pClass, char *pszName, BinStr* pbsS
     m_MaxStack      = 8;
     m_Flags         = 0;
     m_LocalsSig     = 0;
-    m_localTypes    = 0;
-    m_numLocals     = 0;
     m_dwNumExceptions = 0;
 	m_dwNumEndfilters = 0;
-    m_dwExceptionFlags = 0;
 	m_firstArgName = NULL;
 	m_firstVarName = NULL;
-	m_szClassName = NULL;
 	m_pMethodSig = NULL;
 	m_wImplAttr = miIL; //default, if native or optil are not specified
 	m_wVTEntry = 0;
@@ -45,10 +46,7 @@ Method::Method(Assembler *pAssembler, Class *pClass, char *pszName, BinStr* pbsS
 	m_dwExportOrdinal = 0xFFFFFFFF;
 	m_ulLines[0]=m_ulLines[1]=0;
 	m_ulColumns[0]=m_ulColumns[0]=0;
-
-	memset(&m_guidLang,0,sizeof(GUID));
-	memset(&m_guidLangVendor,0,sizeof(GUID));
-	memset(&m_guidDoc,0,sizeof(GUID));
+    m_pbsBody = NULL;
 
 	// move the PInvoke descriptor (if any) from Assembler
 	// (Assembler gets the descriptor BEFORE it calls new Method)
@@ -59,6 +57,7 @@ Method::Method(Assembler *pAssembler, Class *pClass, char *pszName, BinStr* pbsS
     if (!pszName) return;
 
     m_szName = pszName;
+    m_dwName = (DWORD)strlen(pszName);
 
 	m_ExceptionList = new COR_ILMETHOD_SECT_EH_CLAUSE_FAT[MAX_EXCEPTIONS];
 	m_EndfilterOffsetList = new DWORD[MAX_EXCEPTIONS];
@@ -82,17 +81,14 @@ Method::Method(Assembler *pAssembler, Class *pClass, char *pszName, BinStr* pbsS
 		m_pMethodSig = (COR_SIGNATURE*)(pbsSig->ptr());
 		m_pbsMethodSig = pbsSig;
 	}
-	if(pClass)	m_szClassName = pClass->m_szName; 
 
 	m_firstArgName = pAssembler->getArgNameList();
-
 	if(pClass == NULL) pClass = pAssembler->m_pModuleClass; // fake "class" <Module>
     pClass->m_MethodList.PUSH(this);
 
 
     m_pPermissions = NULL;
     m_pPermissionSets = NULL;
-	memset(m_szSourceFileName,0,sizeof(m_szSourceFileName));
 }
 
 
@@ -110,8 +106,8 @@ void Method::OpenScope()
 }
 void Method::CloseScope()
 {
-	ARG_NAME_LIST*	pAN;
 	VarDescr*		pVD;
+    ARG_NAME_LIST*	pAN;
 	for(pAN=m_pCurrScope->pLocals; pAN; pAN = pAN->pNext)
 	{
         if((pVD = m_Locals.PEEK(pAN->dwAttr))) pVD->bInScope = FALSE;

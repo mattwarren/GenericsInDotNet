@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -37,6 +42,7 @@ class NDirect;
 class MethodDescChunk;
 struct LayoutRawFieldInfo;
 struct MLHeader;
+class InstantiatedMethodDesc;
 
 
 //=============================================================
@@ -83,11 +89,12 @@ enum MethodClassification
     mcNDirect   = 2, // N/Direct
     mcEEImpl    = 3, // special method; implementation provided by EE
     mcArray     = 4, // Array ECall
+    mcInstantiated = 5, // Generic methods and their instantiations, including descriptors 
+                        // for both shared and unshared code (see InstantiatedMethodDesc)
 
 
     mcCount,
 };
-
 
 // All flags in the MethodDesc now reside in a single 16-bit field. In the
 // enumeration below, multi-bit fields are represented as a mask together with a
@@ -98,6 +105,16 @@ enum MethodClassification
 // at bit 0 for the logic in GetMethodTable to work.
 // *** NOTE ***
 
+// @GENERICS: 
+// Unfortunately there's no space for a "this is a generic method" flag
+// Hence we need to go via the method token and EnumTyPars, which may be slow.
+// Probably this doesn't matter because it's only used in asserts and by reflection.
+//
+// Likewise there's no space for a flag for "this method desc is shared between 
+// multiple instantiations", so we instead test the method table owner.
+// Could use an illegal combo e.g. mdcStatic | mdcEncNewVirtual as shared-code non-generic methods
+// in instantiated types are always non-static and static methods cannot be E&C.
+//
 enum MethodDescClassification
 {
     
@@ -202,6 +219,12 @@ extern const unsigned g_ClassificationSizeTable[];
 // If the layout of this struct changes, these need to be 
 // revisited to make sure the alignment is maintained.
 //
+// @GENERICS: 
+// Method descriptors for methods belonging to instantiated types may be shared between compatible instantiations
+// Hence for reflection and elsewhere where exact types are important it's necessary to pair a method desc 
+// with the exact owning type handle.
+//
+// See genmeth.cpp for details of generic method descriptors.
 class MethodDesc
 {
 // Make EEClass::BuildMethodTable() a friend function. This allows us to not provide any
@@ -211,11 +234,16 @@ class MethodDesc
                                              mdToken cl,
                                              BuildingInterfaceInfo_t *pBuildingInterfaceList,
                                              const LayoutRawFieldInfo *pLayoutRawFieldInfos,
-                                             OBJECTREF *pThrowable);
+                                             OBJECTREF *pThrowable,
+                                             MethodTable *pParentMethodTable,
+                                             TypeHandle *inst,
+                                             PCCOR_SIGNATURE parentInst,
+                                             Pending *pending);
     friend class EEClass;
     friend class ArrayClass;
     friend class NDirect;
     friend class MethodDescChunk;
+    friend class InstantiatedMethodDesc;
     friend class MDEnums;
     friend class MethodImpl;
     friend struct MEMBER_OFFSET_INFO(MethodDesc);
@@ -303,6 +331,24 @@ public:
         return (GetMDImport()->GetNameOfMethodDef(GetMemberDef()));
     }
 
+    // Non-zero for InstantiatedMethodDescs and MethodDescs for generic methods
+    DWORD GetNumGenericMethodArgs();
+
+    // Return the number of class type parameters that are in scope for this method
+    // For static methods and methods living in uninstantiated classes this will be zero
+    DWORD GetNumGenericClassArgs()
+    {
+      if (GetMethodTable()->GetClass()->IsGenericTypeDefinition())
+	return 0;
+      else
+	return GetMethodTable()->GetNumGenericArgs();
+    }
+
+    // True if this is a method descriptor for an *uninstantiated* generic method
+    // WARNING: this may need to go to metadata to count the generic method
+    // parameters in the case of an mcComInterop method.
+    BOOL IsGenericMethodDefinition();
+
     DWORD IsStaticInitMethod()
     {
         return IsMdClassConstructor(GetAttrs(), GetName());
@@ -332,11 +378,61 @@ public:
         m_wFlags |= mdcStatic;
     }
     
-    inline DWORD IsIL()
+    inline BOOL IsIL()
     {
-        return mcIL == GetClassification();
+        return mcIL == GetClassification()  || mcInstantiated == GetClassification();
+    }
+    // True if the method descriptor is an instantiation of a generic method.
+    // Returns false for all other methods including the
+    // primary uninstantiated descriptor for a generic method (despite the fact
+    // that GetInstantiation returns something in that case)
+    inline BOOL HasMethodInstantiation();
+
+    // True if the method descriptor is either an instantiation of 
+    // a generic method or is an instance method in an instantiated class (or both).
+    BOOL HasClassOrMethodInstantiation() 
+    {
+	return (HasClassInstantiation() || HasMethodInstantiation());
+    }
+
+    inline BOOL HasClassInstantiation()
+    {
+        return GetMethodTable()->HasInstantiation();
     }
     
+    // Return the instantiation for an instantiated generic method
+    // Return NULL if not an instantiated method
+    // To get the (representative) instantiation of the declaring class use GetMethodTable()->GetInstantiation()
+    TypeHandle *GetMethodInstantiation();
+
+    // Return the method descriptor with no class or method instantiations, e.g.
+    // C<int>.m<string> -> C.m.  Does not modify any objects.
+    // This is the identity function on non-instantiated method descs
+    // in non-instantiated classes
+    MethodDesc* StripClassAndMethodInstantiation();
+
+    // Return the method descriptor with no method instantiations, e.g.
+    // C<int>.m<string> -> C<int>.m
+    // D.m<string> -> D.m    Does not modify any objects.
+    // This is the identity function on non-instantiated method descs
+    MethodDesc* StripMethodInstantiation();
+
+
+    // Return the instantiation of a method's enclosing class
+    // Return NULL if the enclosing class is not instantiated
+    // If the method code is shared then this might be a *representative* instantiation
+    // In this case, to get the exact instantiation pass in the exact type handle of the owner
+    TypeHandle *GetClassInstantiation(TypeHandle owner = TypeHandle());
+    
+    // Is the code shared between multiple instantiations of class or method?
+    // If so, then when compiling the code we might need to look up tokens in the class or method dictionary
+    BOOL IsSharedByGenericInstantiations(); // shared code of any kind
+    BOOL IsSharedByGenericMethodInstantiations(); // shared due to method instantiation
+
+    // Does this method require an extra argument for instantiation information?
+    // This is the case for shared-code instantiated methods and also for instance methods in shared-code instantiated structs
+    BOOL HasInstParam(); 
+
     inline DWORD IsECall()
     {
         return mcECall == GetClassification()
@@ -475,10 +571,12 @@ public:
     
     BOOL IsVarArg();
     
-    // Is this a stub used to unbox a value class prior to calling
-    // and instance method?
-    DWORD IsUnboxingStub();
-    
+    // Is this a special stub used to do one or both of the following:
+    // (a) unbox a value class prior to calling an instance method
+    // (b) pass an extra instantiation-info parameter to a generic method or instance method in a generic value class
+    DWORD IsSpecialStub();	// (a) or (b)
+    BOOL IsInstantiatingStub();	// (b) only
+
     DWORD SetIntercepted(BOOL set);
     
     BOOL IsVoid();
@@ -497,7 +595,12 @@ public:
 
     BOOL IsJitted()
     {
-        return !((m_CodeOrIL & METHOD_IS_IL_FLAG) == METHOD_IS_IL_FLAG);
+        if (HasMethodInstantiation())
+	{
+          return (m_CodeOrIL != (size_t) GetPreStubAddr());
+	}
+        else
+          return !((m_CodeOrIL & METHOD_IS_IL_FLAG) == METHOD_IS_IL_FLAG);
     }
     
     // IL RVA stored in same field as code address, but high bit set to
@@ -758,25 +861,7 @@ public:
     // Set the offset of this method desc in a chunk table (which allows us
     // to work back to the method table/module pointer stored at the head of
     // the table.
-    void SetChunkIndex(DWORD index, int flags)
-    {
-        // Calculate size of each method desc.
-        DWORD size = g_ClassificationSizeTable[flags & (mdcClassification|mdcMethodImpl)];
-
-        // Calculate the negative offset (mod 8) from the chunk table header.
-        _ASSERTE((size & ALIGNMENT_MASK) == 0);
-        DWORD offset = -(int)(index * (size >> ALIGNMENT_SHIFT));
-
-
-#ifdef TOKEN_IN_PREPAD
-        GetStubCallInstrs()->m_chunkIndex = (BYTE)offset;
-#else
-        // Fill in the offset in the top eight bits of the token field
-        // (since we don't need the token type).
-        m_dwToken &= 0x00FFFFFF;
-        m_dwToken |= offset << 24;
-#endif
-        }
+    void SetChunkIndex(DWORD index, int flags);
 
     // There are two overloads of GetAddrofCode.  If you have a static, or a
     // function, or you are (somehow!) guaranteed not to be thunking, use the
@@ -1008,7 +1093,7 @@ public:
         return (methodDescCount + (GetMaxMethodDescs(flags)-1)) / GetMaxMethodDescs(flags);
     }
 
-    static MethodDescChunk *CreateChunk(LoaderHeap *pHeap, DWORD methodDescCount, int flags, BYTE tokRange);
+    static MethodDescChunk *CreateChunk(LoaderHeap *pHeap, DWORD methodDescCount, int flags, BYTE tokRange, MethodTable *initialMT = NULL);
 
     static MethodDescChunk *RecoverChunk(MethodDesc *methodDesc);
 
@@ -1154,6 +1239,7 @@ inline const BYTE* MethodDesc::GetAddrofCode()
     // EmitUMEntryThunkCall (nexport.cpp.) Don't change this
     // without updating that code!
 
+    _ASSERTE(!IsGenericMethodDefinition());
     _ASSERTE(DontVirtualize() || !GetMethodTable()->IsThunking());
     
     return !IsJitted() ? GetPreStubAddr() : GetAddrofJittedCode();
@@ -1180,6 +1266,11 @@ inline const BYTE* MethodDesc::GetMethodEntryPoint()
 inline const BYTE* MethodDesc::GetAddrofCode(OBJECTREF orThis)
 {
     _ASSERTE(!DontVirtualize());
+    _ASSERTE(!IsGenericMethodDefinition());
+
+    //@GENERICS: this is essentially asking for vtable dispatch off an instantiated method, something that's
+    // only handled by a JIT helper function right now
+    _ASSERTE(!HasMethodInstantiation());
 
     // Deliberately use GetMethodTable -- not GetTrueMethodTable
     BYTE *addr = (BYTE *)*(orThis->GetClass()->GetMethodSlot(this));
@@ -1190,6 +1281,12 @@ inline const BYTE* MethodDesc::GetAddrofCode(OBJECTREF orThis)
 inline const BYTE* MethodDesc::GetAddrofCodeNonVirtual()
 {
     _ASSERTE(DontVirtualize());
+
+    _ASSERTE(!IsGenericMethodDefinition());
+
+    //@GENERICS: This method won't work for 
+    // instantiated method descs as it goes through the vtable
+    _ASSERTE(!HasMethodInstantiation());
 
     _ASSERTE(GetSlot() < (int)GetMethodTable()->GetTotalSlots());
     BYTE *addr = (BYTE *)*(GetClass()->GetMethodSlot(this));
@@ -1224,6 +1321,7 @@ inline const BYTE* MethodDesc::GetAddrofJittedCode()
     // It should always return m_CodeOrIL which is jitted native code!
     // 
     // ***************************************************
+    _ASSERTE(!IsGenericMethodDefinition());
     _ASSERTE(IsJitted());
     return (BYTE*)(m_CodeOrIL << METHOD_IS_IL_SHIFT);
 }
@@ -1684,6 +1782,257 @@ class MI_EEImplMethodDesc : public StoredSigMethodDesc
     }
 };
 
+//-----------------------------------------------------------------------
+// InstantiatedMethodDescs are used for generics and 
+// come in four flavours, discriminated by the
+// low order bits of the first field:
+//
+//  00 --> GenericMethodDefinition 
+//  01 --> UnsharedGenericMethodInstantiation 
+//  10 --> SharedGenericMethodInstantiation 
+//  11 --> InstantiatingStub 
+//
+// A SharedGenericMethodInstantiation descriptor extends MethodDesc  
+// with a pointer to dictionary layout and a representative instantiation.
+//
+// A GenericMethodDefition descriptor extends MethodDesc with
+// TypeDescs for the type variables for the method.  These together
+// form a "typical instantiation", also used for verifying the method.
+//
+// An InstantiatingStub extends MethodDesc with per-instantiation info, 
+// the first few elements of which are the type
+// handles for the method instantiation, along with a shared method descriptor.
+// Instantiating stubs are used as
+// extra type-context parameters. When used as an entry, instantiating stubs pass an
+// instantiation dictionary on to the shared method.
+// These entries are required to implement ldftn instructions 
+// on instantiations of shared generic methods, as the 
+// InstantiatingStub's pointer does not expect a dictionary argument; 
+// instead, it passes itself on to the shared code as the dictionary. 
+//
+// An UnsharedGenericMethodInstantiation contains just an instantiation.
+// These are fully-specialized wrt method and class type parameters.
+// These satisfy (!IsGenericMethodDefinition() && !IsSharedByGenericMethodInstantiations() && !IsInstantiatingStub())  
+//
+// Note that plain MethodDescs may represent shared code w.r.t. class type
+// parameters (see MethodDesc::IsSharedByGenericInstantiations()).
+//-----------------------------------------------------------------------
+
+class InstantiatedMethodDesc : public MethodDesc
+{
+public:    
+    static InstantiatedMethodDesc* CreateGenericInstantiation(MethodTable *pMT, MethodDesc* pGenericMD, TypeHandle *typars, BOOL allowInstParam = FALSE);
+
+    WORD FindDictionaryToken(unsigned token, WORD *offsets);
+
+    HRESULT AllocateMethodDicts();
+
+    void SetGenericMethodDesc(MethodDesc* pMD)
+    {
+      SetMemberDef(pMD->GetMemberDef());
+      m_wFlags = pMD->m_wFlags;
+      SetSlot(pMD->GetSlot());
+    }
+
+    // All varieties of InstantiatedMethodDesc's support this method.
+    TypeHandle* GetMethodInstantiation()
+    {
+        if (IsGenericMethodDefinition())
+            return GetTypicalMethodInstantiation();
+        else if (IsSharedByGenericMethodInstantiations())
+            return m_pPerInstInfo;
+        else
+            return m_pMethInst;
+    }
+
+    BOOL IsGenericMethodDefinition()
+    {
+        return((m_asInt & KindMask) == GenericMethodDefinition); 
+    }
+
+    SLOT *GetCodeAddr()
+    {
+        return (SLOT*) &m_CodeOrIL;
+    }
+
+    BOOL IsSharedByGenericMethodInstantiations()
+    {
+        return((m_asInt & KindMask) == SharedGenericMethodInstantiation); 
+    }
+
+    BOOL IsInstantiatingStub()
+    {
+        return((m_asInt & KindMask) == InstantiatingStub); 
+    }
+
+    // Initialize the typical (ie. formal) instantiation used for verification purposes
+    HRESULT InitTypicalMethodInstantiation(LoaderHeap *pHeap, DWORD numTyPars); 
+
+    // Get the typical (ie. formal) instantiation 
+    TypeHandle* GetTypicalMethodInstantiation()
+    {
+        _ASSERTE(IsGenericMethodDefinition());
+        return  m_pTypicalInstantiation; 
+    }
+
+    // Get the dictionary layout, if one has been allocated
+    DictionaryLayout* GetDictionaryLayout()
+    {
+        if (IsInstantiatingStub())
+            return GetSharedMethodDesc()->GetDictionaryLayout();
+        else if (IsSharedByGenericInstantiations())
+            return (DictionaryLayout *) ((INT_PTR) (m_asInt & ~KindMask)); 
+        else
+            return NULL;
+    }
+
+    InstantiatedMethodDesc* GetSharedMethodDesc()
+    {
+        _ASSERTE(IsInstantiatingStub());
+        return (InstantiatedMethodDesc *) ((INT_PTR) (m_asInt & ~KindMask)); 
+    }
+
+    // Set the instantiation in the per-inst section (this is actually a dictionary)
+    void SetupSharedMethodInstantiation(TypeHandle *pPerInstInfo)
+    {
+        // Initially the dictionary layout is empty
+        m_asInt = (INT_PTR) SharedGenericMethodInstantiation; 
+        m_pPerInstInfo = pPerInstInfo; 
+        _ASSERTE(IsSharedByGenericMethodInstantiations());
+    }
+
+    // Set the instantiation in the per-inst section (this is actually a dictionary)
+    void SetupUnsharedMethodInstantiation(TypeHandle *pInst)
+    {
+        // The first field is never used
+        m_asInt = (INT_PTR) UnsharedGenericMethodInstantiation; 
+        m_pMethInst = pInst; 
+
+        _ASSERTE(!IsInstantiatingStub());
+        _ASSERTE(!IsSharedByGenericMethodInstantiations());
+        _ASSERTE(!IsGenericMethodDefinition());
+    }
+
+    void SetupGenericMethodDefinition()
+    {
+        // The first field is never used
+        m_asInt = (INT_PTR) GenericMethodDefinition; 
+        // Initialize the type variables to empty
+        m_pTypicalInstantiation = NULL;
+
+        _ASSERTE(IsGenericMethodDefinition());
+    }
+
+    void SetupInstantiatingStub(InstantiatedMethodDesc* sharedMD,TypeHandle *pInst)   
+    {   
+        _ASSERTE(sharedMD->IsSharedByGenericMethodInstantiations());
+
+        m_asInt = (((INT_PTR) sharedMD) | InstantiatingStub); 
+        m_pMethInst = pInst; 
+
+        _ASSERTE(IsInstantiatingStub());
+        _ASSERTE(((MethodDesc *) this)->IsInstantiatingStub());
+    }
+
+    void ModifyPerInstInfo(TypeHandle* pPerInstInfo)
+    {
+        _ASSERTE(IsInstantiatingStub());
+        m_pPerInstInfo = pPerInstInfo; 
+    }
+
+    void ModifyDictionaryLayout(DictionaryLayout* d)
+    {
+        _ASSERTE(IsSharedByGenericMethodInstantiations());
+        m_asInt = (((INT_PTR) d) | SharedGenericMethodInstantiation); 
+    }
+
+    void ModifyTypicalMethodInstantiation(TypeHandle *pTypicalInst)
+    {
+        _ASSERTE(IsGenericMethodDefinition());
+        m_pTypicalInstantiation = pTypicalInst; 
+    }
+
+    enum
+    {
+        KindMask = 0x03,
+        GenericMethodDefinition = 0x00,
+        UnsharedGenericMethodInstantiation = 0x01,
+        SharedGenericMethodInstantiation  = 0x02,
+        InstantiatingStub  = 0x03,
+    };
+
+    // The lowest two bits of this pointer indicate
+    // the kind of InstantiatedMethodDesc we're dealing with.
+    //  00 --> GenericMethodDefition 
+    //  01 --> UnsharedGenericMethodInstantiation 
+    //  10 --> SharedGenericMethodInstantiation 
+    //  11 --> InstantiatingStub 
+    union {
+        DictionaryLayout* m_pDictLayout; //SHARED
+
+        InstantiatedMethodDesc* m_pSharedMethodDesc; // STUB
+
+        // If this is a generic definition or unshared instantiation 
+        // then this field just contains the tag // GENERIC, UNSHARED
+        INT_PTR     m_asInt;       
+
+    };
+
+public:
+    // Note we can't steal bits off m_pPerInstInfo as the JIT generates code to access through it!!
+    union
+    {
+        // Type parameters to method, exact if this is unshared code, representative otherwise.
+        // This is actually a dictionary and further slots may hang off the end of th
+        // instantiation.
+        TypeHandle* m_pPerInstInfo;  //SHARED
+
+        // Type parameters to method, exact if this is unshared code or a stub
+        TypeHandle* m_pMethInst;  // UNSHARED, STUB
+
+        //@GENERICSVER: typical type parameters to method
+        TypeHandle* m_pTypicalInstantiation; // GENERIC
+    };
+
+private:
+    HRESULT AllocateMethodDict(DictionaryLayout *pDictLayout);
+
+    static InstantiatedMethodDesc* FindInstantiatedMethodDesc(MethodTable *pMT, 
+                                                              MethodDesc *pGenericMD, 
+                                                              DWORD ntypars, 
+                                                              TypeHandle *typars, 
+                                                              BOOL getSharedNotStub);
+
+    static InstantiatedMethodDesc* FindInstantiatedMethodDescInChunkList(MethodDescChunk *pChunk,
+                                                                         MethodTable *pMT,
+                                                                         mdToken tok,
+                                                                         DWORD ntypars, 
+                                                                         TypeHandle *typars,
+                                                                         BOOL getSharedNotStub);
+        
+
+    static HRESULT NewInstantiatedMethodDesc(MethodTable *pMT, 
+                                             MethodDesc* pGenericMDescInRepMT, 
+                                             InstantiatedMethodDesc* pSharedMDescForStub, 
+                                             InstantiatedMethodDesc** ppMD, 
+                                             DWORD ntypars, 
+                                             TypeHandle *typars, 
+                                             BOOL getSharedNotStub);
+};
+
+class MI_InstantiatedMethodDesc : public InstantiatedMethodDesc
+{
+    friend class MethodImpl;
+
+    MethodImpl m_Overrides;
+
+public:
+
+    MethodImpl* GetImplData()
+    {
+        return & m_Overrides;
+    }
+};
 
 inline MethodTable* MethodDesc::GetMethodTable()
 {
@@ -1737,7 +2086,46 @@ inline void MethodDesc::SMDDebugCheck(mdMethodDef mb)
 }
 #endif
 
+inline TypeHandle *MethodDesc::GetMethodInstantiation()
+{
+    return
+        (GetClassification() == mcInstantiated)
+        ? ((InstantiatedMethodDesc *) this)->GetMethodInstantiation() 
+        : NULL;
+}
 
+inline BOOL MethodDesc::IsGenericMethodDefinition()
+{
+    return 
+        (GetClassification() == mcInstantiated && ((InstantiatedMethodDesc *) this)->IsGenericMethodDefinition())
+        || (GetClassification() == mcECall && GetNumGenericMethodArgs() > 0);
+}
+
+inline BOOL MethodDesc::HasMethodInstantiation()
+{
+    return (GetClassification() == mcInstantiated && !IsGenericMethodDefinition());
+}
+
+inline void MethodDesc::SetChunkIndex(DWORD index, int flags) {
+    // Calculate size of each method desc.
+    DWORD size = g_ClassificationSizeTable[flags & (mdcClassification|mdcMethodImpl)];
+
+    // Calculate the negative offset (mod 8) from the chunk table header.
+    _ASSERTE((size & ALIGNMENT_MASK) == 0);
+    DWORD offset = -(int)(index * (size >> ALIGNMENT_SHIFT));
+
+#ifdef TOKEN_IN_PREPAD
+    GetStubCallInstrs()->m_chunkIndex = (BYTE)offset;
+#else
+    // Fill in the offset in the top eight bits of the token field
+    // (since we don't need the token type).
+    m_dwToken &= 0x00FFFFFF;
+    m_dwToken |= offset << 24;
+#endif
+
+    // Make sure that the MethodDescChunk is setup correctly
+    _ASSERTE(MethodDescChunk::RecoverChunk(this)->GetMethodDescSize() == size);
+}
 //
 // Note: no one is allowed to use this mask outside of method.hpp and method.cpp. Don't make this public!
 //

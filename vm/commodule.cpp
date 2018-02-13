@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -1610,9 +1615,9 @@ Object* GetClassesInner(Module* pModule, StackCrawlMark* stackMark)
         // Get the VM class for the current class token
         _ASSERTE(pModule->GetClassLoader());
         NameHandle name(pModule, rgTypeDefs[i]);
-        EEClass* pVMCCurClass = pModule->GetClassLoader()->LoadTypeHandle(&name, &throwable).GetClass();
+        TypeHandle curClass = pModule->GetClassLoader()->LoadTypeHandle(&name, &throwable);
         if (bSystemAssembly) {
-            if (pVMCCurClass->GetMethodTable()->IsTransparentProxyType())
+            if (curClass.GetMethodTable()->IsTransparentProxyType())
                 continue;
         }
         if (throwable != 0) {
@@ -1621,10 +1626,10 @@ Object* GetClassesInner(Module* pModule, StackCrawlMark* stackMark)
             throwable = 0;
         }
         else {
-            _ASSERTE("LoadClass failed." && pVMCCurClass);
+            _ASSERTE("LoadClass failed." && !curClass.IsNull());
 
             // Get the COM+ Class object
-            OBJECTREF refCurClass = pVMCCurClass->GetExposedClassObject();
+            OBJECTREF refCurClass = curClass.GetMethodTable()->GetExposedClassObject();
             _ASSERTE("GetExposedClassObject failed." && refCurClass != NULL);
 
             refArrClasses->SetAt(curPos++, refCurClass);
@@ -1715,9 +1720,9 @@ FCIMPL1(Object*, COMModule::GetMethods, ReflectModuleBaseObject* refThisUNSAFE)
     //  the declaring class...
     ReflectClass* pRC = 0;
     if (pML->dwMethods > 0) {
-        EEClass* pEEC = pML->methods[0].pMethod->GetClass();
-        if (pEEC) {
-            REFLECTCLASSBASEREF o = (REFLECTCLASSBASEREF) pEEC->GetExposedClassObject();
+        MethodTable *pMT = pML->methods[0].pMethod->GetMethodTable();
+        if (pMT) {
+            REFLECTCLASSBASEREF o = (REFLECTCLASSBASEREF) pMT->GetExposedClassObject();
             pRC = (ReflectClass*) o->GetData();
         }       
     }
@@ -1795,9 +1800,9 @@ FCIMPL6(Object*, COMModule::InternalGetMethod, ReflectModuleBaseObject* refThisU
 
     ReflectClass* pRC = 0;
     if (pML->dwMethods > 0) {
-        EEClass* pEEC = pML->methods[0].pMethod->GetClass();
-        if (pEEC) {
-            REFLECTCLASSBASEREF o = (REFLECTCLASSBASEREF) pEEC->GetExposedClassObject();
+        MethodTable* pMT = pML->methods[0].pMethod->GetMethodTable();
+        if (pMT) {
+            REFLECTCLASSBASEREF o = (REFLECTCLASSBASEREF) pMT->GetExposedClassObject();
             pRC = (ReflectClass*) o->GetData();
         }       
     }
@@ -1853,9 +1858,9 @@ FCIMPL1(Object*, COMModule::GetFields, ReflectModuleBaseObject* vRefThis)
     //  the declaring class...
     ReflectClass* pRC = 0;
     if (pFL->dwFields > 0) {
-        EEClass* pEEC = pFL->fields[0].pField->GetMethodTableOfEnclosingClass()->GetClass();
-        if (pEEC) {
-            REFLECTCLASSBASEREF o = (REFLECTCLASSBASEREF) pEEC->GetExposedClassObject();
+        MethodTable *pMT = pFL->fields[0].pField->GetMethodTableOfEnclosingClass();
+        if (pMT) {
+            REFLECTCLASSBASEREF o = (REFLECTCLASSBASEREF) pMT->GetExposedClassObject();
             pRC = (ReflectClass*) o->GetData();
         }       
     }
@@ -1911,9 +1916,9 @@ FCIMPL3(Object*, COMModule::GetField, ReflectModuleBaseObject* vRefThis, StringO
     // Lets make the reflection class into
     //  the declaring class...
     if (pFL->dwFields > 0) {
-        EEClass* pEEC = pFL->fields[0].pField->GetMethodTableOfEnclosingClass()->GetClass();
-        if (pEEC) {
-            REFLECTCLASSBASEREF o = (REFLECTCLASSBASEREF) pEEC->GetExposedClassObject();
+        MethodTable *pMT = pFL->fields[0].pField->GetMethodTableOfEnclosingClass();
+        if (pMT) {
+            REFLECTCLASSBASEREF o = (REFLECTCLASSBASEREF) pMT->GetExposedClassObject();
             pRC = (ReflectClass*) o->GetData();
         }
     }

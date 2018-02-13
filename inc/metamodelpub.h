@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -1160,6 +1165,48 @@ public:
     };
 };
 
+// Generics
+
+
+class GenericParRec
+{
+public:
+	USHORT		m_Number;				// index; zero = first var
+	USHORT		m_Flags;				// index; zero = first var
+	enum {
+	  
+		COL_Number,                                     // index; zero = first var
+		COL_Flags,                                      // flags, for future use
+		COL_Owner,					// typeDef/methodDef
+		COL_Name,                                       // Purely descriptive, not used for binding purposes
+		COL_Kind,                                       // typeDef/Ref/Spec, reserved for future use
+		COL_Constraint,                                 // typeDef/Ref/Spec, null indicates no constraint
+		COL_COUNT, 
+		COL_KEY = COL_Owner
+	};
+    USHORT GetNumber()
+    {
+        return VAL16(m_Number);
+    }
+    USHORT GetFlags()
+    {
+        return VAL16(m_Flags);
+    }
+
+};
+
+class MethodSpecRec
+{
+public:
+	enum {
+	        COL_Method,                                     // methodDef/memberRef
+		COL_Instantiation,				// signature
+		COL_COUNT,
+		COL_KEY
+	};
+};
+
+
 #include <poppack.h>
 
 // List of MiniMd tables.
@@ -1207,6 +1254,8 @@ public:
 	MiniMdTable(ExportedType)	\
 	MiniMdTable(ManifestResource)		\
     MiniMdTable(NestedClass)    \
+        MiniMdTable(GenericPar)    \
+        MiniMdTable(MethodSpec)  \
 
 #undef MiniMdTable
 #define MiniMdTable(x) TBL_##x,
@@ -1230,6 +1279,7 @@ enum {
 	MiniMdCodedToken(Implementation)		\
 	MiniMdCodedToken(CustomAttributeType)	\
     MiniMdCodedToken(ResolutionScope)       \
+    MiniMdCodedToken(TypeOrMethodDef)        \
 
 #undef MiniMdCodedToken
 #define MiniMdCodedToken(x) CDTKN_##x,

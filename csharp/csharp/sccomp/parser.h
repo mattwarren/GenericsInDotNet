@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -66,6 +71,23 @@ protected:
         POINTER_OR_MULT,
         MUST_BE_TYPE
     };
+    
+    enum SCANMEMBERNAME
+    {
+        NOT_MEMBER_NAME,                    // anything else
+        NOT_MEMBER_NAME_WITH_DOT,           // any bad member name which contains a dot
+        GENERIC_METHOD_NAME,                // I<R>.M<T>
+        INDEXER_NAME,                       // I<R>.this
+        PROPERTY_OR_EVENT_OR_METHOD_NAME,   // I<R>.M
+        SIMPLE_NAME,                        // M
+    };
+    
+    enum SCANNAMEDTYPEPART
+    {
+        NOT_NAME_TYPE_PART,
+        SIMPLE_NAME_TYPE_PART,
+        GENERIC_NAME_TYPE_PART,
+    };
 
     enum PARSEDECLFLAGS
     {
@@ -116,7 +138,10 @@ public:
     BOOL            ScanParameterList (BOOL *pfHadParms);
     BOOL            ScanCast ();
     SCANTYPE        ScanType ();
-
+    SCANNAMEDTYPEPART   ScanNamedTypePart();
+    BOOL            ScanOptionalInstantiation();
+    SCANMEMBERNAME  ScanMemberName();
+    
     // Literals
     WCHAR           ScanEscapeSequence (PCWSTR &p, WCHAR *surrogatePair);
     STRCONST        *ScanStringLiteral (long iTokenIndex);
@@ -130,6 +155,8 @@ public:
     UNOPNODE        *AllocUnaryOpNode (OPERATOR op, long iTokIdx, BASENODE *pParent, BASENODE *pArg);
     BASENODE        *AllocOpNode (OPERATOR op, long iTokIdx, BASENODE *pParent);
     NAMENODE        *AllocNameNode (NAME *pName, long iTokIdx);
+    GENERICNAMENODE *AllocGenericNameNode (NAME *pName, long iTokIdx);
+    NAMENODE        *InitNameNode (NAMENODE *pNameNode, NAME *pName, long iTokIdx);
 
     // Top-level parsing methods
     BASENODE        *ParseSourceModule ();
@@ -138,10 +165,9 @@ public:
     BASENODE        *ParseGlobalAttributes (BASENODE *pParent);
     BASENODE        *ParseNamespace (BASENODE *pParent);
     BASENODE        *ParseTypeDeclaration (BASENODE *pParent, BASENODE *pAttr);
-    BASENODE        *ParseClassOrStruct (BASENODE *pParent, long iTokIdx, BASENODE *pAttrs, unsigned iMods);
+    BASENODE        *ParseAggregate (BASENODE *pParent, long iTokIdx, BASENODE *pAttrs, unsigned iMods);
     BASENODE        *ParseDelegate (BASENODE *pParent, long iTokIdx, BASENODE *pAttrs, unsigned iMods);
     BASENODE        *ParseEnum (BASENODE *pParent, long iTokIdx, BASENODE *pAttrs, unsigned iMods);
-    BASENODE        *ParseInterface (BASENODE *pParent, long iTokIdx, BASENODE *pAttrs, unsigned iMods);
 
 
     MEMBERNODE      *ParseMember (CLASSNODE *pParent);
@@ -154,12 +180,25 @@ public:
     MEMBERNODE      *ParseOperator (CLASSNODE *pParent, long iTokIdx, BASENODE *pAttr, unsigned iMods, TYPENODE *pType);
 
     TYPENODE        *ParseType (BASENODE *pParent);
+    TYPENODE        *ParseUnderlyingType(BASENODE *pParent, BOOL *pfHadError);
+    TYPENODE        *ParsePointerTypeMods (BASENODE *pParent, TYPENODE *pBaseType);
+    TYPENODE        *ParseNamedType (TYPENODE *pParent);
     TYPENODE        *ParseClassType (BASENODE *pParent);
     TYPENODE        *ParseReturnType (BASENODE *pParent);
-    BASENODE        *ParseTypeNameList (BASENODE *pParent);
+    BASENODE        *ParseBaseTypesClause (BASENODE *pParent);
+    TYPENODE        *ParseTypeName (BASENODE *pParent);
+    BASENODE        *ParseTypeList (BASENODE *pParent);
+    BASENODE        *ParseOptionalInstantiation (BASENODE *pParent);
+    BASENODE        *ParseInstantiation (BASENODE *pParent);
+    BASENODE        *ParseTypeFormalList (BASENODE *pParent);
+    CONSTRAINTNODE  *ParseConstraint(BASENODE *pParent);
+    BASENODE        *ParseConstraintClause(BASENODE *pParent, BOOL fAllowed);
     NAMENODE        *ParseIdentifier (BASENODE *pParent);
     NAMENODE        *ParseIdentifierOrKeyword (BASENODE *pParent);
-    BASENODE        *ParseName (BASENODE *pParent);
+    BASENODE        *ParseDottedName (BASENODE *pParent);
+    BASENODE        *ParseMethodName (BASENODE *pParent);
+    NAMENODE        *ParseGenericQualifiedNamePart(BASENODE *pParent, BOOL fInExpr);
+    BASENODE        *ParseGenericQualifiedNameList(BASENODE *pParent, BOOL fInExpr);
     NAMENODE        *ParseMissingName (NAMENODE *pName, BASENODE *pParent, long iTokIndex);
     BASENODE        *ParseIndexerName (BASENODE *pParent);
     unsigned        ParseModifiers (BOOL bReportDups);

@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -992,6 +997,15 @@ namespace System {
         public bool IsArray {
                 get {return IsArrayImpl();}
         }
+
+        public bool HasGenericArguments {
+                get {return HasGenericArgumentsImpl();}
+        }
+
+        public bool HasGenericParameters {
+                get {return HasGenericParametersImpl();}
+        }
+
         /// <include file='doc\Type.uex' path='docs/doc[@for="Type.IsByRef"]/*' />
         public bool IsByRef {
                 get {return IsByRefImpl();}
@@ -1067,6 +1081,11 @@ namespace System {
         // Protected routine to determine if this class represents a COM object
         /// <include file='doc\Type.uex' path='docs/doc[@for="Type.IsCOMObjectImpl"]/*' />
         abstract protected bool IsCOMObjectImpl();
+
+        protected virtual bool HasGenericParametersImpl() { return false; }
+        protected virtual bool HasGenericArgumentsImpl() { return false; }
+
+        public virtual Type BindGenericParameters(Type[] typeArgs) { throw new NotSupportedException(Environment.GetResourceString("NotSupported_SubclassOverride")); }
     
         // Protected routine to determine if this class is contextful
         /// <include file='doc\Type.uex' path='docs/doc[@for="Type.IsContextfulImpl"]/*' />
@@ -1090,6 +1109,10 @@ namespace System {
     
         /// <include file='doc\Type.uex' path='docs/doc[@for="Type.GetElementType"]/*' />
         abstract public Type GetElementType();
+
+        public virtual Type[] GetGenericArguments() { throw new NotSupportedException(Environment.GetResourceString("NotSupported_SubclassOverride")); }
+        public virtual Type GetGenericTypeDefinition() { throw new NotSupportedException(Environment.GetResourceString("NotSupported_SubclassOverride")); }
+
         /// <include file='doc\Type.uex' path='docs/doc[@for="Type.HasElementTypeImpl"]/*' />
         abstract protected bool HasElementTypeImpl();
 

@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -48,7 +53,7 @@ CustomMarshalerInfo::CustomMarshalerInfo(BaseDomain *pDomain, TypeHandle hndCust
     GCPROTECT_BEGIN(throwable);
 
     // Make sure the custom marshaller implements ICustomMarshaler.
-    if (!hndCustomMarshalerType.GetClass()->StaticSupportsInterface(g_Mscorlib.GetClass(CLASS__ICUSTOM_MARSHALER)))
+    if (!hndCustomMarshalerType.GetMethodTable()->StaticSupportsInterface(g_Mscorlib.GetClass(CLASS__ICUSTOM_MARSHALER)))
     {
         DefineFullyQualifiedNameForClassW()
         GetFullyQualifiedNameForClassW(hndCustomMarshalerType.GetClass());
@@ -209,7 +214,7 @@ MethodDesc *CustomMarshalerInfo::GetCustomMarshalerMD(EnumCustomMarshalerMethods
 
     MethodTable *pMT = hndCustomMarshalertype.AsMethodTable();
 
-    _ASSERTE(pMT->GetClass()->StaticSupportsInterface(g_Mscorlib.GetClass(CLASS__ICUSTOM_MARSHALER)));
+    _ASSERTE(pMT->StaticSupportsInterface(g_Mscorlib.GetClass(CLASS__ICUSTOM_MARSHALER)));
 
     MethodDesc *pMD = NULL;
 
@@ -253,7 +258,7 @@ MethodDesc *CustomMarshalerInfo::GetCustomMarshalerMD(EnumCustomMarshalerMethods
     _ASSERTE(pMD && "Unable to find specified CustomMarshaler method");
 
     // Ensure that the value types in the signature are loaded.
-    MetaSig::EnsureSigValueTypesLoaded(pMD->GetSig(), pMD->GetModule());
+    MetaSig::EnsureSigValueTypesLoaded(pMD);
 
     // Return the specified method desc.
     return pMD;

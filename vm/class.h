@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -68,6 +73,9 @@ class MethodDescChunk;
 struct DomainLocalClass;
 class DomainLocalBlock;
 
+class TypeHandle;
+class Substitution;
+class Pending;
 
 #ifdef _DEBUG 
 
@@ -77,7 +85,7 @@ if (pMT->m_pIMap){ \
     if (pMT->HasDynamicInterfaceMap()) \
         _pIMap_ = (InterfaceInfo_t*)(((BYTE *)pMT->m_pIMap) - sizeof(DWORD_PTR) - sizeof(InterfaceInfo_t)); \
     else \
-        _pIMap_ = (InterfaceInfo_t*)(((BYTE *)pMT->m_pIMap) - sizeof(InterfaceInfo_t)); \
+    _pIMap_ = (InterfaceInfo_t*)(((BYTE *)pMT->m_pIMap) - sizeof(InterfaceInfo_t)); \
     _ASSERTE(_pIMap_->m_pMethodTable == (MethodTable *)(size_t) INVALID_POINTER_CD); \
     _ASSERTE(_pIMap_->m_wStartSlot == 0xCDCD); \
     _ASSERTE(_pIMap_->m_wFlags == 0xCDCD); \
@@ -86,14 +94,25 @@ if (pMT->m_pIMap){ \
 #define VALIDATE_INTERFACE_MAP(pMT)
 #endif
 
+
 //============================================================================
 // This is the inmemory structure of a class and it will evolve.
 //============================================================================
 
 
 //
-// A EEClass contains an array of these structures, which describes each interface implemented
+// A MethodTable contains an array of these structures, which describes each interface implemented
 // by this class (directly declared or indirectly declared).
+//
+//@GENERICS
+// Instantiated interfaces have their own method tables unique to the instantiation e.g. I<string> is
+// distinct from I<int> and I<object>
+// 
+// For generic types the interface map lists generic interfaces
+// For instantiated types the interface map lists instantiated interfaces
+//   e.g. for C<T> : I<T>, J<string>
+// the interface map for C would list I and J
+// the interface map for C<int> would list I<int> and J<string>
 //
 typedef struct
 {
@@ -244,7 +263,33 @@ private:
 // instantiate proxies, we start off with the MethodTable of that class.  This
 // gives us the correct GC info, base size, etc.  We use that starting point
 // to build a shared VTable that is embedded into an accurate MethodTable.
-
+//
+//@GENERICS:
+// Generic type instantiations (in C# syntax: C<ty_1,...,ty_n>) are represented by
+// MethodTables, i.e. a new MethodTable gets allocated for each such instantiation.
+// The entries in these tables (i.e. the code) are, however, often shared.
+//
+// In particular, a MethodTable's vtable contents (and hence method descriptors) may be 
+// shared between compatible instantiations (e.g. List<string> and List<object> have
+// the same vtable *contents*).  Likewise the EEClass will be shared between 
+// compatible instantiations whenever the vtable contents are. 
+//
+// !!! Thus that it is _not_ generally the case that GetClass.GetMethodTable() == t. !!!
+//
+// Each generic type has a corresponding "generic" method table that serves the following
+// purposes:
+// * Static fields and methods hang here; they are *not* present in instantiations of the type
+// * The method table pointer is used as a representative for the generic type e.g. in reflection 
+// * MethodDescs for non-static methods in the vtable are used for reflection; they should never
+//   be invoked.
+// Some other information (e.g. BaseSize) makes no sense "generically" but unfortunately gets put in anyway.
+//
+// Each distinct instantiation of a generic type has its own MethodTable structure.
+// However, the non-vtable section of such MethodTables are only present for one of the instantiations (the first one
+// requested) as non-vtable entries are never accessed through the vtable pointer of an object so it's always possible
+// to ensure that they are accessed through the representative MethodTable that contains them.
+//
+//
 class MethodTable
 {
     friend struct MEMBER_OFFSET_INFO(MethodTable);
@@ -301,7 +346,7 @@ public:
 
         DWORD           m_BaseSize;             // Base size of instance of this class
 
-        EEClass*        m_pEEClass;             // class object
+        EEClass*        m_pEEClass;             // class object, may be shared between compatible instantiations of generic types
         
         union
         {
@@ -315,11 +360,66 @@ public:
     WORD                m_wNumInterface;        // number of interfaces in the interface map
     BYTE                m_NormType;             // The CorElementType for this class (most classes = ELEMENT_TYPE_CLASS)
 
-    Module*             m_pModule;
+    Module*             m_pModule;             // The module that this class was declared in.
+                                             // This will be the same for all instantiations of a generic type
+
 
     WORD                m_wCCtorSlot;           // slot of class constructor
     WORD                m_wDefaultCtorSlot;     // slot of default constructor
 
+#ifdef _DEBUG
+    LPUTF8  m_szDebugClassName; // This is the *fully qualified* class name
+#endif
+
+    //@GENERICS:
+    // Pointer to per-instantiation pointer table, each entry of which points to an instantiation "dictionary"
+    // for an instantiated type; the last dictionary is specific to this method table, previous dictionaries are 
+    // inherited from superclasses. Instantiated interfaces and structs have just single dictionary (no inheritance).
+    //
+    // GetClass()->GetNumDicts() gives the number of dictionaries.
+    //
+    // <NICE>GENERICS: instead of a separate table of pointers, put the pointers in the vtable itself. Advantages:
+    // * Time: we save an indirection as we don't need to go through m_pPerInstInfo first.
+    // * Space: no need for m_pPerInstInfo (1 word)
+    // Problem is that lots of code assumes that the vtable is filled uniformly with pointers to MethodDesc stubs.</NICE>
+    //
+    // The dictionary for the method table is just an array of handles for type parameters in the following cases:
+    // * instantiated interfaces (no code)
+    // * instantiated types whose code is not shared
+    // Otherwise, it starts with the type parameters and then has a fixed number of slots for handles (types & methods)
+    // that are filled in lazily at run-time. Finally there is a "spill-bucket" pointer used when the dictionary gets filled.
+    // In summary:
+    //    typar_1              type handle for first type parameter
+    //    ...
+    //    typar_n              type handle for last type parameter
+    //    slot_1               slot for first run-time handle (initially null)
+    //    ...
+    //    slot_m               slot for last run-time handle (initially null)
+    //    next_bucket          pointer to spill bucket (possibly null)
+    // The spill bucket contains just run-time handle slots.
+    //   (Alternative: continue chaining buckets. 
+    //    Advantage: no need to deallocate when growing dictionaries. 
+    //    Disadvantage: more indirections required at run-time.)
+    //
+    // The layout of dictionaries is determined by GetClass()->GetDictionaryLayout()
+    // Thus the layout can vary between incompatible instantiations. This is sometimes useful because individual type
+    // parameters may or may not be shared. For example, consider a two parameter class Dict<K,D>. In instantiations shared with 
+    // Dict<double,string> any reference to K is known at JIT-compile-time (it's double) but any token containing D 
+    // must have a dictionary entry. On the other hand, for instantiations shared with Dict<string,double> the opposite holds.
+    //
+    TypeHandle** m_pPerInstInfo;             
+
+    // m_ExposedClassObject is a RuntimeType instance for this class.  But
+    // do NOT use it for Arrays or remoted objects!  All arrays of objects 
+    // share the same MethodTable/EEClass.  -- BrianGru, 9/11/2000
+    // @GENERICS: this used to live in EEClass but now lives here because it is per-instantiation data
+    OBJECTREF      *m_ExposedClassObject;   
+
+    // The parent type is now here instead of in EEClass; this improves casting perf and means that we can share EEClass
+    // between compatible instantiations for instantiated types
+    MethodTable    *m_pParentMethodTable;
+    
+    //@GENERICS: see comments in definition of InterfaceInfo_t
     InterfaceInfo_t*    m_pIMap;                // pointer interface map for classes.
 
 
@@ -347,7 +447,7 @@ public:
     SLOT    m_Vtable[1];
 
     static MethodTable* AllocateNewMT(DWORD dwVtableSlots, DWORD dwStaticFieldBytes, DWORD dwGCSize
-            , DWORD dwNumInterfaces, ClassLoader *pLoader, BOOL isIFace
+            , DWORD dwNumInterfaces, DWORD dwNumDicts, DWORD dwNumTypSlots, ClassLoader *pLoader, BOOL isIFace
         );
 
     // checks whether the class initialiser should be run on this class, and runs it if necessary
@@ -381,6 +481,19 @@ public:
     BOOL            IsMarshaledByRef();
     BOOL            IsAgileAndFinalizable();
 
+    // There are two version of GetExposedClassObject.  The GetExposedClassObject()
+    //  method will get the class object.  If it doesn't exist it will be created.
+    //  GetExistingExposedClassObject() will return null if the Type object doesn't exist.
+    OBJECTREF      GetExposedClassObject();
+    FORCEINLINE OBJECTREF      GetExistingExposedClassObject() {
+        if (m_ExposedClassObject == NULL)
+            return NULL;
+        else
+            return *m_ExposedClassObject;
+    }    
+
+    inline void SetExposedClassObject (OBJECTREF *ExposedClassObject) { m_ExposedClassObject = ExposedClassObject; }   
+    
     Module *GetModule()
     {
         return m_pModule;
@@ -495,6 +608,8 @@ public:
     
     BOOL IsInterface();
 
+    BOOL        StaticSupportsInterface(MethodTable *pInterfaceMT);
+
     BOOL IsShared()
     {
         return m_wFlags & enum_flag_SharedAssembly;
@@ -507,6 +622,39 @@ public:
     void SetClassInited();
 
     void SetClassRestored();
+ 
+    // Get the instantiation for this instantiated type e.g. for Dict<string,int> 
+    // this would be an array {string,int}
+    // If not instantiated, return NULL
+    TypeHandle* GetInstantiation();
+
+    // Obtain instantiation from an instantiated type or a pointer to the
+    // element type of an array.
+    TypeHandle* GetClassOrArrayInstantiation();
+
+    // Get the underlying uninstantiated generic type for an instantiated type e.g. for Dict<string,int>
+    // this would be the type handle for Dict itself
+    // Return null if not instantiated
+    TypeHandle GetGenericTypeDefinition();
+
+    // Return the canonical representative MT amongst the set of MT's that share
+    // code with the given MT because of generics.
+    MethodTable *GetCanonicalMethodTable();
+
+    // Is this type instantiated?
+    BOOL HasInstantiation() {
+      return GetInstantiation() != NULL; 
+    }
+
+    DWORD GetNumGenericArgs();
+
+    // Return a pointer to the per-instantiation information. See field itself for comments.
+    TypeHandle** GetPerInstInfo()
+    {
+      return m_pPerInstInfo;
+    }
+
+    BOOL MethodTable::IsCanonicalMethodTable();
 
     void SetSharedMethodTable()
     {
@@ -569,11 +717,6 @@ public:
         return offsetof(MethodTable, m_Vtable);
     }
 
-    static DWORD GetOffsetOfNumSlots()
-    {
-        return offsetof(MethodTable, m_cbSlots);
-    }
-
     inline EEClass* GetClass()
     {
         return m_pEEClass;
@@ -586,7 +729,6 @@ public:
     inline InterfaceInfo_t* GetInterfaceMap()
     {
         VALIDATE_INTERFACE_MAP(this);
-
         #ifdef _DEBUG
             return (m_wNumInterface) ? m_pIMap : NULL;
         #else
@@ -681,6 +823,10 @@ public:
 
     OBJECTREF Allocate();
     OBJECTREF Box(void *data, BOOL mayHaveRefs = TRUE);
+
+    // Used for debugging class layout. Dumps to the debug console
+    // when debug is true.
+    void DebugDumpVtable(LPCUTF8 pszClassName, BOOL debug);
 
 private:
 
@@ -811,7 +957,10 @@ class EEClassLayoutInfo
 //
 typedef struct
 {
-    EEClass *   m_pClass;
+    // The interface method table; for instantiated interfaces, this is the generic interface
+    MethodTable     *m_pMethodTable;
+    // A pointer into the formal interface instantiation, if present
+    PCCOR_SIGNATURE inst;
 } BuildingInterfaceInfo_t;
 
 
@@ -909,6 +1058,10 @@ enum
     VMFLAG_ISSINGLEDELEGATE                = 0x10000000,
     VMFLAG_ISMULTIDELEGATE                 = 0x20000000,
     VMFLAG_PREFER_ALIGN8                   = 0x40000000, // Would like to have 8-byte alignment
+    VMFLAG_ISINSTANTIATED                  = 0x80000000, // It's an instantiated type
+    //<REVIEW>GENERICS: this clashes with HASCOCLASSATTRIB but we've run out of flags...
+    // Fortunately there's no problem using it because an instantiated class is never a CoClass</REVIEW>
+    VMFLAG_SHAREDINST                      = 0x00020000, // This EEClass is shared between multiple instantiations
 };
 
 
@@ -940,13 +1093,26 @@ class MethodNameCache;
 class SystemDomain;
 class Assembly;
 class DeadlockAwareLockedListElement;
+class DictionaryLayout;
 
+//@GENERICS:
+// For most types there is a one-to-one mapping between MethodTable* and EEClass* 
+// However this is not the case for instantiated types where code and representation
+// are shared between compatible instantiations (e.g. List<string> and List<object>)
+// Then a single EEClass structure is shared between multiple MethodTable structures
+// Uninstantiated generic types (e.g. List) have their own EEClass and MethodTable,
+// used (a) as a representative for the generic type itself, (b) for static fields and
+// methods, which aren't present in the instantiations, and (c) to hold some information
+// (e.g. formal instantiations of superclass and implemented interfaces) that is common
+// to all instantiations and isn't stored in the EEClass structures for instantiated types
+//
 class EEClass // DO NOT CREATE A NEW EEClass USING NEW!
 {
     // DO NOT ADD FRIENDS UNLESS ABSOLUTELY NECESSARY
     // USE ACCESSORS TO READ/WRITE private field members
 
     // To access bmt stuff
+    friend class Generics;
     friend class FieldDesc;
     friend struct MEMBER_OFFSET_INFO(EEClass);
     // To access offset of private fields
@@ -987,8 +1153,8 @@ public:
 
     inline WORD GetNumHandleStatics () { return m_wNumHandleStatics; }
     inline void SetNumHandleStatics (WORD wNumHandleStatics) { m_wNumHandleStatics = wNumHandleStatics; }
-    
-    inline void SetNumInstanceFieldBytes (DWORD dwNumInstanceFieldBytes) { m_dwNumInstanceFieldBytes = dwNumInstanceFieldBytes; }
+
+        inline void SetNumInstanceFieldBytes (DWORD dwNumInstanceFieldBytes) { m_dwNumInstanceFieldBytes = dwNumInstanceFieldBytes; }
     
     inline ClassLoader* GetLoader () { return m_pLoader; }
     inline void SetLoader (ClassLoader* pLoader) { m_pLoader = pLoader; }
@@ -1003,6 +1169,9 @@ public:
     inline mdTypeDef Getcl () { return m_cl; }
     inline void Setcl (mdTypeDef cl) { m_cl = cl; }
     
+    void LockChunks(); 
+    void UnlockChunks();
+
     inline MethodDescChunk* GetChunks () { return m_pChunks; }
     inline void SetChunks (MethodDescChunk* pChunks) { m_pChunks = pChunks; }
     
@@ -1018,30 +1187,46 @@ public:
     inline WORD GetContextStaticOffset () { return m_wContextStaticOffset; }
     inline void SetContextStaticOffset (WORD wContextStaticOffset) { m_wContextStaticOffset = wContextStaticOffset; }
 
-    inline void SetExposedClassObject (OBJECTREF *ExposedClassObject) { m_ExposedClassObject = ExposedClassObject; }
-    
+   
 
     MethodNameHash *CreateMethodChainHash();
 
 protected:
     // prevents any other class from doing a new()
-    EEClass(ClassLoader *pLoader)
+    EEClass(ClassLoader *pLoader, TypeHandle genericType, BOOL bIsSharedInst)
     {
         m_VMFlags        = 0;
         m_pLoader        = pLoader;
         m_pMethodTable   = NULL;
-       
-       
+        u_inst.m_BaseTypeSubstitutions = NULL;
+
+        // Set m_GenericType and VMFLAG_ISINSTANTIATED and genericType early so
+        // we can always determine whether this is an EEClass for an 
+        // instantiated type, e.g. List<int> or List<object>.  This helps
+        // us sanity check things earlier.
+        if (!genericType.IsNull()) 
+        {
+            u_inst.m_GenericTypeDefinition = genericType.AsMethodTable();
+            m_VMFlags |= VMFLAG_ISINSTANTIATED;
+        }
+        if (bIsSharedInst)
+            m_VMFlags |= VMFLAG_SHAREDINST;
+
+        m_pTypicalInst = NULL;
+
+     
 #ifdef _DEBUG
         m_szDebugClassName = NULL;
 #endif // _DEBUG
-        m_ExposedClassObject = NULL;
         m_pChunks = NULL;
         //union
         m_SiblingsChain = NULL; //m_pCoClassForIntf = NULL (union)
         m_ChildrenChain = NULL;
     }
-
+       
+    //GENERICS: this is mostly replaced by m_pParentMethodTable in MethodTable
+    // Unfortunately it's used transiently during class loading (before the MethodTable is available) so
+    // we'd need to do more plumbing in the class loader to avoid its use
     EEClass *m_pParentClass;
     WORD   m_wNumVtableSlots;  // Includes only vtable methods (which come first in the table)
     WORD   m_wNumMethodSlots;  // Includes vtable + non-vtable methods, but NOT duplicate interface methods
@@ -1083,24 +1268,80 @@ private:
         METHOD_TYPE_NORMAL,
         METHOD_TYPE_ECALL,
         METHOD_TYPE_NDIRECT,
+        METHOD_TYPE_INSTANTIATED, // generic methods are represented as instantiated method with typical instantiations
         METHOD_TYPE_COUNT
     };
     SparseVTableMap *m_pSparseVTableMap;      // Used to map MethodTable slots to VTable slots
     UINT32 m_dwInterfaceId;
 
+
+public:
+    TypeHandle* GetTypicalInst()
+    {
+        return m_pTypicalInst;
+    }
+
+    inline TypeHandle * GetCanonicalInstantiation()
+    {
+        if (HasInstantiation())
+            return this->GetMethodTable()->GetInstantiation();
+        else
+            return m_pTypicalInst;
+    }
+
+protected:
+    //@GENERICS:
+    // For a generic type or instantiated type: number of type parameters (NOT including those of superclasses).
+    // For all other types: zero.
+    WORD   m_wNumTyPars;         
+
+    // Total number of instantiation dictionaries including inherited ones
+    // i.e. how many instantiated classes (including this one) are there in the hierarchy?
+    // See comments about m_pPerInstInfo in MethodTable.
+    WORD   m_wNumDicts;
+
+    // Layout of handle dictionary for generic type (the last dictionary pointed to from m_pPerInstInfo) 
+    // Non-null only for instantiations of non-interface generic types whose code is shared between
+    // multiple instantiations.
+    // See comments in MethodTable for more details.
+    DictionaryLayout* m_pDictLayout;
+
+     //    This holds the type variables for the generic class
+     TypeHandle* m_pTypicalInst;
+
+    union
+    {
+      // formal instantiations of superclass (entry -1) and interfaces (entries 0 to m_wNumInterfaces-1)
+      // if NULL, then no interfaces/superclass are instantiated
+      // Present only for non-instantiated types (generic and non-generic)
+      // as it's the same for all instantiations
+      Substitution* m_BaseTypeSubstitutions; 
+
+      // For instantiated types, this contains the MethodTable of the generic type
+      // For example, for the instantiation List<int> this would be the m.t. for List
+      MethodTable* m_GenericTypeDefinition;        
+    } u_inst;
+
+private:
     // Only used in the resolve phase of the classloader
     BOOL ExpandInterface(InterfaceInfo_t *pInterfaceMap, 
-                         EEClass *pNewInterface, 
+                         Substitution *pInsts,
+                         MethodTable *pNewInterface, 
+                         Module *instModule,
+                         PCCOR_SIGNATURE inst,
+                         Substitution *pSubst,
                          DWORD *pdwInterfaceListSize, 
                          DWORD *pdwMaxInterfaceMethods,
                          BOOL fDirect);
     BOOL CreateInterfaceMap(BuildingInterfaceInfo_t *pBuildingInterfaceList, 
+                            Module *pModule,
                             InterfaceInfo_t *ppInterfaceMap, 
+                            Substitution *pInsts,
                             DWORD *pdwInterfaceListSize, 
-                            DWORD *pdwMaxInterfaceMethods);
+                            DWORD *pdwMaxInterfaceMethods,
+                            MethodTable *pParentMethodTable);
 
     static DWORD CouldMethodExistInClass(EEClass *pClass, LPCUTF8 pszMethodName, DWORD dwHashName);
-
 
     // Helper methods called from DoRunClassInit().
     BOOL RunClassInit(DeadlockAwareLockedListElement *pEntry, OBJECTREF *pThrowable);
@@ -1178,6 +1419,9 @@ private:
 
         WORD NumParentPointerSeries;
         MethodNameHash *pParentMethodHash;
+        PCCOR_SIGNATURE parentInst;
+        MethodTable *pParentMethodTable;
+        mdToken token;
         
         inline bmtParentInfo() { memset((void *)this, NULL, sizeof(*this)); }
     };
@@ -1185,6 +1429,7 @@ private:
     struct bmtInterfaceInfo {
         DWORD dwTotalNewInterfaceMethods;
         InterfaceInfo_t *pInterfaceMap;         // Temporary interface map
+        PCCOR_SIGNATURE *interfaceInsts;        // Formal instantiations for each interface
         DWORD *pdwOriginalStart;                // If an interface is moved this is the original starting location.
         DWORD dwInterfaceMapSize;               // # members in interface map
         DWORD dwLargestInterfaceSize;           // # members in largest interface we implement  
@@ -1205,6 +1450,7 @@ private:
         DWORD dwNumStaticObjRefFields;
         DWORD dwNumDeclaredFields;           // For calculating amount of FieldDesc's to allocate
         DWORD dwNumDeclaredMethods;          // For calculating amount of MethodDesc's to allocate
+        DWORD dwNumILInstanceMethods;        // Used as a heuristic for size of type slots table
         DWORD dwNumUnboxingMethods;
 
         HENUMInternal hEnumField;
@@ -1238,7 +1484,8 @@ private:
         bmtTokenRangeNode *ranges[METHOD_TYPE_COUNT][METHOD_IMPL_COUNT]; //linked list of token ranges that contain at least one method
         
         mdToken *pMethodBody;               // MethodDef's for the bodies of MethodImpls. Must be defined in this type.
-        mdToken *pMethodDecl;               // Method token that body implements. Is a MethodDef
+        mdToken *pMethodDecl;               // Method token that body implements. Is a MethodDef or MemberRef
+        PCCOR_SIGNATURE *pMethodDeclInstSig;// Signature instantiation for parent of method-decl, if a type-spec representing an instantiated type
 
         inline bmtMetaDataInfo() { memset((void *)this, NULL, sizeof(*this)); }
     };
@@ -1282,6 +1529,7 @@ private:
         IMDInternalImport *pInternalImport;
         Module *pModule;
         mdToken cl;
+        TypeHandle *inst;
 
         inline bmtInternalInfo() { memset((void *)this, NULL, sizeof(*this)); }
     };
@@ -1302,14 +1550,16 @@ private:
         DWORD        pIndex;     // Next open spot in array, we load the BodyDesc's up in order of appearance in the 
                                  // type's list of methods (a body can appear more then once in the list of MethodImpls)
         mdToken*     pDeclToken; // Either the token or the method desc is set for the declaration
+        PCCOR_SIGNATURE* pDeclInstSig; // signature instantiations of parent types for Declaration (NULL if not instantiated)
         MethodDesc** pDeclDesc;  // Method descs for Declaration. If null then Declaration is in this type and use the token
         MethodDesc** pBodyDesc;  // Method descs created for Method impl bodies
 
-        void AddMethod(MethodDesc* pBody, MethodDesc* pDesc, mdToken mdDecl)
+        void AddMethod(MethodDesc* pBody, MethodDesc* pDesc, mdToken mdDecl, PCCOR_SIGNATURE instSig)
         {
             _ASSERTE(pDesc == NULL || mdDecl == mdTokenNil);
             pDeclDesc[pIndex] = pDesc;
             pDeclToken[pIndex] = mdDecl;
+            pDeclInstSig[pIndex] = instSig;
             pBodyDesc[pIndex++] = pBody;
         }
         
@@ -1325,6 +1575,12 @@ private:
             return pDeclToken[i];
         }
 
+        PCCOR_SIGNATURE GetDeclarationInstSig(DWORD i)
+        {
+            _ASSERTE(i < pIndex);
+            return pDeclInstSig[i];
+        }
+
         MethodDesc* GetBodyMethodDesc(DWORD i)
         {
             _ASSERTE(i < pIndex);
@@ -1334,7 +1590,7 @@ private:
     };
 
     //These functions are used by BuildMethodTable
-    HRESULT ResolveInterfaces(BuildingInterfaceInfo_t*, bmtInterfaceInfo*, bmtProperties*, 
+    HRESULT ResolveInterfaces(BuildingInterfaceInfo_t*, bmtInternalInfo*, bmtInterfaceInfo*, bmtProperties*, 
                               bmtVtable*, bmtParentInfo*);
     // Finds a method declaration from a MemberRef or Def. It handles the case where
     // the Ref or Def point back to this class even though it has not been fully 
@@ -1412,6 +1668,7 @@ private:
 
     HRESULT PlaceInterfaceDeclaration(MethodDesc*       pDecl,
                                       MethodDesc*       body,
+                                      PCCOR_SIGNATURE   declInstSig,
                                       bmtInternalInfo*  bmtInternal,
                                       bmtInterfaceInfo* bmtInterface, 
                                       bmtErrorInfo*     bmtError, 
@@ -1424,6 +1681,7 @@ private:
 
     HRESULT PlaceParentDeclaration(MethodDesc*       pDecl,
                                    MethodDesc*       body,
+                                   PCCOR_SIGNATURE   declInstSig,
                                    bmtInternalInfo*  bmtInternal,
                                    bmtErrorInfo*     bmtError, 
                                    bmtVtable*        bmtVT,
@@ -1447,7 +1705,8 @@ private:
                                      bmtVtable*);
 
     HRESULT PlaceVtableMethods(bmtInterfaceInfo*, 
-                               bmtVtable*, 
+                               BuildingInterfaceInfo_t *,
+                               bmtVtable*,
                                bmtMetaDataInfo*, 
                                bmtInternalInfo*, 
                                bmtErrorInfo*, 
@@ -1455,10 +1714,10 @@ private:
                                bmtMethAndFieldDescs*);
 
     HRESULT PlaceStaticFields(bmtVtable*, bmtFieldPlacement*, bmtEnumMethAndFields*);
-    HRESULT PlaceInstanceFields(bmtFieldPlacement*, bmtEnumMethAndFields*, bmtParentInfo*, bmtErrorInfo*, EEClass***);
+    HRESULT PlaceInstanceFields(bmtFieldPlacement*, bmtEnumMethAndFields*, bmtParentInfo*, bmtErrorInfo*, EEClass***, TypeHandle *inst = NULL);
     HRESULT SetupMethodTable(bmtVtable*, bmtInterfaceInfo*, bmtInternalInfo*, bmtProperties*, 
                              bmtMethAndFieldDescs*, bmtEnumMethAndFields*, 
-                             bmtErrorInfo*, bmtMetaDataInfo*, bmtParentInfo*);
+                             bmtErrorInfo*, bmtMetaDataInfo*, bmtParentInfo*, Pending*);
     HRESULT HandleGCForValueClasses(bmtFieldPlacement*, bmtEnumMethAndFields*, EEClass***);
     HRESULT CreateHandlesForStaticFields(bmtEnumMethAndFields*, bmtInternalInfo*, EEClass***, bmtVtable *bmtVT, bmtErrorInfo*);
     HRESULT VerifyInheritanceSecurity(bmtInternalInfo*, bmtErrorInfo*, bmtParentInfo*, bmtEnumMethAndFields*);
@@ -1466,8 +1725,12 @@ private:
 
 public:
     HRESULT MapSystemInterfaces();
-private:
 
+    //@GENERICS: called from ClassLoader::NewInstantiation and Class::SetupMethodTable
+    HRESULT LoadInstantiatedInfo(MethodTable *pMT, Pending *pending, OBJECTREF *pThrowable);
+private:
+    //setup "typical" instantiation of a generic class
+    void InitializeTypicalInst();
     HRESULT CheckForValueType(bmtErrorInfo*);
     HRESULT CheckForEnumType(bmtErrorInfo*);
     HRESULT CheckForRemotingProxyAttrib(bmtInternalInfo *bmtInternal, bmtProperties* bmtProp);
@@ -1508,21 +1771,27 @@ private:
     WORD   m_wNumStaticFields;
 
     // Number of pointer series
+    // @GENERICS: this isn't used for generic types
+    // <NICE>re-use this space for m_wNumTyPars?</NICE>
     WORD    m_wNumGCPointerSeries;
 
     // Number of static handles allocated
     WORD    m_wNumHandleStatics;
 
     // # of bytes of instance fields stored in GC object
+    // Not appropriate for generic types
     DWORD   m_dwNumInstanceFieldBytes;  // Warning, this can be any number, it is NOT rounded up to DWORD alignment etc
 
     ClassLoader *m_pLoader;
 
     // includes all methods in the vtable
+    // For an EEClass representing multiple instantiations of a generic type, this is the method table 
+    // for the first instantiation requested and is the only one containing entries for non-virtual instance methods
+    // (i.e. non-vtable entries)
     MethodTable *m_pMethodTable;
 
     // a pointer to a list of FieldDescs declared in this class
-    // There are (m_wNumInstanceFields - m_pParentClass->m_wNumInstanceFields + m_wNumStaticFields) entries
+    // There are (m_wNumInstanceFields - GetParentClass()->m_wNumInstanceFields + m_wNumStaticFields) entries
     // in this array
     FieldDesc *m_pFieldDescList;
 
@@ -1534,6 +1803,7 @@ private:
 
     SecurityProperties m_SecProps ;
 
+    //@GENERICS: this will be the same for all instantiations of a generic type
     mdTypeDef m_cl; // CL is valid only in the context of the module (and its scope)
     
 
@@ -1547,12 +1817,15 @@ private:
     static MetaSig      *s_cctorSig;
 
 public :
+    // GENERICS: When the parent is an instantiated type this is a *representative* and not exact
     EEClass * GetParentClass ();
-    EEClass ** GetParentClassPtr ();
     EEClass * GetEnclosingClass();  
    
     BOOL    HasRemotingProxyAttribute();
 
+    PCCOR_SIGNATURE GetParentInst();
+    Substitution* GetParentSubst();
+    Substitution* GetInterfaceSubst(DWORD i);
     void    GetGuid(GUID *pGuid, BOOL bGenerateIfNotFound);
     FieldDesc *GetFieldDescListRaw();
     WORD    GetNumInstanceFields();
@@ -1573,7 +1846,7 @@ public :
     Module * GetModule();
     ClassLoader * GetClassLoader();
     mdTypeDef  GetCl();
-    InterfaceInfo_t * GetInterfaceMap();
+    //    InterfaceInfo_t * GetInterfaceMap();
     int    IsInited();
     DWORD  IsResolved();
     DWORD  IsRestored();
@@ -1583,12 +1856,17 @@ public :
     DWORD  IsValueClass();
     void   SetValueClass();
     DWORD  IsShared();
+
+    // Is the EEClass structure shared between compatible instantiations?
+    BOOL   IsSharedByGenericInstantiations();
     DWORD  IsValueTypeClass();
     DWORD  IsObjectClass();
 
     DWORD  IsAnyDelegateClass();
     DWORD  IsSingleDelegateClass();
     DWORD  IsMultiDelegateClass();
+    DWORD  HasInstantiation();
+    DWORD  IsGenericTypeDefinition();
     DWORD  IsAnyDelegateExact();
     DWORD  IsSingleDelegateExact();
     DWORD  IsMultiDelegateExact();
@@ -1682,6 +1960,54 @@ public :
         return (m_dwAttrClass & tdVisibilityMask);
     }
 
+    // Number of type parameters for a generic or instantiated type:
+    // * for instantiated types, the number already specified
+    // * for generic types, the number required by ClassLoader::Instantiate
+    DWORD GetNumGenericArgs()
+    {
+        return (DWORD) m_wNumTyPars;
+    }
+
+    // The number of dictionary entries in m_pPerInstInfo
+    DWORD GetNumDicts()
+    {
+      return (DWORD) m_wNumDicts;
+    }
+
+    TypeHandle GetGenericTypeDefinition()
+    {
+      if (!HasInstantiation())
+        return TypeHandle();
+      else
+        return TypeHandle(u_inst.m_GenericTypeDefinition); 
+    }
+
+    void SetGenericTypeDefinition(TypeHandle genericType);
+
+    Substitution* GetBaseTypeSubstitutions()
+    {
+      if (HasInstantiation())
+        return GetGenericTypeDefinition().GetClass()->GetBaseTypeSubstitutions();
+      else
+        return u_inst.m_BaseTypeSubstitutions;
+    }
+
+    DictionaryLayout* GetDictionaryLayout()
+    {
+      return m_pDictLayout;
+    }
+
+    // For instantiated types, this returns the EEClass for the
+    // corresponding uninstantiated generic type.
+    EEClass* StripInstantiation() 
+    { 
+        TypeHandle genericType = GetGenericTypeDefinition();
+        if (genericType.IsNull()) 
+          return this;
+        else 
+          return genericType.GetClass();
+    }
+
     // class is blittable
     BOOL IsBlittable();
 
@@ -1725,19 +2051,14 @@ public :
     HRESULT StoreFullyQualifiedName(LPUTF8 pszFullyQualifiedName, DWORD cBuffer, LPCUTF8 pszNamespace, LPCUTF8 pszName);
     HRESULT StoreFullyQualifiedName(LPWSTR pszFullyQualifiedName, DWORD cBuffer, LPCUTF8 pszNamespace, LPCUTF8 pszName);
 
-        // Method to find an interface in the type.
-    InterfaceInfo_t* FindInterface(MethodTable *pMT);
-
-        // Methods used to determine if a type supports a given interface.
-    BOOL        StaticSupportsInterface(MethodTable *pInterfaceMT);
+        // Methods used to determine if an object supports a given interface.
     BOOL        SupportsInterface(OBJECTREF pObject, MethodTable *pMT);
 
     MethodDesc *FindMethod(LPCUTF8 pwzName, LPHARDCODEDMETASIG pwzSignature, MethodTable *pDefMT = NULL, BOOL bCaseSensitive = TRUE);
-        // typeHnd is the type handle associated with the class being looked up.
-        // It has additional information in the case of a shared class (Arrays)
-    MethodDesc *FindMethod(LPCUTF8 pszName, PCCOR_SIGNATURE pSignature, DWORD cSignature, Module* pModule, MethodTable *pDefMT = NULL, BOOL bCaseSensitive = TRUE, TypeHandle typeHnd=TypeHandle());
+    MethodDesc *FindMethod(LPCUTF8 pszName, PCCOR_SIGNATURE pSignature, DWORD cSignature, Module* pModule, Substitution* pSigSubst = NULL, 
+      MethodTable *pDefMT = NULL, BOOL bCaseSensitive = TRUE, Substitution *pDefSubst = NULL);
     MethodDesc *FindMethod(mdMethodDef mb);
-    MethodDesc *InterfaceFindMethod(LPCUTF8 pszName, PCCOR_SIGNATURE pSignature, DWORD cSignature, Module* pModule, DWORD *slotNum, BOOL bCaseSensitive = TRUE);
+    MethodDesc *InterfaceFindMethod(LPCUTF8 pszName, PCCOR_SIGNATURE pSignature, DWORD cSignature, Module* pModule, DWORD *slotNum, BOOL bCaseSensitive = TRUE, Substitution *subst = NULL);
 
     MethodDesc *FindPropertyMethod(LPCUTF8 pszName, EnumPropertyMethods Method, BOOL bCaseSensitive = TRUE);
     MethodDesc *FindEventMethod(LPCUTF8 pszName, EnumEventMethods Method, BOOL bCaseSensitive = TRUE);
@@ -1763,7 +2084,8 @@ public :
                              mdToken cl, 
                              BuildingInterfaceInfo_t *pBuildingInterfaceList, 
                              const LayoutRawFieldInfo *pLayoutRawFieldInfos,
-                             OBJECTREF *pThrowable);
+                             OBJECTREF *pThrowable, MethodTable *pParentMethodTable, 
+                             TypeHandle *inst, PCCOR_SIGNATURE parentInst, Pending *pending);
 
 #ifdef DEBUGGING_SUPPORTED
     void NotifyDebuggerLoad();
@@ -1773,7 +2095,11 @@ public :
 
 
     IMDInternalImport *GetMDImport();    
+
+    //@GENERICS: for shared instantiated types, this will be the *first* method table sharing this EEClass
+    // This is the one that contains non-vtable methods - see comments above
     MethodTable* GetMethodTable();
+
     SLOT *GetVtable();
     SLOT *GetStaticsTable();
     MethodDesc* GetMethodDescForSlot(DWORD slot);
@@ -1790,7 +2116,7 @@ public :
     //==========================================================================
     // This function is very specific about how it constructs a EEClass.
     //==========================================================================
-    static HRESULT CreateClass(Module *pModule, mdTypeDef cl, BOOL fHasLayout, BOOL fDelegate, BOOL fIsEnum, EEClass** ppEEClass);
+    static HRESULT CreateClass(Module *pModule, mdTypeDef cl, BOOL fHasLayout, BOOL fDelegate, BOOL fIsEnum, TypeHandle genericType, BOOL bIsSharedInst, EEClass** ppEEClass);
     static void CreateObjectClassMethodHashBitmap(EEClass *pObjectClass);
 
     // Warning, this field can be byte unaligned
@@ -1819,43 +2145,33 @@ public :
         return (m_VMFlags & VMFLAG_HASNONPUBLICFIELDS);
     }
 
-    //==========================================================================
-    // Mechanism for accessing the COM+ Exposed class object (the one programmers
-    // see via reflection).
-    //==========================================================================
-
-    // There are two version of GetExposedClassObject.  The GetExposedClassObject()
-    //  method will get the class object.  If it doesn't exist it will be created.
-    //  GetExistingExposedClassObject() will reteurn null if the Class object doesn't exist.
-    OBJECTREF      GetExposedClassObject();
-    FORCEINLINE OBJECTREF      GetExistingExposedClassObject() {
-        if (m_ExposedClassObject == NULL)
-            return NULL;
-        else
-            return *m_ExposedClassObject;
-    }
-    
     static HRESULT GetDescFromMemberRef(Module *pModule,               // Scope for the memberRef and mdEnclosingRef
                                         mdMemberRef MemberRef,         // MemberRef to resolve
                                         mdToken mdEnclosingRef,        // Optional typeref not to load (allows self-references) 
                                                                        // Returns S_FALSE if it equals parent token (ppDesc is not set)
                                         void **ppDesc,                 // Returned method desc, hr will equal S_OK
                                         BOOL *pfIsMethod,              // Returns TRUE if **ppDesc is a MethodDesc, FALSE if it is a FieldDesc 
-                                        OBJECTREF *pThrowable = NULL); // Error must be GC protected
+                                        OBJECTREF *pThrowable = NULL,  // Error must be GC protected
+                                        TypeHandle *classInst = NULL,  // Used to fill in class type parameters
+                                        TypeHandle *methodInst = NULL); // Used to fill in method type parameters				
 
     static HRESULT GetDescFromMemberRef(Module *pModule,    // See above for description of parameters.
                                         mdMemberRef MemberRef, 
                                         void **ppDesc, 
                                         BOOL *pfIsMethod,              // Returns TRUE if **ppDesc is a MethodDesc, FALSE if it is a FieldDesc 
-                                        OBJECTREF *pThrowable = NULL)
+                                        OBJECTREF *pThrowable = NULL, 
+                                        TypeHandle *classInst = NULL,
+                                        TypeHandle *methodInst = NULL)
     { 
-        HRESULT hr = GetDescFromMemberRef(pModule, MemberRef, mdTypeRefNil, ppDesc, pfIsMethod, pThrowable);
+        HRESULT hr = GetDescFromMemberRef(pModule, MemberRef, mdTypeRefNil, ppDesc, pfIsMethod, pThrowable, classInst, methodInst);
         if(hr == S_FALSE) hr = E_FAIL; // not a valid return 
         return hr;
     }
     
-    static HRESULT GetMethodDescFromMemberRef(Module *pModule, mdMemberRef MemberRef, MethodDesc **ppMethodDesc, OBJECTREF *pThrowable = NULL);
-    static HRESULT GetFieldDescFromMemberRef(Module *pModule, mdMemberRef MemberRef, FieldDesc **ppFieldDesc, OBJECTREF *pThrowable = NULL);
+    static HRESULT GetMethodDescFromMemberRef(Module *pModule, mdMemberRef MemberRef, MethodDesc **ppMethodDesc, OBJECTREF *pThrowable = NULL, 
+      TypeHandle *classInst = NULL, TypeHandle *methodInst = NULL, BOOL shared = FALSE);
+    static HRESULT GetFieldDescFromMemberRef(Module *pModule, mdMemberRef MemberRef, FieldDesc **ppFieldDesc, OBJECTREF *pThrowable = NULL, 
+      TypeHandle *classInst = NULL, TypeHandle *methodInst = NULL);
 
     // Backpatch up and down the class hierarchy, as aggressively as possible
     static BOOL PatchAggressively(MethodDesc *pMD, SLOT pCode);
@@ -1889,11 +2205,6 @@ public :
     inline WORD    GetContextLocalStaticsSize() { return m_wContextStaticsSize; }
 
 protected:
-    // m_ExposedClassObject is a RuntimeType instance for this class.  But
-    // do NOT use it for Arrays or remoted objects!  All arrays of objects 
-    // share the same EEClass.                                        
-    OBJECTREF      *m_ExposedClassObject;
-
 
 public:
     EEClassLayoutInfo *GetLayoutInfo();
@@ -1906,7 +2217,10 @@ public:
 
     // Used for debugging class layout. Dumps to the debug console
     // when debug is true.
-    void DebugDumpVtable(LPCUTF8 pszClassName, BOOL debug);
+    void DebugDumpVtable(LPCUTF8 pszClassName, BOOL debug)
+      {
+        GetMethodTable()->DebugDumpVtable(pszClassName, debug);
+      }
     void DebugDumpFieldLayout(LPCUTF8 pszClassName, BOOL debug);
     void DebugRecursivelyDumpInstanceFields(LPCUTF8 pszClassName, BOOL debug);
     void DebugDumpGCDesc(LPCUTF8 pszClassName, BOOL debug);
@@ -1917,14 +2231,6 @@ inline EEClass *EEClass::GetParentClass ()
     _ASSERTE(IsRestored() || IsRestoring());
 
     return m_pParentClass;
-}
-
-
-inline EEClass **EEClass::GetParentClassPtr ()
-{
-    _ASSERTE(IsRestored() || IsRestoring());
-
-    return &m_pParentClass;
 }
 
 
@@ -1977,6 +2283,7 @@ inline WORD   EEClass::GetNumMethodSlots()
 
 inline WORD    EEClass::GetNumGCPointerSeries()
 {
+    _ASSERTE(!IsGenericTypeDefinition());
     return m_wNumGCPointerSeries;
 }
 
@@ -2029,11 +2336,6 @@ inline ClassLoader *EEClass::GetClassLoader()
     return m_pLoader;
 }
 
-inline InterfaceInfo_t *EEClass::GetInterfaceMap()
-{
-    return GetMethodTable()->GetInterfaceMap();
-}
-
 inline int EEClass::IsInited()
 {
     return (m_VMFlags & VMFLAG_INITED);
@@ -2077,6 +2379,11 @@ inline void EEClass::SetValueClass()
 inline DWORD EEClass::IsShared()
 {
     return m_VMFlags & VMFLAG_SHARED;
+}
+
+inline BOOL EEClass::IsSharedByGenericInstantiations()
+{
+    return HasInstantiation() && (m_VMFlags & VMFLAG_SHAREDINST) != 0;
 }
 
 inline DWORD EEClass::IsObjectClass()
@@ -2275,6 +2582,16 @@ inline DWORD EEClass::IsMultiDelegateClass()
     return (m_VMFlags & VMFLAG_ISMULTIDELEGATE);
 }
 
+inline DWORD EEClass::HasInstantiation()
+{
+    return (m_VMFlags & VMFLAG_ISINSTANTIATED);
+}
+
+inline DWORD EEClass::IsGenericTypeDefinition()
+{
+    return GetNumGenericArgs() != 0 && !HasInstantiation();
+}
+
 inline DWORD EEClass::IsAnyDelegateExact()
 {
     return IsSingleDelegateExact() || IsMultiDelegateExact();
@@ -2405,6 +2722,23 @@ inline BOOL MethodTable::IsMarshaledByRef()
 }
 
 
+inline TypeHandle MethodTable::GetGenericTypeDefinition()
+{ 
+    return m_pEEClass->GetGenericTypeDefinition();
+}
+
+// The instantiation for this class is stored in the type slots table
+// *after* any inherited slots
+inline TypeHandle* MethodTable::GetInstantiation()
+{
+  if (m_pEEClass->HasInstantiation())
+    return GetPerInstInfo()[m_pEEClass->GetNumDicts()-1];
+  else if (m_pEEClass->GetNumGenericArgs()) 
+    /* for a generic class, return the typical instantiation */
+    return m_pEEClass->GetTypicalInst();
+  return NULL;
+}
+
 //
 // Security properties accessor methods
 //
@@ -2481,16 +2815,21 @@ inline void EEClass::SetMethodTable(MethodTable*  pMT)
 
 inline DWORD   EEClass::GetNumInstanceFieldBytes()
 {
+    //<GENERICS>Not relevant for generic types</GENERICS>
+    _ASSERTE(!IsGenericTypeDefinition());
+
     return(m_dwNumInstanceFieldBytes);
 }
 
 inline DWORD   EEClass::GetAlignedNumInstanceFieldBytes()
 {
+    _ASSERTE(!IsGenericTypeDefinition());
     return ((m_dwNumInstanceFieldBytes + 3) & (~3));
 }
 
 inline DWORD EEClass::InstanceSliceOffsetForExplicit(BOOL containsPointers)
 {
+    _ASSERTE(!IsGenericTypeDefinition());
     DWORD dwInstanceSliceOffset = (GetParentClass() != NULL) ? GetParentClass()->m_dwNumInstanceFieldBytes : 0;
     // Since this class contains pointers, align it on an DWORD boundary if we aren't already
     if (containsPointers && dwInstanceSliceOffset & 3)
@@ -2507,7 +2846,8 @@ class LayoutEEClass : public EEClass
 public:
     EEClassLayoutInfo m_LayoutInfo;
 
-    LayoutEEClass(ClassLoader *pLoader) : EEClass(pLoader)
+    LayoutEEClass(ClassLoader *pLoader, TypeHandle genericType, BOOL bIsSharedInst) :
+        EEClass(pLoader, genericType, bIsSharedInst)
     {
 #ifdef _DEBUG
         FillMemory(&m_LayoutInfo, sizeof(m_LayoutInfo), 0xcc);
@@ -2526,8 +2866,8 @@ public:
     MethodDesc *m_pBeginInvokeMethod;
     MethodDesc *m_pEndInvokeMethod;
 
-
-    DelegateEEClass(ClassLoader *pLoader) : EEClass(pLoader)
+    DelegateEEClass(ClassLoader *pLoader, TypeHandle genericType, BOOL bIsSharedInst) :
+        EEClass(pLoader, genericType, bIsSharedInst)
     {
         m_pStaticShuffleThunk = NULL;
         m_pInvokeMethod = NULL;
@@ -2536,7 +2876,6 @@ public:
         m_pEndInvokeMethod = NULL;
     }
 
-    BOOL CanCastTo(DelegateEEClass* toType);
 };
 
 class EnumEEClass : public EEClass
@@ -2557,7 +2896,8 @@ class EnumEEClass : public EEClass
     LPCUTF8         *m_names;
 
  public:
-    EnumEEClass(ClassLoader *pLoader) : EEClass(pLoader)
+    EnumEEClass(ClassLoader *pLoader, TypeHandle genericType, BOOL bIsSharedInst) :
+        EEClass(pLoader, genericType, bIsSharedInst)
     {
         // Rely on zero init from LoaderHeap
     }
@@ -2596,10 +2936,10 @@ class ArrayClass : public EEClass
     friend struct MEMBER_OFFSET_INFO(ArrayClass);
 
 protected:
-    ArrayClass(ClassLoader *pLoader) : EEClass(pLoader) { }
+    ArrayClass(ClassLoader *pLoader, BOOL bIsSharedInst) :
+         EEClass(pLoader, TypeHandle(), bIsSharedInst) { }
 
 private:
-
     ArrayClass *    m_pNext;            // next array class loaded by the same classloader
 
     // Strike needs to be able to determine the offset of certain bitfields.
@@ -2640,6 +2980,9 @@ public:
 
     TypeHandle GetElementTypeHandle() {
         return m_ElementTypeHnd;
+    }
+    TypeHandle* GetInstantiation() {
+        return &m_ElementTypeHnd;
     }
     void SetElementTypeHandle (TypeHandle ElementTypeHnd) {
         m_ElementTypeHnd = ElementTypeHnd;
@@ -2715,6 +3058,8 @@ private:
 
 inline TypeHandle::TypeHandle(EEClass* aClass)
 {
+  // Shouldn't invoke this constructor on a possibly-shared class
+  //_ASSERTE(!aClass->IsSharedByGenericInstantiations());
     m_asMT = aClass->GetMethodTable(); 
     INDEBUG(Verify());
 }
@@ -2754,6 +3099,8 @@ inline EEClass* TypeHandle::GetClassOrTypeParam() {
 }
 
 inline MethodTable*  TypeDesc::GetMethodTable() {
+    if (u.m_Type == ELEMENT_TYPE_VAR || u.m_Type == ELEMENT_TYPE_MVAR) return NULL;
+
     _ASSERTE(u.m_IsParamDesc);
     ParamTypeDesc* asParam = (ParamTypeDesc*) this;
     return(asParam->m_TemplateMT);
@@ -2763,6 +3110,17 @@ inline TypeHandle TypeDesc::GetTypeParam() {
     _ASSERTE(u.m_IsParamDesc);
     ParamTypeDesc* asParam = (ParamTypeDesc*) this;
     return(asParam->m_Arg);
+}
+
+inline TypeHandle* TypeDesc::GetClassOrArrayInstantiation() {
+    _ASSERTE(u.m_IsParamDesc);
+    if (u.m_Type != ELEMENT_TYPE_FNPTR)
+    {
+      ParamTypeDesc* asParam = (ParamTypeDesc*) this;
+      return(&asParam->m_Arg);
+    }
+    else
+      return NULL;
 }
 
 inline BaseDomain* TypeDesc::GetDomain() {
@@ -2949,5 +3307,18 @@ private:
     FieldDescIterator(EEClass *pClass, int iteratorType);
     FieldDesc* Next();
 };
+
+// Obtain instantiation from an instantiated type or a pointer to the
+// element type of an array.
+inline TypeHandle* MethodTable::GetClassOrArrayInstantiation()
+{
+  if (IsArray())
+  {
+    ArrayClass *pClass = (ArrayClass*) GetClass();
+    return pClass->GetInstantiation();
+  }
+  else
+    return GetInstantiation();
+}
 
 #endif // CLASS_H

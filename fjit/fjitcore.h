@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -78,6 +83,11 @@ static const __int8 typeSizeMap[] = {
             -1,     //CORINFO_TYPE_VALUECLASS
             4,      //CORINFO_TYPE_CLASS
             8,      //CORINFO_TYPE_REFANY
+            // CORINFO_TYPE_VAR only appears in "import-only" mode, but
+            // the Fjit generates code even in "import-only" mode -- it
+            // just throws the code away afterwards.  So we provide a
+            // dummy value for CORINFO_TYPE_VAR.           
+            4,      //CORINFO_TYPE_VAR
         };
 
 inline unsigned int typeSizeFromJitType( unsigned type, bool precise )
@@ -116,6 +126,11 @@ static const bool typeEnregisterMap[] = {
             0,      //CORINFO_TYPE_VALUECLASS
             1,      //CORINFO_TYPE_CLASS
             0,      //CORINFO_TYPE_REFANY
+            // CORINFO_TYPE_VAR only appears in "import-only" mode, but
+            // the Fjit generates code even in "import-only" mode -- it
+            // just throws the code away afterwards.  So we provide a
+            // dummy value for CORINFO_TYPE_VAR.           
+            1,      //CORINFO_TYPE_VAR
         };
 
 // Specifies which types maybe enregistred in floating point registers

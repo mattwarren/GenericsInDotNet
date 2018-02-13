@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -2445,7 +2450,7 @@ struct ByRefInfo
     ByRefInfo *pNext;
     INT32      argIndex;
     CorElementType typ;
-    EEClass   *pClass;
+    TypeHandle typeHandle;
     char       data[1];
 };
 
@@ -2470,7 +2475,7 @@ struct ValueClassInfo
     ValueClassInfo  *pNext;
     INT32           argIndex;
     CorElementType  typ;
-    EEClass         *pClass;
+    TypeHandle      typeHandle;
     LPVOID          pData;
 };
 
@@ -2481,7 +2486,7 @@ public:
     void Pop();
 
     static void PromoteValueClassEmbeddedObjects(promote_func *fn, ScanContext *sc,
-                                          EEClass *pClass, PVOID pvObject);    
+                                          TypeHandle ty, PVOID pvObject);    
     virtual void GcScanRoots(promote_func *fn, ScanContext *sc);
 
 private:

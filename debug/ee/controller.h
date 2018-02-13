@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -196,7 +201,9 @@ struct DebuggerFunctionKey
     mdMethodDef				md;
 };
 
-// struct DebuggerControllerPatch:  An entry in the patch (hash) table,
+//
+
+// struct DebuggerControllerPatch: An entry in the patch (hash) table,
 // this should contain all the info that's needed over the course of a
 // patch's lifetime.
 //
@@ -232,11 +239,11 @@ struct DebuggerFunctionKey
 //		must also store the version ID so that we know which version
 //		this is supposed to be applied to.  Note that this will only
 //		be set for DebuggerBreakpoints & DebuggerEnCBreakpoints.  For
-//		others, it should be set to DJI_VERSION_INVALID.  For constants,
+//		others, it should be set to DMI_VERSION_INVALID.  For constants,
 //		see DebuggerJitInfo
 // DebuggerJitInfo dji:  A pointer to the debuggerJitInfo that describes
 //      the method (and version) that this patch is applied to.  This field may
-//      also have the value DebuggerJitInfo::DJI_VERSION_INVALID
+//      also have the value DebuggerJitInfo::DMI_VERSION_INVALID
 
 // SIZE_T pid:  Within a given patch table, all patches have a
 //		semi-unique ID.  There should be one and only 1 patch for a given
@@ -433,18 +440,20 @@ private:
 
     	if (dji == NULL)
     		LOG((LF_CORDB,LL_INFO10000,"AddPatch w/ version "
-    			"DJI_VERSION_INVALID, pid:0x%x\n",patch->pid));
+    			"DMI_VERSION_INVALID, pid:0x%x\n",patch->pid));
     	else
     	{
     		LOG((LF_CORDB,LL_INFO10000,"AddPatch w/ version 0x%04x, "
-    			"pid:0x%x\n", dji->m_nVersion,patch->pid));
+    			"pid:0x%x\n", dji->m_methodInfo->m_nVersion,patch->pid));
 
-#ifdef _DEBUG
-            MethodDesc *pFD = g_pEEInterface->LookupMethodDescFromToken(
-                                                    module,
-                                                    md);
-            _ASSERTE( pFD == dji->m_fd );
-#endif //_DEBUG            
+//#ifdef _DEBUG
+            // GENERICS: This asssert no longer holds, as there is now
+            // a 1:n (not 1:1) relationship between methodTokens and MethodDesc's.
+            //MethodDesc *pFD = g_pEEInterface->LookupMethodDescFromToken(
+            //                                        module,
+            //                                        md);
+            //_ASSERTE( pFD == dji->m_fd );
+//#endif //_DEBUG            
         }
 
     	return patch;
@@ -507,11 +516,11 @@ private:
 
     	if (dji == NULL)
     		LOG((LF_CORDB,LL_INFO10000,"AddPatch w/ version "
-    			"DJI_VERSION_INVALID, pid:0x%x\n", patch->pid));
+    			"DMI_VERSION_INVALID, pid:0x%x\n", patch->pid));
     	else
     	{
     		LOG((LF_CORDB,LL_INFO10000,"AddPatch w/ version 0x%04x, "
-    			"pid:0x%x\n", dji->m_nVersion, patch->pid));
+    			"pid:0x%x\n", dji->m_methodInfo->m_nVersion, patch->pid));
     			
             _ASSERTE( fd==NULL || fd == dji->m_fd );
         }
@@ -747,7 +756,8 @@ enum DEBUGGER_CONTROLLER_TYPE
     DEBUGGER_CONTROLLER_BREAKPOINT,         
     DEBUGGER_CONTROLLER_STEPPER,
     DEBUGGER_CONTROLLER_FUNC_EVAL_COMPLETE,
-    DEBUGGER_CONTROLLER_USER_BREAKPOINT,
+    DEBUGGER_CONTROLLER_USER_BREAKPOINT,  // UserBreakpoints are used  by Runtime threads to 
+	                                      // send that they've hit a user breakpoint to the Right Side.
     DEBUGGER_CONTROLLER_STATIC,
 };
 
@@ -851,7 +861,6 @@ class DebuggerController
     static void UnapplyPatchesInCodeCopy(Module *module, 
                                          mdMethodDef md, 
                                          DebuggerJitInfo *dji,
-                                         MethodDesc *fd,
                                          bool native, 
                                          BYTE *code, 
                                          SIZE_T startOffset, 
@@ -1157,7 +1166,7 @@ public:
                        AppDomain *pAppDomain, 
                        SIZE_T m_offset, 
                        bool m_native,
-                       DebuggerJitInfo *dji,
+                       DebuggerMethodInfo *dmi,
                        BOOL *pSucceed,
                        BOOL fDeferBinding);
 
@@ -1175,7 +1184,7 @@ private:
     mdMethodDef         m_md;
     SIZE_T              m_offset;
     bool                m_native; 
-    DebuggerJitInfo     *m_dji;
+    DebuggerMethodInfo     *m_dmi;
 
 	TP_RESULT TriggerPatch(DebuggerControllerPatch *patch,
                       Thread *thread, 
@@ -1336,7 +1345,9 @@ private:
 };
 
 /* ------------------------------------------------------------------------- *
- * DebuggerUserBreakpoint routines
+ * DebuggerUserBreakpoint routines.  UserBreakpoints are used 
+ * by Runtime threads to send that they've hit a user breakpoint to the 
+ * Right Side.
  * ------------------------------------------------------------------------- */
 class DebuggerUserBreakpoint : public DebuggerStepper
 {

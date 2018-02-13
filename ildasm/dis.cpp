@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -520,8 +525,8 @@ void DumpLocals(IMDInternalImport *pImport,COR_ILMETHOD_DECODER *pMethod, char* 
                     if(*pch == '\'') j=1-j;
                     else if(j==0)
                     {
-                        if(*pch == '[') i++;
-                        else if(*pch == ']') i--;
+                        if(*pch == '[' || *pch == '<') i++;
+                        else if(*pch == ']' || *pch == '>') i--;
                     }
                 }
                 pComma++; 
@@ -825,7 +830,6 @@ BOOL Disassemble(IMDInternalImport *pImport, BYTE *ILHeader, void *GUICookie, md
                         ulActualLines++;
                         pLCD++;
                     }
-
                     ulLines = ulActualLines;
                     qsort(LineCode,ulLines,sizeof(LineCodeDescr),cmpLineCode);
                     fShowSource = g_fShowSource;
@@ -1383,8 +1387,10 @@ BOOL Disassemble(IMDInternalImport *pImport, BYTE *ILHeader, void *GUICookie, md
                     Len += 3;
                     PadTheString;
                 }
+
                 PC++;
                 szptr+=sprintf(szptr, "%-10s IL_%04x", pszInstrName, dest);
+
 
                 fNeedNewLine = TRUE;
                 break;
@@ -1401,6 +1407,7 @@ BOOL Disassemble(IMDInternalImport *pImport, BYTE *ILHeader, void *GUICookie, md
                     Len += 9;
                     PadTheString;
                 }
+
                 PC += 4;
                 szptr+=sprintf(szptr, "%-10s IL_%04x", pszInstrName, dest);
 
@@ -1575,8 +1582,30 @@ BOOL Disassemble(IMDInternalImport *pImport, BYTE *ILHeader, void *GUICookie, md
                     }
 
                     case mdtMethodDef:
-                        PrettyPrintMethodDef(szString,tk,pImport,GUICookie);
+                        PrettyPrintMethodDef(szString,tk,NULL,0,pImport,GUICookie);
                         break;
+
+  		    case mdtMethodSpec:
+                    {
+                        mdToken         meth=0;
+
+                        PCCOR_SIGNATURE pSig;
+                        ULONG       cSig;
+
+                        pImport->GetMethodSpecProps(tk, &meth, &pSig, &cSig);
+                        if (TypeFromToken(meth) == mdtMethodDef)
+			  {
+                            PrettyPrintMethodDef(szString,meth,pSig,cSig,pImport,GUICookie);
+			  }
+                        else
+			  {
+                            PrettyPrintMemberRef(szString,meth,pSig,cSig,pImport,GUICookie);
+                            printLine(GUICookie,szString);
+                            DumpCustomAttributes(meth,GUICookie);
+                            continue;
+                          }
+                        break;
+                    }
 
                     case mdtFieldDef:
                     {
@@ -1625,6 +1654,7 @@ BOOL Disassemble(IMDInternalImport *pImport, BYTE *ILHeader, void *GUICookie, md
                             sprintf(curPos1,"%s",pszMemberName);
                         strcpy(curPos1,ProperName(curPos1));
                         qbMemberSig.ReSize(0);
+
                         strcpy(curPos, PrettyPrintSig(pComSig, cComSig, curPos, &qbMemberSig, pImport,NULL));
                         if(g_fDumpTokens)
                             sprintf(&curPos[strlen(curPos)]," /* %08X */",tk);
@@ -1632,7 +1662,7 @@ BOOL Disassemble(IMDInternalImport *pImport, BYTE *ILHeader, void *GUICookie, md
                     }
 
                     case mdtMemberRef:
-                        PrettyPrintMemberRef(szString,tk,pImport,GUICookie);
+                        PrettyPrintMemberRef(szString,tk,NULL,0,pImport,GUICookie);
                         printLine(GUICookie,szString);
                         DumpCustomAttributes(tk,GUICookie);
                         continue;
@@ -1738,7 +1768,7 @@ BOOL Disassemble(IMDInternalImport *pImport, BYTE *ILHeader, void *GUICookie, md
     return TRUE;
 }
 
-void PrettyPrintMemberRef(char* szString, mdToken tk, IMDInternalImport *pImport, void* GUICookie)
+void PrettyPrintMemberRef(char* szString, mdToken tk, PCCOR_SIGNATURE pInstSig, ULONG cInstSig, IMDInternalImport *pImport, void* GUICookie)
 {
     mdTypeRef       cr;
     const char *    pszMemberName;
@@ -1779,7 +1809,15 @@ void PrettyPrintMemberRef(char* szString, mdToken tk, IMDInternalImport *pImport
 
     appendStr(&qbMemberSig, szString);
     {
-        char* pszTailSig = (char*)PrettyPrintSig(pComSig, cComSig, curPos, &qbMemberSig, pImport,NULL);
+        char *pszTailSig;
+        if (pInstSig)
+	{
+          CQuickBytes     qbInstSig;
+          qbInstSig.ReSize(0);
+          PrettyPrintSig(pInstSig, cInstSig, curPos, &qbInstSig, pImport, NULL);
+          curPos = strcat(curPos, (char*) qbInstSig.Ptr());
+        }
+        pszTailSig = (char*)PrettyPrintSig(pComSig, cComSig, curPos, &qbMemberSig, pImport,NULL);
         char* pszOffset = strstr(pszTailSig,curPos);
         size_t i,j,k, indent = pszOffset - pszTailSig + strlen(curPos) + 1;
         char chAfterComma;
@@ -1791,8 +1829,8 @@ void PrettyPrintMemberRef(char* szString, mdToken tk, IMDInternalImport *pImport
                 if(*pch == '\'') j=1-j;
                 else if(j==0)
                 {
-                    if(*pch == '[') i++;
-                    else if(*pch == ']') i--;
+                    if(*pch == '[' || *pch == '<') i++;
+                    else if(*pch == ']' || *pch == '>') i--;
                     else if(*pch == '(') k++;
                     else if(*pch == ')') k--;
                 }
@@ -1816,7 +1854,7 @@ void PrettyPrintMemberRef(char* szString, mdToken tk, IMDInternalImport *pImport
             sprintf(szString,"%s",pszTailSig);
     }
 }
-void PrettyPrintMethodDef(char* szString, mdToken tk, IMDInternalImport *pImport,void* GUICookie)
+void PrettyPrintMethodDef(char* szString, mdToken tk, PCCOR_SIGNATURE pInstSig, ULONG cInstSig, IMDInternalImport *pImport,void* GUICookie)
 {
     HRESULT         hr;
     mdTypeRef       cr;
@@ -1865,7 +1903,16 @@ void PrettyPrintMethodDef(char* szString, mdToken tk, IMDInternalImport *pImport
     }
     appendStr(&qbMemberSig, szString);
     {
-        char* pszTailSig = (char*)PrettyPrintSig(pComSig, cComSig, curPos, &qbMemberSig, pImport,NULL);
+        char *pszTailSig;
+        if (pInstSig)
+	{
+          CQuickBytes     qbInstSig;
+          qbInstSig.ReSize(0);
+          pszTailSig = (char*)PrettyPrintSig(pInstSig, cInstSig, curPos, &qbInstSig, pImport, NULL);
+          curPos = strcat(curPos, (char*) qbInstSig.Ptr()); 
+        }
+
+        pszTailSig = (char*)PrettyPrintSig(pComSig, cComSig, curPos, &qbMemberSig, pImport,NULL);
         char* pszOffset = strstr(pszTailSig,curPos);
         size_t i,j,k, indent = pszOffset - pszTailSig + strlen(curPos) + 1;
         char chAfterComma;
@@ -1877,8 +1924,8 @@ void PrettyPrintMethodDef(char* szString, mdToken tk, IMDInternalImport *pImport
                 if(*pch == '\'') j=1-j;
                 else if(j==0)
                 {
-                    if(*pch == '[') i++;
-                    else if(*pch == ']') i--;
+                    if(*pch == '[' || *pch == '<') i++;
+                    else if(*pch == ']' || *pch == '>') i--;
                     else if(*pch == '(') k++;
                     else if(*pch == ')') k--;
                 }

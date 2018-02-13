@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -206,12 +211,12 @@ private:
     static EEClass* _MulticastDelegateClass;
 
     // This method will verify the type relationship between the target and
-    //  the eeClass of the method we are trying to invoke.  It checks that for 
+    //  the type of the method we are trying to invoke.  It checks that for 
     //  non static method, target is provided.  It also verifies that the target is
     //  a subclass or implements the interface that this MethodInfo represents.  
     //  We may update the MethodDesc in the case were we need to lookup the real
     //  method implemented on the object for an interface.
-    static void VerifyType(OBJECTREF target,EEClass* eeClass, EEClass* trueClass,int thisPtr,MethodDesc** ppMeth, TypeHandle typeTH, TypeHandle targetTH);
+    static void VerifyType(OBJECTREF target,TypeHandle type, TypeHandle trueType,int thisPtr,MethodDesc** ppMeth);
 
     static void TryCallMethod(MethodDesc *pMeth, ARG_SLOT* args, MetaSig* pSig);
 
@@ -298,12 +303,12 @@ public:
     // DirectObjectFieldSet
     // When the TypedReference points to a object we call this method to
     //  set the field value
-    static void DirectObjectFieldSet(FieldDesc* pField, TypedByRef target, OBJECTREF* pvalue, BOOL requiresAccessCheck);
+    static void DirectObjectFieldSet(ReflectField *pRF, TypedByRef target, OBJECTREF* pvalue, BOOL requiresAccessCheck);
 
     // DirectObjectFieldGet
     // When the TypedReference points to a object we call this method to
     //  get the field value
-    static OBJECTREF DirectObjectFieldGet(FieldDesc* pField, TypedByRef target);
+    static OBJECTREF DirectObjectFieldGet(ReflectField *pRF, TypedByRef target);
 
     // GetFieldInfoToString
     // This method will return the string representation of the information in FieldInfo.
@@ -700,6 +705,18 @@ public:
     static VOID InitReflectField(FieldDesc *pField, ReflectField *pRF);
 
     static FCDECL1(INT32, IsOverloaded, ReflectBaseObject* refThisUNSAFE);
+
+    static FCDECL1(INT32, IsGeneric, ReflectBaseObject* refThisUNSAFE);
+
+    static FCDECL1(INT32, IsInstantiated, ReflectBaseObject* refThisUNSAFE);
+
+    static FCDECL2(Object*, Instantiate, ReflectBaseObject* refThisUNSAFE, PTRArray*);
+
+    static FCDECL1(Object*, GetGenericMethod, ReflectBaseObject* refThisUNSAFE);
+
+    static FCDECL1(Object*, GetInstantiation, ReflectBaseObject* refThisUNSAFE);
+
+    static FCDECL1(INT32, Arity, ReflectBaseObject* refThisUNSAFE);
 
     static FCDECL1(INT32, HasLinktimeDemand, ReflectBaseObject* refThisUNSAFE);
 };

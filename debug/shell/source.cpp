@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -409,6 +414,54 @@ DebuggerModule *DebuggerModule::FromCorDebug(ICorDebugModule *module)
 {
     // Return the DebuggerModule object
     return (g_pShell->ResolveModule(module));
+}
+
+DebuggerModule *DebuggerShell::ModuleOfType(ICorDebugType *itype)
+{
+	// Snagg the object's class.
+	ICorDebugClass *iclass = NULL;
+	HRESULT hr = itype->GetClass(&iclass);
+
+	if (FAILED(hr)) {
+		g_pShell->ReportError(hr);
+		return NULL;
+	}
+
+	// Get the module from this class
+	// Keep the class around for later...
+	ICorDebugModule *imodule;
+	iclass->GetModule(&imodule);
+
+	if (FAILED(hr))
+	{
+		RELEASE(iclass);
+		g_pShell->ReportError(hr);
+		return NULL;
+	}
+	RELEASE(iclass);
+
+	DebuggerModule *dm = DebuggerModule::FromCorDebug(imodule);
+	_ASSERTE(dm != NULL);
+	RELEASE(imodule);
+	return dm;
+}
+
+mdTypeDef DebuggerShell::TokenOfType(ICorDebugType *itype)
+{
+	// Snagg the object's class.
+	ICorDebugClass *iclass = NULL;
+	HRESULT hr = itype->GetClass(&iclass);
+
+	if (FAILED(hr)) {
+		g_pShell->ReportError(hr);
+		return NULL;
+	}
+	// Get the token for the class
+	mdTypeDef tdClass;
+	_ASSERTE(iclass != NULL);
+	hr = iclass->GetToken(&tdClass);
+	RELEASE(iclass);
+	return tdClass;
 }
 
 
@@ -1585,8 +1638,7 @@ static ULONG _skipTypeInSignature(PCCOR_SIGNATURE sig)
         // Skip over extra embedded type.
         cb += _skipTypeInSignature(&sig[cb]);
     }
-    else if ((elementType == ELEMENT_TYPE_ARRAY) ||
-             (elementType == ELEMENT_TYPE_ARRAY))
+    else if (elementType == ELEMENT_TYPE_ARRAY)
     {
         // Skip over extra embedded type.
         cb += _skipTypeInSignature(&sig[cb]);
@@ -1622,6 +1674,19 @@ static ULONG _skipTypeInSignature(PCCOR_SIGNATURE sig)
             }
         }
     }
+	else if (elementType == ELEMENT_TYPE_WITH) 
+	{
+		cb += _skipTypeInSignature(&sig[cb]);
+		ULONG argCnt;
+		cb += CorSigUncompressData(&sig[cb], &argCnt); // Get number of parameters
+		while (argCnt--)
+			cb += _skipTypeInSignature(&sig[cb]);        // Skip the parameters
+	}  else if ((elementType == ELEMENT_TYPE_VAR) ||
+		(elementType == ELEMENT_TYPE_MVAR))
+	{
+		ULONG tyvarnum;
+		cb += CorSigUncompressData(&sig[cb], &tyvarnum);
+	}
 
     return (cb);
 }
@@ -1774,6 +1839,9 @@ HRESULT DebuggerFunction::CacheSequencePoints(void)
     return hr;
 }
 
+
+
+
 //
 // Initialize a DebuggerFunction object.
 //
@@ -1909,6 +1977,16 @@ HRESULT DebuggerFunction::Init(void)
     cb += CorSigUncompressData(&sigBlob[cb], &callConv);
     _ASSERTE(callConv != IMAGE_CEE_CS_CALLCONV_FIELD);
 
+    
+    //
+    // Grab the type argument count.
+    //
+    if (callConv & IMAGE_CEE_CS_CALLCONV_GENERIC)
+    {
+      ULONG tyArgCount;
+      cb += CorSigUncompressData(&sigBlob[cb], &tyArgCount);
+    }
+
     //
     // Grab the argument count.
     //
@@ -1968,7 +2046,7 @@ HRESULT DebuggerFunction::Init(void)
         }
     }
 
-    hr = m_module->GetICorDebugModule()->GetFunctionFromToken(GetToken(),
+	hr = m_module->GetICorDebugModule()->GetFunctionFromToken(GetToken(),
                                                               &m_ifunction);
 
     if( FAILED(hr) )
@@ -2047,6 +2125,118 @@ HRESULT DebuggerFunction::Init(void)
             }
         }
     }
+
+	// GENERICS: Count the number of type parameters
+    m_typeArgCount = 0;
+	{
+		// Add the class type parameters if the method is not static
+		if (!m_isStatic) {
+    		HCORENUM enumClassTyPars = 0;
+			mdGenericPar classTyPar[1];
+			ULONG cClassTyPars;
+			do {
+				hr = m_module->GetMetaData()->EnumGenericPars(&enumClassTyPars, classToken, classTyPar, 1, &cClassTyPars);
+				if( FAILED(hr) )
+					return hr;
+				m_typeArgCount+= cClassTyPars;
+			} while (cClassTyPars > 0);
+            m_module->GetMetaData()->CloseEnum(enumClassTyPars);
+		}
+		// Add the method typars....
+		HCORENUM enumMethTyPars = 0;
+		mdGenericPar methTyPar[1];
+		ULONG cMethTyPars;
+		do {
+         	hr = m_module->GetMetaData()->EnumGenericPars(&enumMethTyPars, GetToken(), methTyPar, 1, &cMethTyPars);
+            if( FAILED(hr) )
+                return hr;
+			m_typeArgCount+= cMethTyPars;
+		} while (cMethTyPars > 0);
+        m_module->GetMetaData()->CloseEnum(enumMethTyPars);
+	}
+
+	// Set the sequence numbers...
+    if (m_typeArgCount)
+    {
+        m_typeArguments = new DebuggerVarInfo[m_typeArgCount];
+
+        if (m_typeArguments == NULL)
+        {
+            m_typeArgCount = 0;
+            return (S_OK);
+        }
+
+        for (i = 0; i < m_typeArgCount; i++)
+        {
+            m_typeArguments[i].name = NULL;
+            m_typeArguments[i].sig = NULL;
+            m_typeArguments[i].varNumber = i;
+        }
+    }
+
+
+    // Now, load any type argument names.
+    if (m_typeArgCount > 0)
+    {
+		// Add the class type parameters if the method is not static
+		if (!m_isStatic) {
+    		HCORENUM enumClassTyPars = 0;
+			mdGenericPar classTyPar[1];
+			ULONG cClassTyPars;
+			ULONG typarNum = 0;
+			do {
+				hr = m_module->GetMetaData()->EnumGenericPars(&enumClassTyPars, classToken, classTyPar, 1, &cClassTyPars);
+				if( FAILED(hr) )
+					return hr;
+  			    if (cClassTyPars == 0) 
+				    break;
+                WCHAR name[BUF_SIZE];
+                ULONG nameLen;
+                ULONG seq;
+                hr = m_module->GetMetaData()->GetGenericParProps(classTyPar[0],
+                        &seq,NULL,NULL,NULL,NULL,name, 
+                        BUF_SIZE,&nameLen);
+				if( FAILED(hr) )
+					return hr;
+                char* newName = new char[nameLen];
+                _ASSERTE(newName != NULL);
+                for (unsigned int i = 0; i < nameLen; i++)
+                    newName[i] = (char)(name[i]);
+                if (typarNum < m_typeArgCount)
+                    m_typeArguments[typarNum].name = newName;
+				typarNum++;
+			} while (true);
+            m_module->GetMetaData()->CloseEnum(enumClassTyPars);
+		}
+		// Add the method typars....
+		HCORENUM enumMethTyPars = 0;
+		mdGenericPar methTyPar[1];
+		ULONG cMethTyPars;
+		ULONG typarNum = 0;
+		do {
+         	hr = m_module->GetMetaData()->EnumGenericPars(&enumMethTyPars, GetToken(), methTyPar, 1, &cMethTyPars);
+            if( FAILED(hr) )
+				return hr;
+			if (cMethTyPars == 0) 
+				break;
+			WCHAR name[BUF_SIZE];
+			ULONG nameLen;
+			ULONG seq;
+			hr = m_module->GetMetaData()->GetGenericParProps(methTyPar[0],
+				&seq,NULL,NULL,NULL,NULL,name, 
+				BUF_SIZE,&nameLen);
+			if( FAILED(hr) )
+				return hr;
+			char* newName = new char[nameLen];
+			_ASSERTE(newName != NULL);
+			for (unsigned int i = 0; i < nameLen; i++)
+				newName[i] = (char)(name[i]);
+			if (typarNum < m_typeArgCount)
+				m_typeArguments[typarNum].name = newName;
+			typarNum++;
+		} while (true);
+        m_module->GetMetaData()->CloseEnum(enumMethTyPars);
+	}
 
     return (hr);
 }
@@ -2580,11 +2770,15 @@ HRESULT DebuggerFunction::LoadCode(BOOL native)
         ICorDebugCode *icode;
         HRESULT hr = m_ifunction->GetNativeCode(&icode);
 
-        if (FAILED(hr) && hr != CORDBG_E_CODE_NOT_AVAILABLE)
+        if (FAILED(hr))
             return (hr);
 
-        ULONG32 size;
-        icode->GetSize(&size);
+        // <REVIEW>GENERICS: why do we plough on if we get CORDBG_E_CODE_NOT_AVAILABLE?
+		//if (FAILED(hr) && hr != CORDBG_E_CODE_NOT_AVAILABLE)
+        //    return (hr);</REVIEW>
+
+		ULONG32 size;
+        icode->GetSize(&size);	
 
         if (m_nativeCode)
             delete [] m_nativeCode;

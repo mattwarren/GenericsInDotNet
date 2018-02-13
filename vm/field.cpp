@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -35,12 +40,8 @@ BOOL FieldDesc::IsObjRef()
 // Return the type of the field, as a class.
 TypeHandle FieldDesc::LoadType()
 {
-    PCCOR_SIGNATURE pSig;
-    DWORD           cSig;
-
-    GetSig(&pSig, &cSig);
-
-    FieldSig        sig(pSig, GetModule());
+    MetaSig        sig(this);
+    sig.NextArg();
 
     return sig.GetTypeHandle();
 }
@@ -52,20 +53,16 @@ TypeHandle FieldDesc::FindType()
     _ASSERTE(GetFieldType() == ELEMENT_TYPE_CLASS ||
              GetFieldType() == ELEMENT_TYPE_VALUETYPE);
 
-    PCCOR_SIGNATURE pSig;
-    DWORD           cSig;
-
-    GetSig(&pSig, &cSig);
-
-    FieldSig        sig(pSig, GetModule());
+    MetaSig        sig(this);
+    CorElementType type = sig.NextArg();
 
     // This may be the real type which includes other things
     //  beside class and value class such ass arrays
-    _ASSERTE(sig.GetFieldType() == ELEMENT_TYPE_CLASS ||
-             sig.GetFieldType() == ELEMENT_TYPE_VALUETYPE ||
-             sig.GetFieldType() == ELEMENT_TYPE_STRING ||
-             sig.GetFieldType() == ELEMENT_TYPE_VALUEARRAY ||
-             sig.GetFieldType() == ELEMENT_TYPE_SZARRAY
+    _ASSERTE(type == ELEMENT_TYPE_CLASS ||
+             type == ELEMENT_TYPE_VALUETYPE ||
+             type == ELEMENT_TYPE_STRING ||
+             type == ELEMENT_TYPE_VALUEARRAY ||
+             type == ELEMENT_TYPE_SZARRAY
              );
 
     return sig.GetTypeHandle(NULL, TRUE, TRUE);
@@ -478,8 +475,25 @@ UINT FieldDesc::GetSize()
     if (size == (UINT) -1)
     {
         _ASSERTE(GetFieldType() == ELEMENT_TYPE_VALUETYPE);
-        size = GetTypeOfField()->GetNumInstanceFieldBytes();
+        size = LoadType().GetClass()->GetNumInstanceFieldBytes();
     }
 
     return size;
 }
+
+// See field.h for details
+TypeHandle* FieldDesc::GetExactClassInstantiation(TypeHandle owner)
+{
+  TypeHandle *classInst = GetMethodTableOfEnclosingClass()->GetInstantiation();
+  if (classInst == NULL || owner.IsNull())
+    return classInst;
+  else
+  {
+    EEClass *pClass = GetEnclosingClass();
+    MethodTable *ownerMT = owner.AsMethodTable(); 
+	TypeHandle** perInstInfo = ownerMT->GetPerInstInfo();
+	_ASSERTE(perInstInfo != NULL);
+    return perInstInfo[pClass->GetNumDicts()-1];
+  }
+}
+

@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -649,7 +654,12 @@ const BYTE* ILFormatter::formatStatement(const BYTE* instrPtr, OutString* out) {
                 else
 				    hr = meta->GetSigFromToken(mdSignature(inlineArg.i), &sig, &cSig);
 				_ASSERTE(SUCCEEDED(hr));
-                unsigned hasThis = CorSigUncompressData(sig) & IMAGE_CEE_CS_CALLCONV_HASTHIS;
+		unsigned callConv = CorSigUncompressData(sig);
+                unsigned hasThis = callConv & IMAGE_CEE_CS_CALLCONV_HASTHIS;
+		if (callConv & IMAGE_CEE_CS_CALLCONV_GENERIC)
+		{
+		  CorSigUncompressData(sig);
+		}
 				unsigned numArgs = CorSigUncompressData(sig); 
 				while(*sig == ELEMENT_TYPE_CMOD_REQD || *sig == ELEMENT_TYPE_CMOD_OPT) {
 					sig++;
@@ -789,6 +799,9 @@ const BYTE* ILFormatter::formatStatement(const BYTE* instrPtr, OutString* out) {
 			case CEE_CONV_OVF_U:
 			case CEE_CONV_U:
 			case CEE_BOX:
+			case CEE_LDELEM:
+			case CEE_STELEM:
+			case CEE_UNBOX_ANY:
 			case CEE_UNBOX:
 			case CEE_LDFTN:
 			case CEE_LDTOKEN:

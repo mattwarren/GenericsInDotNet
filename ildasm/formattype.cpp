@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -176,11 +181,14 @@ const PCCOR_SIGNATURE PrettyPrintSignature(
     IMDInternalImport *pIMDI,           // ptr to IMDInternalImport class with ComSig
 	const char* inlabel)				// prefix for names (NULL if no names required)
 {
-    unsigned numArgs;   
+    unsigned numArgs;
+    unsigned numTyArgs = 0;
     PCCOR_SIGNATURE typeEnd = typePtr + typeLen;
 	unsigned ixArg= 0; //arg index
 	char argname[1024];
 	char label[16];
+    const char* openpar = "(";
+    const char* closepar = ")";
 	ParamDescriptor* pszArgName = NULL; // ptr to array of names (if provided by debug info)
 
 	if(inlabel && *inlabel) // check for *inlabel is totally unnecessary, added to pacify the PREFIX
@@ -214,46 +222,61 @@ const PCCOR_SIGNATURE PrettyPrintSignature(
             appendStr(out, "explicit ");    
 
         if (callConv & IMAGE_CEE_CS_CALLCONV_HASTHIS)   
-            appendStr(out, "instance ");    
+            appendStr(out, "instance ");
 
-        static char* callConvNames[8] = {   
-            "", 
-            "unmanaged cdecl ", 
-            "unmanaged stdcall ",   
-            "unmanaged thiscall ",  
-            "unmanaged fastcall ",  
-            "vararg ",   
-            "<error> "   
-            "<error> "   
-            };  
-        appendStr(out, callConvNames[callConv & 7]);    
+        if (isCallConv(callConv, IMAGE_CEE_CS_CALLCONV_INSTANTIATION))
+        {
+          openpar = "<";
+          closepar = ">";
+        }
+        else
+    	{
+            static char* callConvNames[8] = {   
+                "", 
+                "unmanaged cdecl ", 
+                "unmanaged stdcall ",   
+                "unmanaged thiscall ",  
+                "unmanaged fastcall ",  
+                "vararg ",   
+                "<error> ",   
+                "<error> "   
+                };  
+            appendStr(out, callConvNames[callConv & 7]);    
+        }
 
-        numArgs = CorSigUncompressData(typePtr);    
-            // do return type   
-		if(pszArgName)
-		{
-			argname[0] = 0;
-			DumpParamAttr(argname,pszArgName[ixArg+numArgs].attr);
-			appendStr(out,argname);
-		}
-        typePtr = PrettyPrintType(typePtr, out, pIMDI); 
-
-		if(pszArgName)
-		{
-			argname[0] = ' '; argname[1] = 0;
-			DumpMarshaling(pIMDI,argname,pszArgName[ixArg+numArgs].tok);
-			appendStr(out,argname);
-		}
-		if(*name != 0)
-		{
-			appendStr(out, " ");    
-			appendStr(out, name);   
-		}
+    	if (callConv & IMAGE_CEE_CS_CALLCONV_GENERIC)
+    	{
+    	  numTyArgs = CorSigUncompressData(typePtr);
+    	}
+        numArgs = CorSigUncompressData(typePtr);
+        if (!isCallConv(callConv, IMAGE_CEE_CS_CALLCONV_INSTANTIATION))
+	    {
+                // do return type   
+    		if(pszArgName)
+    		{
+    			argname[0] = 0;
+    			DumpParamAttr(argname,pszArgName[ixArg+numArgs].attr);
+    			appendStr(out,argname);
+    		}
+            typePtr = PrettyPrintType(typePtr, out, pIMDI); 
+    
+    		if(pszArgName)
+    		{
+    			argname[0] = ' '; argname[1] = 0;
+    			DumpMarshaling(pIMDI,argname,pszArgName[ixArg+numArgs].tok);
+    			appendStr(out,argname);
+    		}
+    		if(*name != 0)
+    		{
+    			appendStr(out, " ");    
+    			appendStr(out, name);   
+    		}
+        }
     }
     else    
         numArgs = CorSigUncompressData(typePtr);    
 
-    appendStr(out, "(");    
+    appendStr(out, openpar);    
 
 	bool needComma = false;
 	while(typePtr < typeEnd) 
@@ -335,7 +358,7 @@ const PCCOR_SIGNATURE PrettyPrintSignature(
 		appendStr(out, " <SIG ENDED PREMATURELY>");    
 	}
 		
-    appendStr(out, ")");    
+    appendStr(out, closepar);    
 	return(typePtr);
 }
 
@@ -368,25 +391,25 @@ static PCCOR_SIGNATURE PrettyPrintType(
 			case ELEMENT_TYPE_I1            :   
 				str = "int8"; goto APPEND;  
 			case ELEMENT_TYPE_U1            :   
-				str = "unsigned int8"; goto APPEND; 
+				str = "uint8"; goto APPEND; 
 			case ELEMENT_TYPE_I2            :   
 				str = "int16"; goto APPEND; 
 			case ELEMENT_TYPE_U2            :   
-				str = "unsigned int16"; goto APPEND;    
+				str = "uint16"; goto APPEND;    
 			case ELEMENT_TYPE_I4            :   
 				str = "int32"; goto APPEND; 
 			case ELEMENT_TYPE_U4            :   
-				str = "unsigned int32"; goto APPEND;    
+				str = "uint32"; goto APPEND;    
 			case ELEMENT_TYPE_I8            :   
 				str = "int64"; goto APPEND; 
 			case ELEMENT_TYPE_U8            :   
-				str = "unsigned int64"; goto APPEND;    
+				str = "uint64"; goto APPEND;    
 			case ELEMENT_TYPE_R4            :   
 				str = "float32"; goto APPEND;   
 			case ELEMENT_TYPE_R8            :   
 				str = "float64"; goto APPEND;   
 			case ELEMENT_TYPE_U             :   
-				str = "native unsigned int"; goto APPEND;   
+				str = "native uint"; goto APPEND;   
 			case ELEMENT_TYPE_I             :   
 				str = "native int"; goto APPEND;    
 			case ELEMENT_TYPE_R             :   
@@ -411,8 +434,12 @@ static PCCOR_SIGNATURE PrettyPrintType(
 			DO_CLASS:
 				appendStr(out, str);
 				typePtr += CorSigUncompressToken(typePtr, &tk); 
-                _ASSERTE(!IsNilToken(tk) && "Nil token in signature");
-				PrettyPrintClass(out, tk, pIMDI);
+                if(IsNilToken(tk))
+				{
+					_ASSERTE(!"Nil token in signature");
+					appendStr(out, "<ERROR! NIL TOKEN>");
+				}
+				else PrettyPrintClass(out, tk, pIMDI);
 				break;  
 
 			case ELEMENT_TYPE_SZARRAY    :   
@@ -477,12 +504,34 @@ static PCCOR_SIGNATURE PrettyPrintType(
 				appendStrNum(out, CorSigUncompressData(typePtr));
 				break;
 
+			case ELEMENT_TYPE_MVAR        :   
+				appendStr(out, "!!");  
+				appendStrNum(out, CorSigUncompressData(typePtr));
+				break;
+
 			case ELEMENT_TYPE_FNPTR :   
 				appendStr(out, "method ");  
 				typePtr = PrettyPrintSignature(typePtr, 0x7FFFFFFF, "*", out, pIMDI, NULL);
 				break;
 
-				// Modifiers or depedant types  
+            case ELEMENT_TYPE_WITH :
+            {
+			  typePtr = PrettyPrintType(typePtr, out, pIMDI);
+			  appendStr(out, "<");    
+			  unsigned numArgs = CorSigUncompressData(typePtr);    
+			  bool needComma = false;
+			  while(numArgs--)
+              {
+			      if (needComma)
+				  appendStr(out, ",");    
+			      typePtr = PrettyPrintType(typePtr, out, pIMDI); 
+			      needComma = true;
+			  }
+			  appendStr(out, ">");
+			  break;
+			}
+		
+			// Modifiers or dependent types  
 			case ELEMENT_TYPE_CMOD_OPT	:
 				str = " modopt("; goto ADDCLASSTOCMOD;	
 			case ELEMENT_TYPE_CMOD_REQD	:
@@ -530,6 +579,18 @@ const char* PrettyPrintClass(
 	mdToken tk,					 		// The class token to look up 
     IMDInternalImport *pIMDI)           // ptr to IMDInternalImport class with ComSig
 {
+    if(tk == mdTokenNil)  // Zero resolution scope for "somewhere here" TypeRefs
+    {
+		appendStr(out,"[*]");
+		return(asString(out));
+    }
+	if(!pIMDI->IsValidToken(tk))
+	{
+		char str[1024];
+		sprintf(str," <ERROR: INVALID TOKEN 0x%8.8X> ",tk);
+		appendStr(out,str);
+		return(asString(out));
+	}
 	switch(TypeFromToken(tk))
 	{
 		case mdtTypeRef:
@@ -546,11 +607,11 @@ const char* PrettyPrintClass(
 				}
 				else 
 				{
-					if(FAILED(pIMDI->GetNestedClassProps(tk,&tkEncloser))) tkEncloser = 0;
+					if(FAILED(pIMDI->GetNestedClassProps(tk,&tkEncloser))) tkEncloser = mdTypeDefNil;
 					pIMDI->GetNameOfTypeDef(tk, &name, &nameSpace);
 				}
 				MAKE_NAME_IF_NONE(name,tk);
-				if(RidFromToken(tkEncloser))
+				if((tkEncloser == mdTokenNil) || RidFromToken(tkEncloser))
 				{
 					PrettyPrintClass(out,tkEncloser,pIMDI);
 					if (TypeFromToken(tkEncloser) == mdtTypeRef || TypeFromToken(tkEncloser) == mdtTypeDef)
@@ -636,7 +697,17 @@ const char* PrettyPrintClass(
 				PCCOR_SIGNATURE sig = pIMDI->GetSigFromToken(tk, &cSig);
 				PrettyPrintType(sig, out, pIMDI);
 			}
-			break;
+            break;
+
+        case mdtModule:
+            break;
+		
+        default:
+			{
+				char str[1024];
+				sprintf(str," <ERROR: INVALID TOKEN TYPE 0x%8.8X> ",tk);
+				appendStr(out,str);
+			}
 	}
 	return(asString(out));
 }

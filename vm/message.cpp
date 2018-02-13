@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -98,22 +103,22 @@ FCIMPL2(Object*, CMessage::GetArg, MessageObject* pMessageUNSAFE, INT32 argNum)
 
     BOOL fIsByRef = FALSE;
     CorElementType eType = pSig->NextArg();
-    EEClass *      vtClass = NULL;
+    TypeHandle ty = TypeHandle();
     if (eType == ELEMENT_TYPE_BYREF)
     {
         fIsByRef = TRUE;
-        EEClass *pClass;
-        eType = pSig->GetByRefType(&pClass);
+        TypeHandle tycopy;
+        eType = pSig->GetByRefType(&tycopy);
         if (eType == ELEMENT_TYPE_VALUETYPE)
         {
-            vtClass = pClass;
+            ty = tycopy;
         }
     }
     else
     {
         if (eType == ELEMENT_TYPE_VALUETYPE)
         {
-            vtClass = pSig->GetTypeHandle().GetClass();
+            ty = pSig->GetTypeHandle();
         }
     }
 
@@ -128,7 +133,7 @@ FCIMPL2(Object*, CMessage::GetArg, MessageObject* pMessageUNSAFE, INT32 argNum)
     GetObjectFromStack(&refRetVal,
                GetStackPtr(argNum, pMsg->pFrame, pSig), 
                eType, 
-               vtClass,
+               ty,
                fIsByRef);
 
     LOG((LF_REMOTING, LL_INFO10,
@@ -182,27 +187,27 @@ FCIMPL1(Object*, CMessage::GetArgs, MessageObject* pMessageUNSAFE)
         eType = pSig->PeekArg();
         addr = (LPBYTE) RefreshMsg()->pFrame + iter.GetNextOffset(&type, &size);
 
-        EEClass *      vtClass = NULL;
+        TypeHandle ty = TypeHandle();
         if (eType == ELEMENT_TYPE_BYREF)
         {
             fIsByRef = TRUE;
-            EEClass *pClass;
+            TypeHandle tycopy;
             // If this is a by-ref arg, GetObjectFromStack() will dereference "addr" to
             // get the real argument address. Dereferencing now will open a gc hole if "addr" 
             // points into the gc heap, and we trigger gc between here and the point where 
             // we return the arguments. 
             //addr = *((PVOID *) addr);
-            eType = pSig->GetByRefType(&pClass);
+            eType = pSig->GetByRefType(&tycopy);
             if (eType == ELEMENT_TYPE_VALUETYPE)
             {
-                vtClass = pClass;
+                ty = tycopy;
             }
         }
         else
         {
             if (eType == ELEMENT_TYPE_VALUETYPE)
             {
-                vtClass = pSig->GetTypeHandle().GetClass();
+                ty = pSig->GetTypeHandle();
             }
         }
 
@@ -217,7 +222,7 @@ FCIMPL1(Object*, CMessage::GetArgs, MessageObject* pMessageUNSAFE)
         GetObjectFromStack(&arg,
                    addr, 
                    eType, 
-                   vtClass,
+                   ty,
                    fIsByRef);
 
         refRetVal->SetAt(index, arg);
@@ -234,7 +239,7 @@ FCIMPL1(Object*, CMessage::GetArgs, MessageObject* pMessageUNSAFE)
 }
 FCIMPLEND
 
-void GetObjectFromStack(OBJECTREF* ppDest, PVOID val, const CorElementType eType, EEClass *pCls, BOOL fIsByRef)
+void GetObjectFromStack(OBJECTREF* ppDest, PVOID val, const CorElementType eType, TypeHandle ty, BOOL fIsByRef)
 {
     THROWSCOMPLUSEXCEPTION();
 
@@ -268,11 +273,11 @@ void GetObjectFromStack(OBJECTREF* ppDest, PVOID val, const CorElementType eType
                 // box the value class
                 //
 
-                _ASSERTE(CanBoxToObject(pCls->GetMethodTable()));
+                _ASSERTE(CanBoxToObject(ty.GetMethodTable()));
 
                 _ASSERTE(!g_pGCHeap->IsHeapPointer((BYTE *) ppDest) ||
                      !"(pDest) can not point to GC Heap");
-                OBJECTREF pObj = FastAllocateObject(pCls->GetMethodTable());
+                OBJECTREF pObj = FastAllocateObject(ty.GetMethodTable());
                 if (fIsByRef)
                     val = *((PVOID *)val);
                 CopyValueClass(pObj->UnBox(), val, pObj->GetMethodTable(), pObj->GetAppDomain());
@@ -352,7 +357,7 @@ FCIMPL3(void, CMessage::PropagateOutParameters, MessageObject* pMessageUNSAFE, A
                                 *((void**) argit.GetRetBuffArgAddr()), 
                                 gc.RetVal, 
                                 pSig->GetReturnType(),
-                                NULL,
+                                TypeHandle(),
                                 pSig,
                                 TRUE);  // copy class contents
 
@@ -369,7 +374,7 @@ FCIMPL3(void, CMessage::PropagateOutParameters, MessageObject* pMessageUNSAFE, A
                                 NULL,                   //no return buff
                                 gc.RetVal, 
                                 pSig->GetReturnType(),
-                                NULL,
+                                TypeHandle(),
                                 pSig,
                                 FALSE);                 //don't copy class contents
 
@@ -384,14 +389,8 @@ FCIMPL3(void, CMessage::PropagateOutParameters, MessageObject* pMessageUNSAFE, A
     MetaSig *pSyncSig = NULL;
     if (pMsg->iFlags & MSGFLG_ENDINVOKE)
     {
-        PCCOR_SIGNATURE pMethodSig;
-        DWORD cSig;
-
-        pMsg->pMethodDesc->GetSig(&pMethodSig, &cSig);
-        _ASSERTE(pSig);
-
         LPVOID temp = _alloca(sizeof(MetaSig));
-        pSyncSig = new (temp) MetaSig(pMethodSig, pMsg->pDelegateMD->GetModule());
+        pSyncSig = new (temp) MetaSig(pMsg->pDelegateMD);
     }
     else
     {
@@ -440,16 +439,16 @@ FCIMPL3(void, CMessage::PropagateOutParameters, MessageObject* pMessageUNSAFE, A
                 }
             }
 
-            EEClass *pClass = NULL;
-            CorElementType brType = pSig->GetByRefType(&pClass);
+            TypeHandle ty = TypeHandle();
+            CorElementType brType = pSig->GetByRefType(&ty);
 
             CopyOBJECTREFToStack(
                 *argAddr, 
                 pOutParams[i],
                 brType, 
-                pClass, 
+                ty, 
                 pSig,
-                pClass ? pClass->IsValueClass() : FALSE);
+                ty.IsNull() ? FALSE : ty.IsValueType());
 
             // Refetch all the variables because GC could happen at the
             // end of every loop after the call to CopyOBJECTREFToStack                
@@ -464,7 +463,7 @@ FCIMPL3(void, CMessage::PropagateOutParameters, MessageObject* pMessageUNSAFE, A
 FCIMPLEND
 
 INT64 CMessage::CopyOBJECTREFToStack( 
-    PVOID pvDest, OBJECTREF pSrc, CorElementType typ, EEClass *pClass, 
+    PVOID pvDest, OBJECTREF pSrc, CorElementType typ, TypeHandle ty,
     MetaSig *pSig, BOOL fCopyClassContents)
 {
     THROWSCOMPLUSEXCEPTION();
@@ -503,11 +502,11 @@ INT64 CMessage::CopyOBJECTREFToStack(
             if ((obj!=NULL) && (obj->GetMethodTable()->IsTransparentProxyType()))
             {
                 GCPROTECT_BEGIN(obj);
-                if (!pClass)
-                    pClass = pSig->GetRetEEClass();
+                if (ty.IsNull())
+                    ty = pSig->GetRetTypeHandle();
                 // CheckCast ensures that the returned object (proxy) gets
                 // refined to the level expected by the caller of the method
-                if (!CRemotingServices::CheckCast(obj, pClass))
+                if (!CRemotingServices::CheckCast(obj, ty))
                 {
                     COMPlusThrow(kInvalidCastException, L"Arg_ObjObj");
                 }
@@ -587,20 +586,20 @@ FCIMPL1(Object*, CMessage::GetReturnValue, MessageObject* pMessageUNSAFE)
     }
     
     CorElementType eType = pSig->GetReturnType();
-    EEClass *vtClass; 
+    TypeHandle ty;
     if (eType == ELEMENT_TYPE_VALUETYPE)
     {
-        vtClass = pSig->GetRetEEClass();
+        ty = pSig->GetRetTypeHandle();
     }
     else
     {
-        vtClass = NULL;
+        ty = TypeHandle();
     }
  
     GetObjectFromStack(&refRetVal,
                pvRet,
                eType, 
-               vtClass);
+               ty);
                
     //-[autocvtepi]-------------------------------------------------------
     HELPER_METHOD_FRAME_END();
@@ -710,8 +709,23 @@ FCIMPL1(Object*, CMessage::GetMethodBase, MessageObject* pMessageUNSAFE)
     
     // no need to GCPROTECT - gc is not happening
     MessageObject *pMsg = MESSAGEREFToMessage(pMessage);
+ 
+    MethodDesc *pMD = pMsg->pMethodDesc;
+    TypeHandle owner(pMD->GetMethodTable());
 
-    refRetVal = GetExposedObjectFromMethodDesc(pMsg->pMethodDesc);
+    if (owner.HasInstantiation())
+    {
+      TypeHandle genericType = owner.GetGenericTypeDefinition();
+      _ASSERTE(!genericType.IsNull());
+  
+      TypeHandle *inst = pMD->GetClassInstantiation(owner);
+      _ASSERTE(inst != NULL);
+
+      //@todo GENERICS: handle exceptions?
+      owner = ClassLoader::LoadGenericInstantiation(genericType, inst, owner.GetNumGenericArgs(), NULL);
+    }
+
+    refRetVal = GetExposedObjectFromMethodDesc(owner, pMsg->pMethodDesc);
 
     //-[autocvtepi]-------------------------------------------------------
     HELPER_METHOD_FRAME_END();
@@ -735,68 +749,6 @@ HRESULT AppendAssemblyName(CQuickBytes *out, const CHAR* str)
     return S_OK;
 } 
 
-//+----------------------------------------------------------------------------
-//
-//  Method:     CMessage::GetMethodName public
-//
-//  Synopsis:   return the method name
-//+----------------------------------------------------------------------------
-FCIMPL2(Object*, CMessage::GetMethodName, ReflectBaseObject* pMethodBaseUNSAFE, STRINGREF* pTypeNAssemblyName)
-{
-    STRINGREF refRetVal = NULL;
-    REFLECTBASEREF pMethodBase = (REFLECTBASEREF) pMethodBaseUNSAFE;
-    HELPER_METHOD_FRAME_BEGIN_RET_ATTRIB_1(Frame::FRAME_ATTR_RETURNOBJ, pMethodBase);
-    //-[autocvtpro]-------------------------------------------------------
-
-    LOG((LF_REMOTING, LL_INFO10,
-         "CMessage::GetMethodName IN\n"));
-
-    ReflectMethod *pRM = (ReflectMethod*) pMethodBase->GetData();
-    //
-    // FUTURE:: work around for formatter problem
-    //
-    LPCUTF8 mName = pRM->pMethod->GetName();
-    STRINGREF strMethod;
-    if (strcmp(mName, "<init>") == 0)
-    {
-        strMethod = COMString::NewString("ctor");
-    }
-    else
-    {
-        strMethod = COMString::NewString(mName);
-    }
-
-    // Now get typeNassembly name
-    LPCUTF8 szAssembly = NULL;
-    CQuickBytes     qb;
-    GCPROTECT_BEGIN(strMethod);
-
-    //Get class
-    EEClass *pClass = pRM->pMethod->GetClass();
-    //Get type
-    REFLECTCLASSBASEREF objType = (REFLECTCLASSBASEREF)pClass->GetExposedClassObject();
-    //Get ReflectClass
-    ReflectClass *pRC = (ReflectClass *)objType->GetData();
-    COMClass::GetNameInternal(pRC, COMClass::TYPE_NAME | COMClass::TYPE_NAMESPACE , &qb);
-
-    Assembly* pAssembly = pClass->GetAssembly();
-    pAssembly->GetName(&szAssembly);
-    AppendAssemblyName(&qb, szAssembly);
-
-    SetObjectReference((OBJECTREF *)pTypeNAssemblyName, COMString::NewString((LPCUTF8)qb.Ptr()), GetAppDomain());
-
-    GCPROTECT_END();
-
-    LOG((LF_REMOTING, LL_INFO10,
-         "CMessage::GetMethodName OUT\n"));
-
-    refRetVal = strMethod;
-
-    //-[autocvtepi]-------------------------------------------------------
-    HELPER_METHOD_FRAME_END();
-    return OBJECTREFToObject(refRetVal);
-}
-FCIMPLEND
 
 FCIMPL0(UINT32, CMessage::GetMetaSigLen)
     DWORD dwSize = sizeof(MetaSig);
@@ -969,11 +921,10 @@ LPVOID CMessage::GetLastArgument(MessageObject *pMsg)
     return *((LPVOID *) backadder);
 }
 
-REFLECTBASEREF __stdcall CMessage::GetExposedObjectFromMethodDesc(MethodDesc *pMD)
+REFLECTBASEREF __stdcall CMessage::GetExposedObjectFromMethodDesc(TypeHandle owner, MethodDesc *pMD)
 {
     ReflectMethod* pRM;
-    REFLECTCLASSBASEREF pRefClass = (REFLECTCLASSBASEREF) 
-                            pMD->GetClass()->GetExposedClassObject();
+    REFLECTCLASSBASEREF pRefClass = (REFLECTCLASSBASEREF) owner.GetMethodTable()->GetExposedClassObject();
     REFLECTBASEREF retVal = NULL;
     GCPROTECT_BEGIN(pRefClass);
 

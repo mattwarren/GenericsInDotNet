@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -44,20 +49,25 @@
 //
 // This describes a field - one of this is allocated for every field, so don't make this structure any larger.
 //
+// @GENERICS: 
+// Field descriptors for fields in instantiated types may be shared between compatible instantiations
+// Hence for reflection it's necessary to pair a field desc with the exact owning type handle
 class FieldDesc
 {
     friend HRESULT EEClass::BuildMethodTable(Module *pModule, 
                                              mdToken cl, 
                                              BuildingInterfaceInfo_t *pBuildingInterfaceList, 
                                              const LayoutRawFieldInfo *pLayoutRawFieldInfos,
-                                             OBJECTREF *pThrowable);
+                                             OBJECTREF *pThrowable, MethodTable *pParentMethodTable,
+                                             TypeHandle *inst, PCCOR_SIGNATURE parentInst,
+                                             Pending* pending);
 
     friend HRESULT EEClass::InitializeFieldDescs(FieldDesc *,const LayoutRawFieldInfo*, bmtInternalInfo*, bmtMetaDataInfo*, 
 		                                         bmtEnumMethAndFields*, bmtErrorInfo*, EEClass***, bmtMethAndFieldDescs*, 
 												 bmtFieldPlacement*, unsigned * totalDeclaredSize);
     friend HRESULT EEClass::PlaceStaticFields(bmtVtable*, bmtFieldPlacement*, bmtEnumMethAndFields*);
-    friend HRESULT EEClass::PlaceInstanceFields(bmtFieldPlacement*, bmtEnumMethAndFields*, bmtParentInfo*, bmtErrorInfo*, EEClass***);
-    friend HRESULT EEClass::SetupMethodTable(bmtVtable*, bmtInterfaceInfo*, bmtInternalInfo*, bmtProperties*, bmtMethAndFieldDescs*, bmtEnumMethAndFields*, bmtErrorInfo*, bmtMetaDataInfo*, bmtParentInfo*);
+    friend HRESULT EEClass::PlaceInstanceFields(bmtFieldPlacement*, bmtEnumMethAndFields*, bmtParentInfo*, bmtErrorInfo*, EEClass***, TypeHandle *inst);
+    friend HRESULT EEClass::SetupMethodTable(bmtVtable*, bmtInterfaceInfo*, bmtInternalInfo*, bmtProperties*, bmtMethAndFieldDescs*, bmtEnumMethAndFields*, bmtErrorInfo*, bmtMetaDataInfo*, bmtParentInfo*, Pending*);
     friend DWORD EEClass::GetFieldSize(FieldDesc *pFD);
     friend struct MEMBER_OFFSET_INFO(FieldDesc);
 
@@ -352,11 +362,6 @@ class FieldDesc
         return  GetMethodTableOfEnclosingClass()->GetClass();
     }
 
-    // OBSOLETE:
-    EEClass *GetTypeOfField() { return LoadType().AsClass(); }
-    // OBSOLETE:
-    EEClass *FindTypeOfField()  { return FindType().AsClass(); }
-
     TypeHandle LoadType();
     TypeHandle FindType();
 
@@ -592,6 +597,19 @@ class FieldDesc
     {
         return GetMethodTableOfEnclosingClass()->GetModule()->GetHelper();
     }
+
+    // Given a type handle of an object and a method that comes from some 
+    // superclass of the class of that object, find the instantiation of 
+    // that superclass, i.e. the class instantiation which will be relevant
+    // to interpreting the signature of the method.  The type handle of
+    // the object does not need to be given in all circumstances, in 
+    // particular it is only needed for FieldDescs pFD that
+    // return true for pFD->GetMethodTableOfEnclosingClass()->SharedByGenericInstantiations().
+    // In other cases it is allowed to be null and will be ignored.
+    // 
+    // Will return NULL if the field is not in a generic class.
+    TypeHandle *GetExactClassInstantiation(TypeHandle possibleObjType);
+
 
 };
 

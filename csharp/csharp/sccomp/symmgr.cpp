@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -76,10 +81,18 @@ BASENODE * SYM::getParseTree()
         return asMETHPROPSYM()->parseTree;
     case SK_MEMBVARSYM:
         return asMEMBVARSYM()->parseTree;
+    case SK_TYVARSYM:
+        return asTYVARSYM()->parseTree;
     case SK_EVENTSYM:
         return asEVENTSYM()->parseTree;
     case SK_AGGSYM:
         return asAGGSYM()->parseTree;
+    case SK_INSTAGGSYM:
+        return asINSTAGGSYM()->parseTree;
+    case SK_INSTAGGMETHSYM:
+        return asINSTAGGMETHSYM()->getMeth()->getParseTree();
+    case SK_INSTAGGMEMBVARSYM:
+        return asINSTAGGMEMBVARSYM()->getMembVar()->getParseTree();
     case SK_NSDECLSYM:
         return asNSDECLSYM()->parseTree;
     case SK_NSSYM:
@@ -112,6 +125,11 @@ mdToken *SYM::getTokenEmitPosition()
     switch (kind) {
     case SK_METHSYM:
         return &asMETHSYM()->tokenEmit;
+
+    case SK_INSTAGGMETHSYM:
+        return &asINSTAGGMETHSYM()->tokenEmit;
+    case SK_INSTAGGMEMBVARSYM:
+        return &asINSTAGGMEMBVARSYM()->tokenEmit;
 
     case SK_PROPSYM:
         // explicit impl properties don't have emit tokens
@@ -149,8 +167,18 @@ mdToken SYM::getTokenEmit()
         if (asPROPSYM()->explicitImpl) return mdTokenNil;
         return asPROPSYM()->tokenEmit;
 
+    case SK_INSTAGGMETHSYM:
+        return asINSTAGGMETHSYM()->tokenEmit;
+
+    case SK_INSTAGGMEMBVARSYM:
+        return asINSTAGGMEMBVARSYM()->tokenEmit;
+
     case SK_MEMBVARSYM:
         return asMEMBVARSYM()->tokenEmit;
+
+    case SK_TYVARSYM:
+        return mdTokenNil;
+        break;
 
     case SK_EVENTSYM:
         return asEVENTSYM()->tokenEmit;
@@ -171,11 +199,19 @@ BASENODE * SYM::getAttributesNode()
     case SK_METHSYM:
         return asMETHSYM()->getAttributesNode();
 
+    case SK_INSTAGGMETHSYM:
+        return asINSTAGGMETHSYM()->getMeth()->getAttributesNode();
+
+    case SK_INSTAGGMEMBVARSYM:
+        return asINSTAGGMEMBVARSYM()->getMembVar()->getAttributesNode();
     case SK_AGGSYM:
         return asAGGSYM()->getAttributesNode();
 
     case SK_MEMBVARSYM:
         return asMEMBVARSYM()->getAttributesNode();
+
+    case SK_TYVARSYM:
+        return asTYVARSYM()->getAttributesNode();
 
     case SK_PROPSYM:
         return asPROPSYM()->getAttributesNode();
@@ -222,6 +258,12 @@ BASENODE * MEMBVARSYM::getAttributesNode()
 
     return attr;
 }
+
+BASENODE * TYVARSYM::getAttributesNode()
+{
+    return NULL;
+}
+
 
 BASENODE * PROPSYM::getAttributesNode()
 {
@@ -314,6 +356,20 @@ CorAttributeTargets SYM::getElementKind()
     case SK_MEMBVARSYM:
         return catField;
 
+    case SK_INSTAGGMETHSYM:
+        return asINSTAGGMETHSYM()->getMeth()->getElementKind();
+
+    case SK_INSTAGGMEMBVARSYM:
+        return asINSTAGGMEMBVARSYM()->getMembVar()->getElementKind();
+
+    case SK_TYVARSYM:
+        ASSERT(!"Bad Symbol type: SK_TYVARSYM"); // GENERICS - fix me
+		return catField;
+	   
+    case SK_INSTAGGSYM:
+        ASSERT(!"Bad Symbol type: SK_INSTAGGSYM"); // GENERICS - fix me
+		return catField;
+	   
     case SK_EVENTSYM:
         return catEvent;
 
@@ -390,10 +446,16 @@ ULONG SYM::getAssemblyIndex() const
         return const_cast<SYM *>(this)->asMEMBVARSYM()->getAssemblyIndex();
     case SK_EVENTSYM:
         return const_cast<SYM *>(this)->asEVENTSYM()->getAssemblyIndex();
+    case SK_TYVARSYM:
+        return const_cast<SYM *>(this)->asTYVARSYM()->getAssemblyIndex();
     case SK_AGGSYM:
         return const_cast<SYM *>(this)->asAGGSYM()->getAssemblyIndex();
     case SK_NSDECLSYM:
         return const_cast<SYM *>(this)->asNSDECLSYM()->getAssemblyIndex();
+    case SK_INSTAGGMETHSYM:
+        return const_cast<SYM *>(this)->asINSTAGGMETHSYM()->getMeth()->getAssemblyIndex();
+    case SK_INSTAGGMEMBVARSYM:
+        return const_cast<SYM *>(this)->asINSTAGGMEMBVARSYM()->getMembVar()->getAssemblyIndex();
     case SK_NSSYM:
         // shouldn'e be called with a namespace
     default:
@@ -436,12 +498,13 @@ unsigned AGGSYM::allowableMemberAccess()
     }
 }
 
-PREDEFATTR      AGGSYM::getPredefAttr() const
+PREDEFATTR      TYPESYM::getPredefAttr() 
 {
-    if (!this->isPredefined) {
+    ASSERT(this->isAggType());
+	if (this->kind == SK_INSTAGGSYM || !this->asAGGSYM()->isPredefined) {
         return PA_COUNT;
     } else {
-        return predefTypeInfo[this->iPredef].attr;
+        return predefTypeInfo[this->asAGGSYM()->iPredef].attr;
     }
 }
 
@@ -467,7 +530,22 @@ INFILESYM * SYM::getInputFile()
     case SK_AGGSYM:
         return this->asAGGSYM()->getInputFile();
 
+    case SK_TYVARSYM:
+        if (this->parent->kind == SK_AGGSYM)
+            return this->parent->asAGGSYM()->getInputFile();
+        else if (this->parent->kind == SK_METHSYM)
+            return this->parent->asMETHSYM()->getInputFile();
+        ASSERT(0); 
+        break;
+
+    case SK_INSTAGGMETHSYM:
+        return asINSTAGGMETHSYM()->getMeth()->getInputFile();
+
+    case SK_INSTAGGMEMBVARSYM:
+        return asINSTAGGMEMBVARSYM()->getMembVar()->getInputFile();
+
     case SK_MEMBVARSYM:
+    case SK_INSTAGGSYM:
     case SK_METHSYM:
     case SK_PROPSYM:
     case SK_EVENTSYM:
@@ -511,7 +589,22 @@ DWORD SYM::getImportScope() const
     case SK_AGGSYM:
         return ((AGGSYM*)this)->getImportScope();
 
+    case SK_TYVARSYM:
+        if (this->parent->kind == SK_AGGSYM)
+            return this->parent->asAGGSYM()->getImportScope();
+        else if (this->parent->kind == SK_METHSYM)
+            return this->parent->asMETHSYM()->getImportScope();
+        ASSERT(0); 
+        break;
+
+    case SK_INSTAGGMETHSYM:
+        return const_cast<SYM *>(this)->asINSTAGGMETHSYM()->getMeth()->getImportScope();
+
+    case SK_INSTAGGMEMBVARSYM:
+        return const_cast<SYM *>(this)->asINSTAGGMEMBVARSYM()->getMembVar()->getImportScope();
+
     case SK_MEMBVARSYM:
+    case SK_INSTAGGSYM:
     case SK_METHSYM:
     case SK_PROPSYM:
     case SK_EVENTSYM:
@@ -566,6 +659,22 @@ PPARENTSYM SYM::containingDeclaration()
     case SK_AGGSYM:
         return asPARENTSYM()->containingDeclaration();
 
+    case SK_TYVARSYM:
+        if (this->parent->kind == SK_AGGSYM)
+            return this->parent->asAGGSYM()->containingDeclaration();
+        else if (this->parent->kind == SK_METHSYM)
+            return this->parent->asMETHSYM()->containingDeclaration();
+        ASSERT(0); 
+        break;
+
+    case SK_INSTAGGMETHSYM:
+        return asINSTAGGMETHSYM()->getMeth()->containingDeclaration();
+
+    case SK_INSTAGGMEMBVARSYM:
+        return asINSTAGGMEMBVARSYM()->getMembVar()->containingDeclaration();
+
+    case SK_INSTAGGSYM:
+        return asINSTAGGSYM()->rootType()->containingDeclaration();
     case SK_GLOBALATTRSYM:
     case SK_MEMBVARSYM:
     case SK_METHSYM:
@@ -704,19 +813,28 @@ NAMELIST * METHSYM::getBaseConditionalSymbols(SYMMGR * symmgr)
         return conditionalSymbols;
     }
     checkedCondSymbols = true;
-    AGGSYM * cls = this->parent->asAGGSYM()->baseClass;
-    while (cls) {
-        METHSYM * meth = symmgr->LookupGlobalSym(this->name, cls, MASK_METHSYM)->asMETHSYM();
-        while (meth) {
-            if (meth->params == this->params && meth->retType == this->retType && !meth->isOverride) {
-                return this->conditionalSymbols = meth->conditionalSymbols;
-            }
-            meth = symmgr->LookupNextSym(meth, cls, MASK_METHSYM)->asMETHSYM();
-        }
-        cls = cls->baseClass;
-    }
+    BASE_CLASS_TYPES_LOOP(this->parent->asAGGSYM(), baseType) 
+		METHSYM * meth = symmgr->LookupGlobalSym(this->name, baseType, MASK_METHSYM)->asMETHSYM();
+		while (meth) {
+			if (symmgr->SubstSigUsingTypeEqualsSig(meth, baseType, this->params, this->retType)
+				&& !meth->isOverride) {
+				return this->conditionalSymbols = meth->conditionalSymbols;
+			}
+			meth = symmgr->LookupNextSym(meth, baseType, MASK_METHSYM)->asMETHSYM();
+		}
+    END_BASE_CLASS_TYPES_LOOP(*symmgr)
     return NULL;
 }
+
+
+// GENERICS: Check if one signature equals another where we apply a substitution
+// to the first signature.
+bool SYMMGR::SubstSigUsingTypeEqualsSig(METHPROPSYM *meth1,PTYPESYM methodInType1,PTYPESYM *params2,PTYPESYM retty2) 
+{
+	return (SubstParamsUsingType(meth1->cParams,meth1->params, methodInType1) == params2 && 
+            SubstTypeUsingType(meth1->retType,methodInType1) == retty2);
+}
+
 
 /*
  * Given a symbol, return the symbol's first declaration in the sources
@@ -826,32 +944,35 @@ AGGSYM * TYPESYM::commonBase(TYPESYM * type1, TYPESYM * type2)
 {
     if (type1->kind != SK_AGGSYM || type2->kind != SK_AGGSYM) return NULL;
 
-    if (type1 == type2) return type1->asAGGSYM();
+    AGGSYM *agg1 = type1->underlyingAggregate();
+    AGGSYM *agg2 = type2->underlyingAggregate();
+
+    if (agg1 == agg2) return agg1;
 
     int depth1 = 0;
     AGGSYM * base;
-    for (base = type1->asAGGSYM(); base; (base = base->baseClass), depth1++);
+    for (base = agg1; base; (base = base->baseClass->underlyingAggregate()), depth1++);
     int depth2 = 0;
-    for (base = type2->asAGGSYM(); base; (base = base->baseClass), depth2++);
+    for (base = agg2; base; (base = base->baseClass->underlyingAggregate()), depth2++);
 
     if (depth1 < depth2) {
         depth1 = depth2 - depth1;
-        base = type1->asAGGSYM();
-        type1 = type2;
-        type2 = base;
+        base = agg1;
+        agg1 = agg2;
+        agg2 = base;
     } else {
         depth1 -= depth2;
     }
 
     while (depth1) {
-        type1 = type1->asAGGSYM()->baseClass;
+        agg1 = agg1->baseClass->underlyingAggregate();
         depth1--;
     }
 
-    while (type1) {
-        if (type1 == type2) return type1->asAGGSYM();
-        type1 = type1->asAGGSYM()->baseClass;
-        type2 = type2->asAGGSYM()->baseClass;
+    while (agg1) {
+        if (agg1 == agg2) return agg1;
+        agg1 = agg1->baseClass->underlyingAggregate();
+        agg2 = agg2->baseClass->underlyingAggregate();
     }
 
     return NULL;
@@ -860,7 +981,7 @@ AGGSYM * TYPESYM::commonBase(TYPESYM * type1, TYPESYM * type2)
 
 unsigned short TYPESYM::getFieldsSize()
 {
-    if (kind == SK_AGGSYM) return asAGGSYM()->getFieldsSize();
+    if (kind == SK_AGGSYM || kind == SK_INSTAGGSYM) return underlyingAggregate()->getFieldsSize();
     return 1;
 }
 
@@ -899,6 +1020,12 @@ FUNDTYPE TYPESYM::fundType()
             return FT_REF;  // Interfaces, classes, delegates are reference types.
     }
 
+    case SK_INSTAGGSYM:
+		return this->asINSTAGGSYM()->rootType()->fundType();
+
+    case SK_TYVARSYM:  
+        return FT_VAR; 
+
     case SK_ARRAYSYM:
     case SK_NULLSYM:
         return FT_REF;
@@ -918,6 +1045,8 @@ bool     TYPESYM::isAnyStructType()
 {
     if (this->kind == SK_AGGSYM) {
         return this->asAGGSYM()->isStruct;
+    } else if (this->kind == SK_INSTAGGSYM) {
+        return this->asINSTAGGSYM()->rootType()->isStruct;
     }
     return false;
 }
@@ -1102,7 +1231,7 @@ void SYMTBL::InsertChild(PPARENTSYM parent, PSYM child)
 /* 
  * Look up a symbol by name and parent, filtering by mask.
  */
-PSYM SYMTBL::LookupSym(PNAME name, PPARENTSYM parent, unsigned kindmask)
+PSYM SYMTBL::LookupSym(PNAME name, PPARENTSYM parent, symbmask_t kindmask)
 {
     unsigned iBucket, jump;
     PSYM sym;
@@ -1117,7 +1246,7 @@ PSYM SYMTBL::LookupSym(PNAME name, PPARENTSYM parent, unsigned kindmask)
     while ((sym = buckets[iBucket])) {
         if (sym->name == name && sym->parent == parent) {
             do {
-                if (kindmask & (1 << sym->kind))
+                if (kindmask & (((symbmask_t) 1) << sym->kind))
                     return sym;
                 sym = sym->nextSameName;
             } while (sym);
@@ -1518,6 +1647,24 @@ PSYM SYMMGR::AllocSym(SYMKIND symkind, PNAME name, NRHEAP * allocator)
         sym->name = name;
         break;
     }
+    case SK_INSTAGGSYM:
+    {
+        sym = new(allocator) INSTAGGSYM;
+        sym->name = name;
+        break;
+    }
+    case SK_INSTMETHSYM:
+    {
+        sym = new(allocator) INSTMETHSYM;
+        sym->name = name;
+        break;
+    }
+    case SK_INSTAGGINSTMETHSYM:
+    {
+        sym = new(allocator) INSTAGGINSTMETHSYM;
+        sym->name = name;
+        break;
+    }
     case SK_ALIASSYM:
     {
         sym = new(allocator) ALIASSYM;
@@ -1536,6 +1683,12 @@ PSYM SYMMGR::AllocSym(SYMKIND symkind, PNAME name, NRHEAP * allocator)
         sym->name = name;
         break;
     }
+    case SK_TYVARSYM:
+    {
+        sym = new(allocator) TYVARSYM;
+        sym->name = name;
+        break;
+    }
     case SK_LOCVARSYM:
     {
         sym = new(allocator) LOCVARSYM;
@@ -1551,6 +1704,18 @@ PSYM SYMMGR::AllocSym(SYMKIND symkind, PNAME name, NRHEAP * allocator)
     case SK_METHSYM:
     {
         sym = new(allocator) METHSYM;
+        sym->name = name;
+        break;
+    }
+    case SK_INSTAGGMETHSYM:
+    {
+        sym = new(allocator) INSTAGGMETHSYM;
+        sym->name = name;
+        break;
+    }
+    case SK_INSTAGGMEMBVARSYM:
+    {
+        sym = new(allocator) INSTAGGMEMBVARSYM;
         sym->name = name;
         break;
     }
@@ -1734,8 +1899,16 @@ PSYM SYMMGR::CreateGlobalSym(SYMKIND symkind, PNAME name, PPARENTSYM parent)
     PSYM sym;
 
     // Only some symbol kinds are valid as global symbols. Validate.
-    ASSERT(symkind == SK_MEMBVARSYM || symkind == SK_METHSYM ||
-           symkind == SK_AGGSYM     || symkind == SK_NSSYM ||
+    ASSERT(symkind == SK_MEMBVARSYM || 
+	   symkind == SK_TYVARSYM || 
+	   symkind == SK_METHSYM ||
+	   symkind == SK_INSTAGGMETHSYM ||
+	   symkind == SK_INSTAGGMEMBVARSYM ||
+	   symkind == SK_AGGSYM     || 
+	   symkind == SK_INSTAGGSYM     || 
+	   symkind == SK_INSTMETHSYM     || 
+	   symkind == SK_INSTAGGINSTMETHSYM     || 
+	   symkind == SK_NSSYM ||
            symkind == SK_ERRORSYM   || symkind == SK_SCOPESYM ||
            symkind == SK_INFILESYM  || symkind == SK_OUTFILESYM ||
            symkind == SK_VOIDSYM    || symkind == SK_NULLSYM ||
@@ -1794,7 +1967,7 @@ PSYM SYMMGR::CreateLocalSym(SYMKIND symkind, PNAME name, PPARENTSYM parent)
  *
  * returns NULL if no match found.
  */
-PSYM SYMMGR::LookupGlobalSym(PNAME name, PPARENTSYM parent, unsigned kindmask)
+PSYM SYMMGR::LookupGlobalSym(PNAME name, PPARENTSYM parent, symbmask_t kindmask)
 {
     return tableGlobal.LookupSym(name, parent, kindmask);
 }
@@ -1809,7 +1982,7 @@ PSYM SYMMGR::LookupGlobalSym(PNAME name, PPARENTSYM parent, unsigned kindmask)
  *
  * returns NULL if no match found.
  */
-PSYM SYMMGR::LookupLocalSym(PNAME name, PPARENTSYM parent, unsigned kindmask)
+PSYM SYMMGR::LookupLocalSym(PNAME name, PPARENTSYM parent, symbmask_t kindmask)
 {
     ASSERT(name);       // name can't be NULL.
 
@@ -1820,7 +1993,7 @@ PSYM SYMMGR::LookupLocalSym(PNAME name, PPARENTSYM parent, unsigned kindmask)
 /*
  * Look up the next symbol with the same name and parent.
  */
-PSYM SYMMGR::LookupNextSym(PSYM sym, PPARENTSYM parent, unsigned kindmask)
+PSYM SYMMGR::LookupNextSym(PSYM sym, PPARENTSYM parent, symbmask_t kindmask)
 {
     ASSERT(sym->parent == parent);
 
@@ -1829,7 +2002,7 @@ PSYM SYMMGR::LookupNextSym(PSYM sym, PPARENTSYM parent, unsigned kindmask)
 
     // Keep traversing the list of symbols with same name and parent.
     while (sym) {
-        if (kindmask & (1 << sym->kind))
+        if (kindmask & (((symbmask_t) 1) << sym->kind))
             return sym;
 
         sym = sym->nextSameName;
@@ -2033,6 +2206,17 @@ PMEMBVARSYM SYMMGR::CreateMembVar(PNAME name, PAGGSYM parent)
 
 
 /*
+ * Create a symbol for a type parameter declaration and/or use of that 
+ * declaration.  The parent is the class or method that is parameterized
+ * by the type parameter.
+ */
+PTYVARSYM SYMMGR::CreateTyVar(PNAME name, PPARENTSYM parent)
+{
+    // Create the new symbol.
+    return CreateGlobalSym(SK_TYVARSYM, name, parent)->asTYVARSYM();
+}
+
+/*
  * Create a symbol for an method. Does not check for existing symbols
  * because methods are assumed to be overloadable.
  */
@@ -2118,6 +2302,7 @@ PARRAYSYM SYMMGR::GetArray(PTYPESYM elementType, int args)
     case 1: case 2:
         name = compiler()->namemgr->GetPredefName((PREDEFNAME)(PN_ARRAY0 + args));
         break;
+        // fall through
     default:
         nameString[0] = L'[';
         nameString[1] = L'X';
@@ -2141,7 +2326,7 @@ PARRAYSYM SYMMGR::GetArray(PTYPESYM elementType, int args)
 }
 
 /*
- * Create or return an existing pointer symbol. The parent of an array symbol
+ * Create or return an existing pointer symbol. The parent of a pointer symbol
  * is the base type, and the name is "*"
  */
 PPTRSYM SYMMGR::GetPtrType(PTYPESYM baseType)
@@ -2162,6 +2347,125 @@ PPTRSYM SYMMGR::GetPtrType(PTYPESYM baseType)
 }
 
 
+
+
+PINSTAGGMETHSYM SYMMGR::GetInstAggMeth(PMETHSYM meth, PINSTAGGSYM methodInType) 
+{
+    PINSTAGGMETHSYM rval;
+    // See if we already have a method at this instantiation
+    rval = LookupGlobalSym(methodInType->name, meth, MASK_INSTAGGMETHSYM)->asINSTAGGMETHSYM();
+    if (!rval) {
+        rval = CreateGlobalSym(SK_INSTAGGMETHSYM, methodInType->name, meth)->asINSTAGGMETHSYM();
+        rval->methodInType = methodInType;
+    }
+    return rval;
+
+}
+
+PINSTAGGMEMBVARSYM SYMMGR::GetInstAggMembVar(PMEMBVARSYM meth, PINSTAGGSYM methodInType) 
+{
+    PINSTAGGMEMBVARSYM rval = CreateGlobalSym(SK_INSTAGGMEMBVARSYM, methodInType->name, meth)->asINSTAGGMEMBVARSYM();
+    rval->methodInType = methodInType;
+    return rval;
+
+}
+
+/*
+ * Create or return an existing instantiated aggregate symbol, e.g. List<String>. The parent of a pointer symbol
+ * is the root type, and the name is "<>"
+ */
+PINSTAGGSYM SYMMGR::GetInstAgg(PAGGSYM rootType, unsigned short cArgs, PTYPESYM *ppArgs)
+{
+
+    WCHAR *nameString = (WCHAR *) _alloca(cArgs * sizeof(PTYPESYM) + sizeof(WCHAR));
+    PNAME name = compiler()->namemgr->GetPredefName(PN_INSTAGG);
+        
+    // The name is a direct hack of the pointers in PTYPESYM....  These are unique and
+    // stable                           
+    for (int i=0; i<cArgs; i++) {
+        ((PTYPESYM *) nameString)[i] = ppArgs[i];
+    }
+    nameString[cArgs * (sizeof(PTYPESYM)/sizeof(WCHAR))] = L'\0';
+    name = compiler()->namemgr->AddString(nameString);
+
+	ASSERT(name != NULL);
+
+    // See if we already have a array symbol of this element type and rank.
+    PINSTAGGSYM sym = LookupGlobalSym(name, rootType, MASK_INSTAGGSYM)->asINSTAGGSYM();
+    if (! sym) {
+        // No existing array symbol. Create a new one.
+        sym = CreateGlobalSym(SK_INSTAGGSYM, name, rootType)->asINSTAGGSYM();
+        sym->ppArgs = ppArgs;
+        sym->cArgs = cArgs;
+		sym->err = false;
+    }
+
+    ASSERT(sym->rootType() == rootType);
+
+    return sym;
+}
+
+
+PINSTMETHSYM SYMMGR::GetInstMeth(PMETHSYM rootMeth, unsigned short cMethArgs, PTYPESYM *ppMethArgs)
+{
+
+    WCHAR *nameString = (WCHAR *) _alloca(cMethArgs * sizeof(PMETHSYM) + sizeof(WCHAR));
+    PNAME name = compiler()->namemgr->GetPredefName(PN_INSTMETH);
+        
+    // The name is a direct blob of the pointers as PTYPESYMS....  These are unique and
+    // stable (I hope)...
+    for (int i=0; i<cMethArgs; i++) {
+        ((PTYPESYM *) nameString)[i] = ppMethArgs[i];
+    }
+    nameString[cMethArgs * (sizeof(PTYPESYM)/sizeof(WCHAR))] = L'\0';
+    name = compiler()->namemgr->AddString(nameString);
+
+	ASSERT(name != NULL);
+
+    // See if we already have a array symbol of this element type and rank.
+    PINSTMETHSYM sym = LookupGlobalSym(name, rootMeth, MASK_INSTMETHSYM)->asINSTMETHSYM();
+    if (! sym) {
+        // No existing array symbol. Create a new one.
+        sym = CreateGlobalSym(SK_INSTMETHSYM, name, rootMeth)->asINSTMETHSYM();
+        sym->ppMethArgs = ppMethArgs;
+        sym->cMethArgs = cMethArgs;
+    }
+
+    ASSERT(sym->getUnderlyingMeth() == rootMeth);
+
+    return sym;
+}
+
+PINSTAGGINSTMETHSYM SYMMGR::GetInstAggInstMeth(PINSTAGGMETHSYM rootMeth, unsigned short cMethArgs, PTYPESYM *ppMethArgs)
+{
+
+    WCHAR *nameString = (WCHAR *) _alloca(cMethArgs * sizeof(PINSTAGGMETHSYM) + sizeof(WCHAR));
+    PNAME name = compiler()->namemgr->GetPredefName(PN_INSTAGGINSTMETH);
+        
+    // The name is a direct blob of the pointers as PTYPESYMS....  These are unique and
+    // stable                           
+    for (int i=0; i<cMethArgs; i++) {
+        ((PTYPESYM *) nameString)[i] = ppMethArgs[i];
+    }
+    nameString[cMethArgs * (sizeof(PTYPESYM)/sizeof(WCHAR))] = L'\0';
+    name = compiler()->namemgr->AddString(nameString);
+
+	ASSERT(name != NULL);
+
+    // See if we already have a array symbol of this element type and rank.
+    PINSTAGGINSTMETHSYM sym = LookupGlobalSym(name, rootMeth, MASK_INSTAGGINSTMETHSYM)->asINSTAGGINSTMETHSYM();
+    if (! sym) {
+        // No existing array symbol. Create a new one.
+        sym = CreateGlobalSym(SK_INSTAGGINSTMETHSYM, name, rootMeth)->asINSTAGGINSTMETHSYM();
+        sym->ppMethArgs = ppMethArgs;
+        sym->cMethArgs = cMethArgs;
+    }
+
+    ASSERT(sym->getUnderlyingMeth() == rootMeth);
+
+    return sym;
+}
+
 /*
  * Create or return an existing pinned symbol. The parent of a pinned symbol
  * is the base type, and the name is "@"
@@ -2169,6 +2473,7 @@ PPTRSYM SYMMGR::GetPtrType(PTYPESYM baseType)
 PPINNEDSYM SYMMGR::GetPinnedType(PTYPESYM baseType)
 {
     PPINNEDSYM sym;
+
     PNAME namePinned = compiler()->namemgr->GetPredefName(PN_PINNED);
 
     // See if we already have a pointer symbol of this base type.
@@ -2461,6 +2766,12 @@ bool TYPESYM::isSimpleType()
             predefTypeInfo[this->asAGGSYM()->iPredef].isSimple);
 }
 
+bool TYPESYM::isDelegateType()
+{
+    return (this->behavioralType()->kind == SK_AGGSYM && this->behavioralType()->asAGGSYM()->isDelegate);
+}
+
+
 bool TYPESYM::isQSimpleType()
 {
     return (this->kind == SK_AGGSYM && this->asAGGSYM()->isPredefined &&
@@ -2504,7 +2815,7 @@ bool TYPESYM::isUnsigned()
 bool TYPESYM::isCLS_Type()
 {
 
-    if (isQSimpleType() || kind == SK_PTRSYM)
+    if (isQSimpleType() || kind == SK_PTRSYM || kind == SK_TYVARSYM || kind == SK_INSTAGGSYM)
         return false;
 
     if (kind == SK_AGGSYM && asAGGSYM()->isPredefined)
@@ -2526,9 +2837,15 @@ bool TYPESYM::isCLS_Type()
  * returns the fundamental aggregate symbol at the base of a complex type
  * or NULL if the type is derived from void
  */
+// GENERICS - tyvar's have no underlying aggregate.  Even though they may be 
+// constrained, constraints should be thought of as different beasts to
+// an "aggregate" for the tyvar.  
 AGGSYM * TYPESYM::underlyingAggregate()
 {
+    if (this == NULL) return NULL;
     switch (this->kind) {
+    case SK_INSTAGGSYM:
+        return this->asINSTAGGSYM()->rootType();
     case SK_AGGSYM:
         return this->asAGGSYM();
     case SK_VOIDSYM:
@@ -2541,6 +2858,8 @@ AGGSYM * TYPESYM::underlyingAggregate()
         return this->asPTRSYM()->baseType()->underlyingAggregate();
     case SK_PINNEDSYM:
         return this->asPINNEDSYM()->baseType()->underlyingAggregate();
+    case SK_TYVARSYM: 
+        return NULL;
     case SK_NULLSYM:
         return NULL;
     case SK_ERRORSYM:
@@ -2564,6 +2883,18 @@ bool TYPESYM::isSpecialByRefType()
         return this->asAGGSYM()->iPredef == PT_REFANY || this->asAGGSYM()->iPredef == PT_ARGITERATOR;
     else
         return false;
+}
+
+TYPESYM * TYPESYM::behavioralType()
+{
+    if (this == NULL) return NULL;
+    switch (this->kind) {
+    case SK_INSTAGGSYM:
+        return this->asINSTAGGSYM()->rootType();
+    default:
+        return this;
+    }
+
 }
 
 /*
@@ -2704,6 +3035,16 @@ void SYMMGR::MakeTypeDeclared(PSYM sym)
         sym->isPrepared = 1;
         break;
     }
+    case SK_INSTAGGSYM: {
+        // inst. types, e.g. List<String> should have type params declared.
+        INSTAGGSYM *agg = sym->asINSTAGGSYM();
+		DeclareType(agg->rootType());
+        for (unsigned int i = 0; i < agg->cArgs; i++) {
+			DeclareType(agg->ppArgs[i]);
+		}
+        sym->isPrepared = 1;
+        break;
+    }
     case SK_ALIASSYM: {
         // aliases should have their underlying type declared.
         sym->isPrepared = 1;
@@ -2723,6 +3064,11 @@ void SYMMGR::MakeTypeDeclared(PSYM sym)
         sym->isPrepared = 1;
         break;
 
+    case SK_TYVARSYM:
+        // Nothing to do.
+        sym->isPrepared = 1;
+        break; 
+
     case SK_PINNEDSYM:
         DeclareType(sym->asPINNEDSYM()->baseType());
         sym->isPrepared = 1;
@@ -2734,6 +3080,243 @@ void SYMMGR::MakeTypeDeclared(PSYM sym)
     }
 }
 
+
+//
+// Substitute an instantiation through a type, generating a new type.
+//
+//  cClassTypeArgs and cMethTypeArgs must always correctly specify the number of type variables
+// of the appropriate kinds that are in scope for the given use of this type.  
+//
+// Either or both of ppClassTypeArgs and ppMethTypeArgs can be NULL.  A NULL indicates either that the
+// corresponding cClassTypeArgs or cMethTypeArgs is 0, or that we want the identity substitution for that collection
+// of type variables, e.g. T -> T, U -> U.   
+//
+// If non-null, the arrays must be of the appropriate size, and
+// specify the substitution for that range of type parameters. 
+//
+// If not inside a generic class, then 
+// cClassTypeArgs will be 0, and if not inside a generic method then cMethTypeArgs will be 0.
+//
+PTYPESYM SYMMGR::SubstType(PTYPESYM sym, unsigned short cClassTypeArgs, PTYPESYM *ppClassTypeArgs, unsigned short cMethTypeArgs, PTYPESYM *ppMethTypeArgs)
+{
+    if (!sym || (!ppClassTypeArgs && !ppMethTypeArgs)) return sym;
+//    DeclareType(sym);
+
+    switch (sym->kind) {
+    default:
+        ASSERT(0);
+        return NULL;
+    case SK_ERRORSYM:
+    case SK_NULLSYM:
+    case SK_VOIDSYM: 
+    case SK_AGGSYM:
+        return sym;
+    case SK_PARAMMODSYM: {
+        PPARAMMODSYM res = 
+            GetParamModifier(SubstType(sym->asPARAMMODSYM()->paramType(), cClassTypeArgs, ppClassTypeArgs, cMethTypeArgs, ppMethTypeArgs),
+                             sym->asPARAMMODSYM()->isOut);
+		//DeclareType(res);
+        return res;
+    }
+
+    case SK_ARRAYSYM: {
+        PARRAYSYM res = 
+            GetArray(SubstType(sym->asARRAYSYM()->elementType(), cClassTypeArgs, ppClassTypeArgs, cMethTypeArgs, ppMethTypeArgs),
+                     sym->asARRAYSYM()->rank);
+		//DeclareType(res);
+        return res;
+    }
+    case SK_PTRSYM: {
+        PPTRSYM res = 
+            GetPtrType(SubstType(sym->asPTRSYM()->baseType(), cClassTypeArgs, ppClassTypeArgs, cMethTypeArgs, ppMethTypeArgs));
+		//DeclareType(res);
+        return res;
+    }
+    case SK_INSTAGGSYM: {
+        // inst. types, e.g. List<String> should have type params declared.
+        INSTAGGSYM *iagg = sym->asINSTAGGSYM();
+        PTYPESYM * ppArgs2 = (PTYPESYM *) _alloca(iagg->cArgs * sizeof(PTYPESYM));
+        for (unsigned int i = 0; i< iagg->cArgs; i++) { 
+            ppArgs2[i] = SubstType(iagg->ppArgs[i], cClassTypeArgs, ppClassTypeArgs, cMethTypeArgs, ppMethTypeArgs);
+        }
+        TYPESYM ** ppArgsUnique = compiler()->symmgr.AllocParams(iagg->cArgs, ppArgs2);
+		INSTAGGSYM *res = GetInstAgg(iagg->rootType(), iagg->cArgs, ppArgsUnique);
+		//DeclareType(res);
+        return res;
+        break;
+    }
+    case SK_TYVARSYM: {
+        TYVARSYM *tv = sym->asTYVARSYM();
+        if (tv->parent->kind == SK_METHSYM) {
+            ASSERT(tv->num < cMethTypeArgs);
+            return ppMethTypeArgs ? ppMethTypeArgs[tv->num] : sym;
+        }
+        else {
+            ASSERT(tv->num < cClassTypeArgs);
+            return ppClassTypeArgs ? ppClassTypeArgs[tv->num] : sym;
+        }
+        //A method type variable...
+        
+    }
+    case SK_PINNEDSYM: {
+        PPINNEDSYM res = 
+            GetPinnedType(SubstType(sym->asPINNEDSYM()->baseType(), cClassTypeArgs, ppClassTypeArgs, cMethTypeArgs, ppMethTypeArgs));
+		//DeclareType(res);
+        return res;
+    }
+    }
+}
+
+PTYPESYM SYMMGR::SubstTypeUsingType(PTYPESYM typ, PTYPESYM methodInType) {
+    if (!typ || !methodInType || methodInType->kind != SK_INSTAGGSYM) 
+        return typ;
+    return SubstTypeUsingCallData(typ, methodInType, 0, NULL);
+}
+  
+PTYPESYM SYMMGR::SubstTypeUsingTypeAsMethInst(PTYPESYM typ, PTYPESYM methodInType) {
+    if (!typ || !methodInType || methodInType->kind != SK_INSTAGGSYM) 
+        return typ;
+    PTYPESYM *ppMethTypeArgs = (!methodInType || methodInType->kind != SK_INSTAGGSYM) ? NULL : methodInType->asINSTAGGSYM()->ppArgs;
+    unsigned short cMethTypeArgs = (!methodInType || methodInType->kind != SK_INSTAGGSYM) ? 0 : methodInType->asINSTAGGSYM()->cArgs;
+    return SubstType(typ, 0, NULL, cMethTypeArgs, ppMethTypeArgs);
+}
+PTYPESYM SYMMGR::SubstTypeUsingCallExpr(PTYPESYM typ, EXPR *call) {
+    ASSERT(call);
+    PTYPESYM *ppMethTypeArgs;
+    unsigned short cMethTypeArgs;
+    call->getMethTypeArgs(&ppMethTypeArgs, &cMethTypeArgs);
+    
+    return SubstTypeUsingCallData(typ, call->getMethodInType(), cMethTypeArgs, ppMethTypeArgs);
+}
+
+
+PTYPESYM SYMMGR::SubstTypeUsingCallData(PTYPESYM typ, PTYPESYM methodInType, unsigned short cMethTypeArgs, PTYPESYM *ppMethTypeArgs) {
+
+    if (!typ || (!ppMethTypeArgs && (!methodInType || methodInType->kind != SK_INSTAGGSYM))) 
+        return typ;
+    PTYPESYM *ppArgs = (!methodInType || methodInType->kind != SK_INSTAGGSYM) ? NULL : methodInType->asINSTAGGSYM()->ppArgs;
+    unsigned short cArgs = (!methodInType || methodInType->kind != SK_INSTAGGSYM) ? 0 : methodInType->asINSTAGGSYM()->cArgs;
+    return SubstType(typ, cArgs, ppArgs, cMethTypeArgs, ppMethTypeArgs);
+}
+
+
+PTYPESYM *SYMMGR::SubstParamsUsingType(unsigned short cParams, PTYPESYM *params, PTYPESYM methodInType) {
+
+    if (!params || !methodInType || methodInType->kind != SK_INSTAGGSYM) 
+        return params;
+    return SubstParamsUsingCallData(cParams, params, methodInType, 0, NULL);
+}
+  
+PTYPESYM *SYMMGR::SubstParamsUsingCallExpr(unsigned short cParams, PTYPESYM *params, EXPR *call) {
+    ASSERT(call);
+    PTYPESYM *ppMethTypeArgs;
+    unsigned short cMethTypeArgs;
+    call->getMethTypeArgs(&ppMethTypeArgs, &cMethTypeArgs);
+
+    return SubstParamsUsingCallData(cParams, params, call->getMethodInType(), cMethTypeArgs, ppMethTypeArgs);
+}
+
+
+PTYPESYM *SYMMGR::SubstParamsUsingCallData(unsigned short cParams, PTYPESYM *params, PTYPESYM methodInType, unsigned short cMethTypeArgs, PTYPESYM *ppMethTypeArgs) {
+
+    if (!params || (!ppMethTypeArgs && (!methodInType || methodInType->kind != SK_INSTAGGSYM))) 
+        return params;
+    PTYPESYM *ppArgs = (!methodInType || methodInType->kind != SK_INSTAGGSYM) ? NULL : methodInType->asINSTAGGSYM()->ppArgs;
+    unsigned short cArgs = (!methodInType || methodInType->kind != SK_INSTAGGSYM) ? 0 : methodInType->asINSTAGGSYM()->cArgs;
+    return SubstParams(cParams, params, cArgs, ppArgs, cMethTypeArgs, ppMethTypeArgs);
+}
+
+PTYPESYM *SYMMGR::SubstParams(unsigned short cParams, PTYPESYM *params, unsigned short cClassTypeArgs, PTYPESYM *ppClassTypeArgs, unsigned short cMethTypeArgs, PTYPESYM *ppMethTypeArgs) {
+
+    if (!params || (!ppClassTypeArgs && !ppMethTypeArgs)) 
+        return params;
+    PTYPESYM * params2 = (PTYPESYM *) _alloca(cParams * sizeof(PTYPESYM));
+    for (unsigned int i = 0; i< cParams; i++) { 
+        params2[i] = SubstType(params[i], cClassTypeArgs, ppClassTypeArgs, cMethTypeArgs, ppMethTypeArgs);
+    }
+    return AllocParams(cParams, params2);
+}
+
+
+TYPESYM *SYMMGR::GetThisType(AGGSYM *root) 
+{
+    // GENERICS: this is a little slow, because we remake/refind it whenever
+    // needed, but it probably doesn't matter one jot, as it only
+    // kicks in on generic code, and the this type isn't needed
+    // so often.  We could allocate it when we process the class.
+    if (root->cTypeFormals) 
+		return GetInstAgg(root,root->cTypeFormals,(TYPESYM **) (root->ppTypeFormals));
+    else 
+        return root;
+    
+}
+
+
+// Returns true if the typ uses any CLASS type parameters.  METHOD type parameters are OK,
+// because this check is only used to rule out static methods with generic signatures.
+bool SYMMGR::UsesClassTypeFormals(TYPESYM *typ)
+{
+    switch (typ->kind) {
+    default:
+        ASSERT(0);
+        return false;
+    case SK_TYVARSYM:
+        return (typ->parent->kind == SK_AGGSYM);
+    case SK_NULLSYM:
+    case SK_VOIDSYM: 
+    case SK_AGGSYM:
+        return false;
+    case SK_PARAMMODSYM:
+        return UsesClassTypeFormals(typ->asPARAMMODSYM()->paramType());
+    case SK_ARRAYSYM: 
+        return UsesClassTypeFormals(typ->asARRAYSYM()->elementType());
+    case SK_PTRSYM: 
+        return UsesClassTypeFormals(typ->asPTRSYM()->baseType());
+    case SK_INSTAGGSYM: {
+        // inst. types, e.g. List<String> should have type params declared.
+        INSTAGGSYM *iagg = typ->asINSTAGGSYM();
+        for (unsigned int i = 0; i< iagg->cArgs; i++) { 
+            if (UsesClassTypeFormals(iagg->ppArgs[i])) return true;
+        }
+        return false;
+    }
+    case SK_PINNEDSYM: 
+        return UsesClassTypeFormals(typ->asPINNEDSYM()->baseType());
+    }
+}
+
+// Returns true if the typ uses any CLASS type parameters.  METHOD type parameters are OK,
+// because this check is only used to rule out static methods with generic signatures.
+bool SYMMGR::UsesMethodTypeFormals(TYPESYM *typ)
+{
+    switch (typ->kind) {
+    default:
+        ASSERT(0);
+        return false;
+    case SK_TYVARSYM:
+        return (typ->parent->kind != SK_AGGSYM);
+    case SK_NULLSYM:
+    case SK_VOIDSYM: 
+    case SK_AGGSYM:
+        return false;
+    case SK_PARAMMODSYM:
+        return UsesMethodTypeFormals(typ->asPARAMMODSYM()->paramType());
+    case SK_ARRAYSYM: 
+        return UsesMethodTypeFormals(typ->asARRAYSYM()->elementType());
+    case SK_PTRSYM: 
+        return UsesMethodTypeFormals(typ->asPTRSYM()->baseType());
+    case SK_INSTAGGSYM: {
+        // inst. types, e.g. List<String> should have type params declared.
+        INSTAGGSYM *iagg = typ->asINSTAGGSYM();
+        for (unsigned int i = 0; i< iagg->cArgs; i++) { 
+            if (UsesMethodTypeFormals(iagg->ppArgs[i])) return true;
+        }
+        return false;
+    }
+    case SK_PINNEDSYM: 
+        return UsesMethodTypeFormals(typ->asPINNEDSYM()->baseType());
+    }
+}
 
 /*
  * Add a sym to a symbol list. The memory for the list is allocated from
@@ -2891,10 +3474,12 @@ LPWSTR SYMMGR::GetFullName(PREDEFTYPE pt)
 
 /* 
  * Determine if a class/struct/interface or interface (base) is a base of 
- * another class/struct/interface (derived). Object is NOT considered
- * a base of an interface but is considered as base of a struct.
+ * another class/struct/interface (derived), considering only the
+ * head aggregate names. Object is NOT considered
+ * a base of an interface but is considered as base of a struct.  This
+ * is used for visibility rules only.
  */
-bool SYMMGR::IsBaseType(PAGGSYM derived, PAGGSYM base)
+bool SYMMGR::IsBaseAggregate(PAGGSYM derived, PAGGSYM base)
 {
     ASSERT(!derived->isEnum && !base->isEnum);
 
@@ -2910,11 +3495,11 @@ bool SYMMGR::IsBaseType(PAGGSYM derived, PAGGSYM base)
 
         while (derived) {
             FOREACHSYMLIST(derived->ifaceList, iface)
-                if (IsBaseType(iface->asAGGSYM(), base)) {
+                if (IsBaseAggregate(iface->asTYPESYM()->underlyingAggregate(), base)) {
                     return true;
                 }
             ENDFOREACHSYMLIST
-            derived = derived->baseClass;
+            derived = derived->baseClass->underlyingAggregate();
         }
 
         return false;
@@ -2925,7 +3510,57 @@ bool SYMMGR::IsBaseType(PAGGSYM derived, PAGGSYM base)
         // base is a class. Just go up the base class chain to look for it.
 
         while (derived->baseClass) {
-            derived = derived->baseClass;
+            derived = derived->baseClass->underlyingAggregate();
+            if (derived == base)
+                return true;
+        }
+
+        return false;
+    }
+}
+
+/* 
+ * Determine if a class/struct/interface or interface (base) is a base of 
+ * another class/struct/interface (derived). Object is NOT considered
+ * a base of an interface but is considered as base of a struct.  This operation
+ * takes into account "generic inheritance", e.g. class Foo<T> : Baz<List<T>>
+ */
+bool SYMMGR::IsBaseType(PTYPESYM derived, PTYPESYM base)
+{
+    
+    if (derived == base)
+        return true;      // identity.
+
+    // unbounded type variables...
+    if (!derived->underlyingAggregate() || !base->underlyingAggregate()) return false;
+
+    ASSERT(!derived->underlyingAggregate()->isEnum && !base->underlyingAggregate()->isEnum);
+
+    if (base->underlyingAggregate()->isSealed)
+        return false;     // structs and delegates and sealed classes are not bases of anything.
+
+    if (base->underlyingAggregate()->isInterface) {
+        // Search the direct and indirect interfaces recursively,
+        // going up the base chain..
+        //
+        while (derived) {
+            FOREACHSYMLIST(derived->underlyingAggregate()->ifaceList, iface)
+                if (IsBaseType(SubstTypeUsingType(iface->asTYPESYM(), derived), base)) { 
+                    return true;
+                }
+            ENDFOREACHSYMLIST
+            derived = SubstTypeUsingType(derived->underlyingAggregate()->baseClass, derived);
+        }
+
+        return false;
+    }
+    else {
+        ASSERT(base->underlyingAggregate()->isClass);
+
+        // base is a class. Just go up the base class chain to look for it.
+
+        while (derived->underlyingAggregate()->baseClass) {
+            derived = SubstTypeUsingType(derived->underlyingAggregate()->baseClass, derived);
             if (derived == base)
                 return true;
         }
@@ -2944,8 +3579,9 @@ bool SYMMGR::IsBaseType(PAGGSYM derived, PAGGSYM base)
  *  3) Allow us to associated a token with each signature for faster metadata emit.
  */
 
-PTYPESYM * SYMMGR::AllocParams(int cTypes, PTYPESYM * types, mdToken ** ppToken)
+PTYPESYM * SYMMGR::AllocParams(unsigned int cTypes, PTYPESYM * types, mdToken ** ppToken)
 {
+    if (!types) return NULL;
     unsigned ibucket;
     unsigned hash;
     PTYPEARRAY typeArray;
@@ -3113,7 +3749,8 @@ void SYMMGR::DumpChildren(PPARENTSYM sym, int indent)
         if (symChild->kind == SK_NSSYM || symChild->kind == SK_MEMBVARSYM ||
             symChild->kind == SK_METHSYM || symChild->kind == SK_PROPSYM ||
             symChild->kind == SK_AGGSYM || symChild->kind == SK_ERRORSYM ||
-            symChild->kind == SK_NSDECLSYM)
+            symChild->kind == SK_NSDECLSYM || 
+			symChild->kind == SK_TYVARSYM)
                 DumpSymbol(symChild, indent + 2);
     ENDFOREACHCHILD
 }
@@ -3176,6 +3813,9 @@ void SYMMGR::DumpConst(PTYPESYM type, CONSTVAL * constVal)
     case FT_REF:
         ASSERT(constVal->iVal == 0);
         printf("null");
+        break;
+    case FT_STRUCT:
+        printf("<struct>");
         break;
     default:
         ASSERT(0);
@@ -3295,6 +3935,42 @@ void SYMMGR::DumpSymbol(PSYM sym, int indent)
         printf("\n");
         break;
 
+    case SK_TYVARSYM:
+        PrintIndent(indent);
+        printf("%ls : ", sym->asVARSYM()->name->text);
+        DumpType(sym->asVARSYM()->type);
+        printf("\n");
+
+        break;
+
+    case SK_INSTAGGSYM:
+        PrintIndent(indent);
+        DumpType(sym->asINSTAGGSYM()->rootType());
+        printf("<...>\n");
+        
+        break;
+
+    case SK_INSTMETHSYM:
+        PrintIndent(indent);
+        DumpSymbol(sym->asINSTMETHSYM()->getUnderlyingMeth());
+        printf("{...}\n");
+        
+        break;
+    case SK_INSTAGGINSTMETHSYM:
+        PrintIndent(indent);
+        DumpSymbol(sym->asINSTAGGINSTMETHSYM()->getUnderlyingMeth());
+        printf("<>{...}\n");
+        
+        break;
+    case SK_INSTAGGMETHSYM:
+        PrintIndent(indent);
+        DumpSymbol(sym->asINSTAGGMETHSYM()->getMeth());
+        printf(", class instantiated at ");
+        DumpType(sym->asINSTAGGMETHSYM()->methodInType);
+        printf("\n");
+        
+        break;
+
     case SK_LOCVARSYM:
         PrintIndent(indent);
         DumpType(sym->asVARSYM()->type);
@@ -3313,12 +3989,15 @@ void SYMMGR::DumpSymbol(PSYM sym, int indent)
             printf("virtual ");
 
         if (sym->asMETHSYM()->isCtor) {
-            printf("%ls(", sym->asMETHSYM()->parent->name->text);
+            printf("%ls", sym->asMETHSYM()->parent->name->text);
         }
         else {
             DumpType(sym->asMETHSYM()->retType);
-            printf(" %ls(", sym->asMETHSYM()->name->text);
+            printf(" %ls", sym->asMETHSYM()->name->text);
         }
+        if (sym->asMETHSYM()->cTypeFormals)
+            printf("<...>");
+        printf("(");
 
         for (i = 0; i < sym->asMETHSYM()->cParams; ++i) {
             if (i != 0)
@@ -3483,6 +4162,22 @@ void SYMMGR::DumpType(PTYPESYM sym)
 
     case SK_NULLSYM:
         printf("null");
+        break;
+
+	case SK_TYVARSYM:
+        printf("{tyvar}");
+        break;
+
+    case SK_INSTAGGSYM:
+        printf("{inst-type}");
+        break;
+
+    case SK_INSTMETHSYM:
+        printf("{inst-meth}");
+        break;
+
+    case SK_INSTAGGINSTMETHSYM:
+        printf("{inst-ctxt-meth}");
         break;
 
     case SK_ERRORSYM:

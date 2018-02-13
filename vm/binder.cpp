@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -482,32 +487,54 @@ TypeHandle Binder::LookupType(BinderTypeID id, BOOL fLoad)
     _ASSERTE(id != TYPE__NIL);
     _ASSERTE(id <= m_cTypeHandles);
 
-    THROWSCOMPLUSEXCEPTION();
-
-    TypeHandle th;
-
     const TypeDescription *d = m_typeDescriptions + id - 1;
 
-    OBJECTREF pThrowable = NULL;
-    GCPROTECT_BEGIN(pThrowable);
+    TypeHandle th = m_pTypeHandles[id-1];
 
-    NameHandle nh(d->type, TypeHandle(GetClass(d->classID)), d->rank);
+    if (!th.IsNull())
+        return th;
+
     if (!fLoad)
-        nh.SetTokenNotToLoad(tdAllTypes);
-    th = m_pModule->GetClassLoader()->FindTypeHandle(&nh, &pThrowable);
-
-    GCPROTECT_END();
-
-    if (th.IsNull())
     {
-        if (fLoad)
-            COMPlusThrow(pThrowable);
-        return TypeHandle();
+
+        MethodTable *mt = LookupClass(d->classID, FALSE);
+
+        if (mt == NULL)
+            return TypeHandle();
+
+        NameHandle nh(d->type, TypeHandle(mt), d->rank);
+
+        nh.SetTokenNotToLoad(tdAllTypes);
+
+        th = m_pModule->GetClassLoader()->FindTypeHandle(&nh);
+
     }
+    else 
+    {
+        THROWSCOMPLUSEXCEPTION();
+
+        OBJECTREF pThrowable = NULL;
+        GCPROTECT_BEGIN(pThrowable);
+
+        NameHandle nh(d->type, TypeHandle(GetClass(d->classID)), d->rank);
+
+        th = m_pModule->GetClassLoader()->FindTypeHandle(&nh, &pThrowable);
+
+        if (th.IsNull())
+        {
+            COMPlusThrow(pThrowable);
+        }
+
+        GCPROTECT_END();
+
+    }
+    if (th.IsNull())
+        return TypeHandle();
 
     m_pTypeHandles[id-1] = th;
 
     return th;
+
 }
 
 BOOL Binder::IsException(MethodTable *pMT, RuntimeExceptionKind kind)
@@ -552,6 +579,13 @@ MethodTable *Binder::FetchElementType(CorElementType type)
     _ASSERTE(GetClassName(id) != NULL);
 
     return FetchClass(id);
+}
+
+MethodTable *Binder::LookupElementType(CorElementType type)
+{
+    BinderClassID id = (BinderClassID) (type + CLASS__MSCORLIB_COUNT + kLastException);
+
+    return LookupClass(id, FALSE);
 }
 
 

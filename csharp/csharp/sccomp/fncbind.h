@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -48,23 +53,60 @@ struct CHECKEDCONTEXT {
 // Used to string together methods in the pool of available methods...
 struct METHLIST {
     METHPROPSYM * sym;
+    // record all the information about the invocation, including the class type where the method is found and the 
+    // method type parameters - this makes things easier in later stages.
+    TYPESYM *methodInType; 
+    unsigned short cMethTypeArgs;
+    TYPESYM **ppMethTypeArgs;
+
     METHLIST * next;
     short position;
     bool relevant;
 
-    METHLIST () : sym(NULL), next(NULL), position (0){};
+    METHLIST () :
+      sym(NULL),
+      methodInType(NULL),
+      cMethTypeArgs(0),
+      ppMethTypeArgs(NULL),
+      next(NULL),
+      position (0)
+    {};
 };
 
 //////////////////////////////////////////////////////////////////////////////////////////////
+// Used to store state of an interation while searching the hierarchy of interfaces.
+// "syms" is a list of interfaces, "methodInType" indicates the type that governs this list.
+// For example:
+//    interface A<U>
+//    interface B<T> : A<Object>, A<T>
+//    interface C : B<Object>, B<String>
+//
+// will have the following sequence of stacks (where @ indicates "methodInType", { } the stack and [ ] an element on the stack)
+// 1. { [ B<Object>, B<String> ]@C }
+// 2  { [ A<Object>, A<T>]@B<Object>; 
+//      [ B<String> ]@C }
+// 3. { [ A<T>]@B<Object>; 
+//      [ B<String> ]@C }
+// 3. { [ B<String> ]@C }
+// 4. { [ A<Object>, A<T> ]@B<String> }
+// 5. { [ A<T>]@B<String> }
+// 6. { }
+//
+// And the iteration will return the sequence
+//  C; B<Object>, A<Object>, A<Object>, B<String>, A<Object>, A<String>
+//  
+// <REVIEW>Personally I think we should just search the flattened "allIfaceList" but the code wasn't written like that
+// when I got hold of it and I don't want to break it in case there is some subtlety I am missing.</REVIEW>
 
 struct SYMLISTSTACK {
+    TYPESYM *methodInType;
     SYMLIST * syms;
     SYMLISTSTACK * next;
 };
 
 //////////////////////////////////////////////////////////////////////////////////////////////
 
-#define LOOKUPMASK MASK_NSSYM | MASK_AGGSYM | MASK_MEMBVARSYM | MASK_LOCVARSYM | MASK_METHSYM | MASK_PROPSYM
+#define LOOKUPMASK MASK_NSSYM | MASK_AGGSYM | MASK_INSTAGGSYM | MASK_MEMBVARSYM |  MASK_TYVARSYM |MASK_LOCVARSYM | MASK_METHSYM | MASK_PROPSYM
 
 // Flags for bindImplicitConversion/bindExplicitConversion
 #define CONVERT_NOUDC 0x1   // Do not consider user defined conversions.
@@ -111,7 +153,7 @@ public:
     EXPR * bindAttribute(PARENTSYM *parent, ATTRNODE * attr, EXPR **namedArgs);
     EXPR * bindNamedAttributeValue(PARENTSYM *parent, ATTRNODE * attr);
 
-    EXPRCALL *bindAttribute(PARENTSYM * context, AGGSYM * attributeClass, ATTRNODE * attribute, EXPR ** namedArgs);
+    EXPRCALL *bindAttribute(PARENTSYM * context, TYPESYM * attributeClass, ATTRNODE * attribute, EXPR ** namedArgs);
     EXPR * bindSimplePredefinedAttribute(PARENTSYM * context, PREDEFTYPE pt);
     EXPR * bindSimplePredefinedAttribute(PARENTSYM * context, PREDEFTYPE pt, EXPR * arg);
     EXPR * bindStringPredefinedAttribute(PARENTSYM * context, PREDEFTYPE pt, LPCWSTR arg);
@@ -121,6 +163,8 @@ public:
     EXPR * bindSkipVerifyNamedArgs();
     EXPR * bindDebuggableArgs();
 
+    bool        canConvert(TYPESYM * src, TYPESYM * dest, BASENODE * tree, unsigned flags = 0);
+    bool        canCast(TYPESYM * src, TYPESYM * dest, BASENODE * tree, unsigned flags = 0);
     void realizeStringConcat(EXPRCONCAT * expr);
 private:
     // Persistent members:
@@ -202,7 +246,7 @@ private:
     TYPESYM * bindType(TYPENODE * tree);
     
     LOCVARSYM * lookupLocalVar(NAME * name, SCOPESYM *scope);
-    SYM * lookupClassMember(NAME* name, AGGSYM * pClass, bool bBaseCall, bool tryInaccessible, bool ignoreSpecialMethods, int forceMask = 0);
+    SYM * lookupClassMember(NAME* name, TYPESYM * pClass, bool bBaseCall, bool tryInaccessible, bool ignoreSpecialMethods, symbmask_t forceMask = 0, TYPESYM **methodInType = NULL);
 
     // Check the bogus flag and update as needed (the real implementation
     bool __fastcall checkBogus(SYM * sym, bool bNoError, bool * pbUndeclared);
@@ -220,29 +264,29 @@ private:
     void        newList(EXPR * newItem, EXPR *** list);
     EXPRERROR * newError(BASENODE * tree);
 
-    EXPR *      createConstructorCall(BASENODE *tree, AGGSYM *cls, EXPR * thisExpression, EXPR *arguments, bool isNew);
+    EXPR *      createConstructorCall(BASENODE *tree, TYPESYM *cls, EXPR * thisExpression, EXPR *arguments, bool isNew);
     bool        isMethPropCallable(METHPROPSYM * sym, bool requireUC);
-    METHPROPSYM *  verifyMethodCall(BASENODE * tree, METHPROPSYM * mp, EXPR * args, EXPR ** object, int flags, METHSYM * invoke = NULL);
-    static AGGSYM *    pickNextInterface(AGGSYM * current, SYMLISTSTACK ** stack, bool * hideByNameMethodFound, SYMLISTSTACK ** newStackSlot);
+    METHPROPSYM *  verifyMethodCall(BASENODE * tree, METHPROPSYM * mp, EXPR * args, EXPR ** object, int flags,  EXPR *call, METHSYM * invoke = NULL, TYPESYM *invokeMethodInType = NULL);
+    TYPESYM *    pickNextInterface(TYPESYM * current, SYMLISTSTACK ** stack, bool * hideByNameMethodFound, SYMLISTSTACK ** newStackSlot);
     static void  cleanupInterfaces(SYMLIST * precludedList);
-    METHPROPSYM *  remapToOverride(METHPROPSYM * mp, TYPESYM * object, int baseCallOverride);
-    METHPROPSYM *  findBestMethod(METHLIST * list, EXPR * args, PMETHPROPSYM * ambigMeth1, PMETHPROPSYM * ambigMeth2);
+    METHPROPSYM *  remapToOverride(METHPROPSYM * mp, TYPESYM * object, int baseCallOverride, TYPESYM *methodInType, TYPESYM **remapMethodInType);
+    METHPROPSYM *  findBestMethod(METHLIST * list, EXPR * args, PMETHPROPSYM * ambigMeth1, PMETHPROPSYM * ambigMeth2, TYPESYM **pMethodInType, unsigned short *pcMethTypeArgs, TYPESYM ***pppMethTypeArgs);
     void        verifyMethodArgs(EXPR * call);
     bool        __fastcall canConvertParam(TYPESYM * actual, int actualFlags, TYPESYM * formal);
-    int         whichMethodIsBetter(METHPROPSYM * method1, METHPROPSYM * method2, EXPR * args);
+    int         whichMethodIsBetter(METHLIST * method1, METHLIST * method2, EXPR * args);
     unsigned    findBestConversion(SYMLIST * list, bool fromParam, bool implicit);
     METHSYM *   findIntersection(SYMLIST * fromList, unsigned fromCount, SYMLIST * toList, unsigned toCount);
-    void        considerConversion(METHSYM * conversion, TYPESYM * desired, bool from, bool impl, bool * possibleWinner, bool * oldMethodsValid, SYMLIST ** newList, SYMLIST ** prevList, bool foundImplBefore);
+    void        considerConversion(METHSYM * conversion, TYPESYM *conversionMethodInType, TYPESYM * desired, bool from, bool impl, bool * possibleWinner, bool * oldMethodsValid, SYMLIST ** newList, SYMLIST ** prevList, bool foundImplBefore);
 
     void        createNewScope();
     void        closeScope();
     static int __cdecl compareSwitchLabels(const void *l1, const void *l2);
     void __fastcall checkReachable(BASENODE * tree);
-    void __fastcall checkStaticness(BASENODE * tree, SYM * member, EXPR ** object);
+    void __fastcall checkStaticness(BASENODE * tree, SYM * member, EXPR ** object, TYPESYM *methodInType);
     bool __fastcall objectIsLvalue(EXPR * object);
-    bool __fastcall hasCorrectType(SYM ** sym, int mask);
-    METHSYM *       findMethod(BASENODE * tree, PREDEFNAME pn, AGGSYM * cls, TYPESYM *** params = NULL, bool reportError = true);
-    METHSYM *       findStructDisposeMethod(AGGSYM * cls);
+    bool __fastcall hasCorrectType(SYM ** sym, symbmask_t mask);
+    METHSYM *       findMethod(BASENODE * tree, PREDEFNAME pn, TYPESYM * cls, TYPESYM *** params = NULL, bool reportError = true, TYPESYM **pMethodInType = NULL);
+    METHSYM *       findStructDisposeMethod(TYPESYM * cls, TYPESYM **methodInType);
 
     bool        isConstantInRange(EXPRCONSTANT * exprSrc, TYPESYM * typeDest);
     bool        isConstantInRangeBuggy(EXPRCONSTANT * exprSrc, TYPESYM * typeDest, bool explicitCast);
@@ -256,12 +300,10 @@ private:
                                        EXPR * * pexprDest, unsigned flags);
 
     bool        canConvert(EXPR * expr, TYPESYM * dest, BASENODE * tree, unsigned flags = 0);
-    bool        canConvert(TYPESYM * src, TYPESYM * dest, BASENODE * tree, unsigned flags = 0);
     EXPR *      mustConvert(EXPR * expr, TYPESYM * dest, BASENODE * tree, unsigned flags = 0);
     EXPR *      tryConvert(EXPR * expr, TYPESYM * dest, BASENODE * tree, unsigned flags = 0);
 
     bool        canCast(EXPR * expr, TYPESYM * dest, BASENODE * tree, unsigned flags = 0);
-    bool        canCast(TYPESYM * src, TYPESYM * dest, BASENODE * tree, unsigned flags = 0);
     EXPR *      mustCast(EXPR * expr, TYPESYM * dest, BASENODE * tree, unsigned flags = 0);
     EXPR *      tryCast(EXPR * expr, TYPESYM * dest, BASENODE * tree, unsigned flags = 0);
 
@@ -300,12 +342,12 @@ private:
     TYPESYM * chooseArrayIndexType(BASENODE * tree, EXPR * args);
     EXPR * bindBinop(BINOPNODE * tree, int bindFlags = BIND_RVALUEREQUIRED);
     EXPR * bindCall(BINOPNODE * tree, int bindFlags);
-    EXPR * bindDot(BINOPNODE * tree, int mask, int bindFlags = BIND_RVALUEREQUIRED);
+    EXPR * bindDot(BINOPNODE * tree, symbmask_t mask, int bindFlags = BIND_RVALUEREQUIRED);
     EXPR * bindEventAccess(BASENODE * tree, bool isAdd, EXPREVENT * exprEvent, EXPR * exprRHS);
-    EXPR * bindToField(BASENODE * tree, EXPR * object, MEMBVARSYM * field, int bindFlags = BIND_RVALUEREQUIRED);
-    EXPR * bindToProperty(BASENODE * tree, EXPR * object, PROPSYM * prop, int bindFlags = BIND_RVALUEREQUIRED, EXPR * args = NULL);
-    EXPR * bindToEvent(BASENODE * tree, EXPR * object, EVENTSYM * field, int bindFlags = BIND_RVALUEREQUIRED);
-    EXPR * bindName(NAMENODE * name, int mask = LOOKUPMASK, int bindFlags = BIND_RVALUEREQUIRED);
+    EXPR * bindToField(BASENODE * tree, EXPR * object, MEMBVARSYM * field, int bindFlags = BIND_RVALUEREQUIRED, TYPESYM *methodInType = NULL);
+    EXPR * bindToProperty(BASENODE * tree, EXPR * object, PROPSYM * prop, int bindFlags = BIND_RVALUEREQUIRED, EXPR * args = NULL, TYPESYM *methodInType = NULL);
+    EXPR * bindToEvent(BASENODE * tree, EXPR * object, EVENTSYM * field, int bindFlags = BIND_RVALUEREQUIRED, TYPESYM *methodInType = NULL);
+    EXPR * bindName(NAMENODE * name, symbmask_t mask = LOOKUPMASK, int bindFlags = BIND_RVALUEREQUIRED);
     bool   bindUnevaledConstantField(MEMBVARSYM * field);
     EXPR * bindUnop(UNOPNODE * tree, int bindFlags = BIND_RVALUEREQUIRED);
     EXPR * bindTypeOf(UNOPNODE * tree, BASENODE * type = NULL);
@@ -316,7 +358,7 @@ private:
     EXPR * bindUsingDecls(FORSTMTNODE * tree, EXPR * inits);
     EXPR * bindUsingDecls(FORSTMTNODE * tree, EXPR * first, EXPR * next);
     EXPR * bindVarDecl(VARDECLNODE * tree, TYPESYM * type, unsigned flags);
-    SYM  * lookupCachedName(NAMENODE * name, int mask);
+    SYM  * lookupCachedName(NAMENODE * name, symbmask_t mask);
     bool   storeInCache(BASENODE * tree, NAME * name, SYM * sym, bool checkForParent = false);
     EXPR * bindReturn(EXPRSTMTNODE * tree);
     EXPR * bindIf(IFSTMTNODE * tree, EXPR *** newLast);
@@ -340,7 +382,7 @@ private:
     EXPR * bindNew(NEWNODE * tree, bool stmtExprOnly);
     void   checkNegativeConstant(BASENODE * tree, EXPR * expr, int id);
     EXPR * bindArrayNew(ARRAYSYM * type, NEWNODE * tree);
-    EXPR * bindDelegateNew(AGGSYM * type, NEWNODE * tree);
+    EXPR * bindDelegateNew(TYPESYM * type, NEWNODE * tree);
     EXPR * bindSwitch(SWITCHSTMTNODE * tree, EXPR *** newLast);
     void initForHashtableSwitch(BASENODE * tree, EXPRSWITCH * expr);
     void initForNonHashtableSwitch(BASENODE * tree);
@@ -377,8 +419,8 @@ private:
     EXPANDEDPARAMSSYM * getParamsMethod(METHPROPSYM * meth, unsigned count);
     void noteReference(EXPR * op);
     EXPR * bindAttributeValue(PARENTSYM * parent, BASENODE * tree);
-    EXPR * bindNamedAttributeValue(PARENTSYM * parent, AGGSYM *attributeClass, ATTRNODE * tree);
-    EXPR * bindAttrArgs(PARENTSYM * parent, AGGSYM *attributeClass, ATTRNODE * tree, EXPR **namedArgs);
+    EXPR * bindNamedAttributeValue(PARENTSYM * parent, TYPESYM *attributeType, ATTRNODE * tree);
+    EXPR * bindAttrArgs(PARENTSYM * parent, TYPESYM *attributeType, ATTRNODE * tree, EXPR **namedArgs);
     bool verifyAttributeArg(EXPR *arg, unsigned &totalSize);
     BYTE * addAttributeArg(EXPR *arg, BYTE* buffer, BYTE* bufferEnd);
     EXPR * bindMakeRefAny(BASENODE * tree, EXPR * op);
@@ -396,7 +438,7 @@ private:
     EXPR * bindBooleanValue(BASENODE * tree, EXPR * op = NULL);
     void maybeSetOwnerOffset(LOCVARSYM * local);
 
-    EXPR * errorBadSK(BASENODE * tree, SYM * sym, int mask);
+    EXPR * errorBadSK(BASENODE * tree, SYM * sym, symbmask_t mask);
     void errorSymName(BASENODE * tree, int id, SYM * sym, NAME * name);
     void errorNameSym(BASENODE * tree, int id, NAME * nameS, SYM * sym);
     void errorSymNameName(BASENODE * tree, int id, SYM * sym, NAME * name1, NAME * name2);
@@ -420,6 +462,7 @@ private:
     CError *make_errorN(BASENODE * tree, int id);
     void warningN(BASENODE * tree, int id);
     void errorInt(BASENODE * tree, int id, int n);
+	void errorIntStr(BASENODE * tree, int id, int n, LPCWSTR str);
     void warningSymName(BASENODE * tree, int id, SYM * sym, NAME * name);
     void warningSymNameName(BASENODE * tree, int id, SYM * sym, NAME * name1, NAME * name2);
     void warningSym(BASENODE * tree, int id, SYM * sym);

@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -255,8 +260,10 @@
 #define TLBX_I_DUPLICATE_DISPID         SMAKEHR(0x117A) // Typelib export: duplicate dispid -- auto corrected.
 #define TLBX_E_BAD_NAMES                EMAKEHR(0x117B) // Typelib export: bad names list.
 #define TLBX_I_REF_TYPE_AS_STRUCT       SMAKEHR(0x117C) // Typelib export: referenct tyep had layout, exported as struct.
-                    
-                    
+#define TLBX_E_GENERICINST_SIGNATURE    EMAKEHR(0x117D) // TypeLib export: generic type instance in signature.
+#define TLBX_E_GENERICPAR_SIGNATURE     EMAKEHR(0x117E) // TypeLib export: generic type parameter in signature.
+#define TLBX_I_GENERIC_TYPE             SMAKEHR(0x117F) // TypeLib export: generic type definition
+
 #define META_E_CA_INVALID_TARGET        EMAKEHR(0x11C0) // Known custom attribute on invalid target.
 #define META_E_CA_INVALID_VALUE         EMAKEHR(0x11C1) // Known custom attribute had invalid value.
 #define META_E_CA_INVALID_BLOB          EMAKEHR(0x11C2) // Known custom attribute blob is bad format.
@@ -276,6 +283,7 @@
 #define META_E_CA_FIXEDSTR_SIZE_REQUIRED EMAKEHR(0x11D0) // A fixed string requires a size.
 #define META_E_CA_CUSTMARSH_TYPE_REQUIRED EMAKEHR(0x11D1) // A custom marshaler requires the custom marshaler type.
 #define META_E_CA_FILENAME_REQUIRED     EMAKEHR(0x11d2) // A DllImport attribute requires a filename.
+
 
 // Return values from validator functions.
 #define VLDTR_S_WRN                     SMAKEHR(0x1200) // Warnings found in the validator.

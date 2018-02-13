@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -78,16 +83,20 @@ class NameHandle
     friend class ClassLoader;
     friend class EETypeHashTable;
 
-    // Three discriminable possibilities:
+    // Four discriminable possibilities:
     // (1) class name (if m_WhichTable != nhConstructed)
     //     Key1 : pointer to namespace (LPCUTF8, possibly null?)
     //     Key2 : pointer to name (LPCUTF8)
     // (2) array type (if m_WhichTable = nhConstructed): 
-    //     Key1 : rank << 16 | kind     for kind = ELEMENT_TYPE_{ARRAY,SZARRAY,GENERICARRAY}
+    //     Key1 : rank << 16 | kind << 1     for kind = ELEMENT_TYPE_{ARRAY,SZARRAY)
     //     Key2 : element type handle
     // (3) byref/pointer type (if m_WhichTable = nhConstructed)
-    //     Key1 : kind                  for kind = ELEMENT_TYPE_BYREF or ELEMENT_TYPE_PTR
+    //     Key1 : kind << 1                  for kind = ELEMENT_TYPE_BYREF or ELEMENT_TYPE_PTR
     //     Key2 : element type handle   
+    // (4) instantiated type (if m_WhichTable = nhConstructed)
+    //     Key1 : type handle for generic type | 1
+    //     Key2 : pointer to instantiation 
+    //     (IMPORTANT: when *inserting* into EETypeHashTable, the inst persists so must be heap-allocated)
     INT_PTR Key1;
     INT_PTR Key2;
 
@@ -126,7 +135,7 @@ public:
     {}
 
     NameHandle(DWORD kind, TypeHandle elemType, DWORD rank = 0) :
-        Key1(kind | rank << 16),
+        Key1(kind<< 1 | rank << 16),
         Key2((INT_PTR) elemType.AsPtr()),
         m_pTypeScope(NULL),
         m_mdType(mdTokenNil),
@@ -135,6 +144,20 @@ public:
         m_fDontRestore(FALSE),
         m_pBucket(NULL)
     {}
+
+    NameHandle(TypeHandle genericType, TypeHandle* inst) :      
+        Key1((INT_PTR) genericType.AsPtr() | 1),
+        Key2((INT_PTR) inst),
+        m_pTypeScope(NULL),
+        m_mdType(mdTokenNil),
+        m_mdTokenNotToLoad(tdNoTypes),
+        m_WhichTable(nhConstructed),
+        m_fDontRestore(FALSE),
+        m_pBucket(NULL)
+    {
+      _ASSERTE(!genericType.IsNull());
+      _ASSERTE(genericType.GetNumGenericArgs() != 0);
+    }
 
     NameHandle(Module* pModule, mdToken token) :
         Key1(NULL),
@@ -159,6 +182,8 @@ public:
         m_pBucket = p.m_pBucket;
     }
 
+    int operator==(const NameHandle& n) const;
+
     void SetName(LPCUTF8 pName)
     {
         _ASSERTE(!IsConstructed());
@@ -172,13 +197,13 @@ public:
         Key2 = (INT_PTR) pName;
     }
 
-    LPCUTF8 GetName()
+    LPCUTF8 GetName() const
     {
         _ASSERTE(!IsConstructed());
         return (LPCUTF8) Key2;
     }
 
-    LPCUTF8 GetNameSpace()
+    LPCUTF8 GetNameSpace() const
     {
         _ASSERTE(!IsConstructed());
         return (LPCUTF8) Key1;
@@ -186,22 +211,47 @@ public:
 
     unsigned GetFullName(char* buff, unsigned buffLen);
 
-    DWORD GetRank()
+    DWORD GetRank() const
     {
-        _ASSERTE(IsConstructed());
+        _ASSERTE(IsConstructed() && GetKind() != ELEMENT_TYPE_WITH);
         return (DWORD)(Key1 >> 16);
     }
 
-    CorElementType GetKind()
+    CorElementType GetKind() const
     {
-        if (IsConstructed()) return (CorElementType) (Key1 & 0xffff);
-        else return ELEMENT_TYPE_CLASS;
+        if (IsConstructed()) 
+	{
+          if ((Key1 & 1) != 0) 
+            return ELEMENT_TYPE_WITH;
+          else
+            return (CorElementType) ((Key1 & 0xffff) >> 1);
+        }
+        else 
+          return ELEMENT_TYPE_CLASS;
     }
 
-    TypeHandle GetElementType()
+    TypeHandle GetElementType() const
     {
-        _ASSERTE(IsConstructed());
+        _ASSERTE(IsConstructed() && GetKind() != ELEMENT_TYPE_WITH);
         return TypeHandle((void*) Key2);
+    }
+
+    TypeHandle* GetInstantiation() const
+    {
+        _ASSERTE(GetKind() == ELEMENT_TYPE_WITH);
+        return (TypeHandle*) Key2;
+    }
+
+    TypeHandle GetGenericTypeDefinition() const
+    {
+        _ASSERTE(GetKind() == ELEMENT_TYPE_WITH);
+        return TypeHandle((void*) (Key1 & ~1));
+    }
+
+    void SetInstantiation(TypeHandle* inst)
+    {
+        _ASSERTE(GetKind() == ELEMENT_TYPE_WITH);
+        Key2 = (INT_PTR) inst;
     }
 
     void SetTypeToken(Module* pModule, mdToken mdToken)
@@ -210,12 +260,12 @@ public:
         m_mdType = mdToken;
     }
 
-    Module* GetTypeModule()
+    Module* GetTypeModule() const
     {
         return m_pTypeScope;
     }
 
-    mdToken GetTypeToken()
+    mdToken GetTypeToken() const
     {
         return m_mdType;
     }
@@ -225,7 +275,7 @@ public:
         m_mdTokenNotToLoad = mdtok;
     }
     
-    mdToken GetTokenNotToLoad()
+    mdToken GetTokenNotToLoad() const
     {
         return m_mdTokenNotToLoad;
     }
@@ -240,7 +290,7 @@ public:
         m_WhichTable = nhCaseSensitive;
     }
 
-    NameHandleTable GetTable()
+    NameHandleTable GetTable() const
     {
         return m_WhichTable;
     }
@@ -250,12 +300,12 @@ public:
         m_fDontRestore = !value;
     }
 
-    BOOL GetRestore()
+    BOOL GetRestore() const
     {
         return !m_fDontRestore;
     }
 
-    BOOL IsConstructed()
+    BOOL IsConstructed() const
     {
         return (m_WhichTable == nhConstructed);
     }
@@ -271,11 +321,19 @@ public:
         return m_pBucket;
     }
 
+
 #ifdef _DEBUG
     void Validate()
     {
-      if (!IsConstructed())
-    {
+      if (IsConstructed())
+	{
+          _ASSERTE(GetKind() == ELEMENT_TYPE_WITH || GetKind() == ELEMENT_TYPE_ARRAY || 
+                   GetKind() == ELEMENT_TYPE_SZARRAY || 
+                   GetKind() == ELEMENT_TYPE_BYREF || GetKind() == ELEMENT_TYPE_PTR);
+          _ASSERTE(Key2 != 0 || GetKind() == ELEMENT_TYPE_WITH);
+        }
+      else
+	{
           _ASSERTE(GetName());
           _ASSERTE(ns::IsValidName(GetName()));
         }
@@ -284,7 +342,16 @@ public:
 
 };
 
+class Pending
+{
+public:
+  NameHandle* m_pHandle;
+  Pending* m_pNext;
+  TypeHandle m_Type;
 
+  Pending(NameHandle* handle, TypeHandle type, Pending *next) 
+    { m_pHandle = handle; m_pNext = next; m_Type = type; }
+};
 
         
 // **  NOTE  **  NOTE  **  NOTE  **  NOTE  **  NOTE  **  NOTE  **  NOTE  **  NOTE
@@ -336,10 +403,14 @@ private:
     // m_pAvailableClasses.
     EEClassHashTable * m_pAvailableClassesCaseIns;
 
+    // Hashtable of constructed types
     EETypeHashTable   *m_pAvailableParamTypes;
 
     // Protects addition of elements to m_pAvailableClasses
     CRITICAL_SECTION    m_AvailableClassLock;
+
+    // Protects addition of new chunks to m_pChunks in EEClass (was E&C; but now is instantiated method descs)
+    CRITICAL_SECTION    m_ChunksLock;
 
 
     // Have we created all of the critical sections yet?
@@ -440,37 +511,43 @@ public:
     void UnlinkClasses(AppDomain *pDomain);
     
     // Look up a class given a type token (TypeDef, TypeRef, TypeSpec), and a module 
+    // The instantiations are applied to class and method type variables in a typespec
     TypeHandle LoadTypeHandle(NameHandle* pName, 
                               OBJECTREF *pThrowable=NULL,
-                              BOOL dontLoadInMemoryType=TRUE);
+                              TypeHandle *classInst = NULL,
+                              TypeHandle *methodInst = NULL,
+			      Pending *pending = NULL);
     
     // Look up a class by name
     // It's okay to give NULL for pModule and a nil token for cl if it's
     //   guaranteed that this is not a nested type.  Otherwise, cl can be a
     //   TypeDef or TypeRef, and pModule must be the Module that token applies to
     TypeHandle FindTypeHandle(NameHandle* pName,
-                              OBJECTREF *pThrowable=NULL);
-
+                              OBJECTREF *pThrowable=NULL,
+			      Pending *pending=NULL);
 
     // Look up a class given just a name, and optionally a Module.  
     TypeHandle FindTypeHandle(LPCUTF8 pszClassName, 
-                              OBJECTREF *pThrowable=NULL) 
+                              OBJECTREF *pThrowable=NULL,
+			      Pending *pending=NULL) 
     {
         NameHandle typeName(pszClassName);
-        return FindTypeHandle(&typeName, pThrowable);
+        return FindTypeHandle(&typeName, pThrowable, pending);
     }
-
 
     EEClass* LoadClass(LPCUTF8 pszClassName, 
                        OBJECTREF *pThrowable=NULL) 
     {
-        return FindTypeHandle(pszClassName, pThrowable).GetClass();
+        return FindTypeHandle(pszClassName, pThrowable, NULL).GetClass();
     }
 
 
-    // Find the array with kind 'arrayKind' (either ARRAY, SZARRAY, GENERICARRAY)
+    // Find the array with kind 'arrayKind' (either ARRAY, SZARRAY)
     // and 'rank' for 'elemType'.  
-    TypeHandle FindArrayForElem(TypeHandle elemType, CorElementType arrayKind, unsigned rank=0, OBJECTREF *pThrowable=NULL);
+
+    // If dontLoadTypes is set then the type handle is not created if it is not
+    // already present in the tables. 
+    TypeHandle FindArrayForElem(TypeHandle elemType, CorElementType arrayKind, unsigned rank=0, OBJECTREF *pThrowable=NULL, BOOL dontLoadTypes=FALSE);
 
     // Looks up class in the local module table, if it is there it succeeds, 
     // Otherwise it fails, This is meant only for optimizations etc
@@ -490,9 +567,38 @@ public:
                                IMDInternalImport* pAsmImport,
                                mdToken mdImpl);
 
+    // Instantiate a generic type definition
+    // If genericTy is not a generic type or is already instantiated then throw an exception
+    // If its arity does not match ntypars then throw an exception
+    // The pointer to the instantiation is not persisted e.g. the type parameters can be stack-allocated.
+    // If dontLoadTypes is set then the type handle is not created if it is not
+    // already present in the tables. 
+    static TypeHandle LoadGenericInstanceThrowing(TypeHandle genericTy, TypeHandle* inst, DWORD ntypars, 
+                                                  Pending *pending=NULL, BOOL dontLoadTypes=FALSE);
+
+    // OBSOLETE - Use LoadGenericInstanceThrowing()
+    static TypeHandle LoadGenericInstantiation(TypeHandle genericTy, TypeHandle* inst, DWORD ntypars, OBJECTREF *pThrowable=NULL,
+                                          Pending *pending=NULL, BOOL dontLoadTypes=FALSE);
+
+
+    // If dontLoadTypes is set then the type handle is not created if it is not
+    // already present in the relevant tables. The Null TypeHandle is returned instead.
+    // This ensures no allocations (and thus no exceptions).
+    static TypeHandle GetPointerOrByrefType(CorElementType typ, TypeHandle baseType, OBJECTREF *pThrowable = NULL, BOOL dontLoadTypes=FALSE);
+    static TypeHandle GetFnptrType(TypeHandle* inst, DWORD ntypars, OBJECTREF *pThrowable = NULL, BOOL dontLoadTypes=FALSE);
+    static TypeHandle GetArrayType(CorElementType typ, TypeHandle elemType, unsigned rank, OBJECTREF *pThrowable = NULL, BOOL dontLoadTypes=FALSE);
+
     static BOOL GetFullyQualifiedNameOfClassRef(Module *pModule, mdTypeRef cr, LPUTF8 pszFQName);
-    static BOOL CanCastToClassOrInterface(OBJECTREF pRef, EEClass *pTemplate);
-    static BOOL StaticCanCastToClassOrInterface(EEClass *pClass, EEClass *pTemplate);
+
+    // Can the objectref be cast to the type represented by pMT?
+    // pMT cannot represent an array class, pRef can be an array
+    // pMT can represent an instantiated type
+    static BOOL CanCastToClassOrInterface(OBJECTREF pRef, MethodTable *pMT);
+
+    // Can the type represented by pSourceMT be cast to pTargetMT?
+    // pSourceMT and pTargetMT cannot be array types but can be instantiated types
+    static BOOL StaticCanCastToClassOrInterface(MethodTable *pSourceMT, MethodTable *pTargetMT);
+
     static HRESULT CanCastTo(Module *pModule, OBJECTREF pRef, mdTypeRef cr);
     static HRESULT CanCastTo(OBJECTREF pRef, TypeHandle clsHnd);
     static void TranslateBrokenClassRefName(LPUTF8 pszFQName);
@@ -538,12 +644,14 @@ public:
                                  mdExportedType mdCurrent,
                                  IMDInternalImport *pTDImport,
                                  mdTypeDef *mtd);
+
 protected:
 
     // Loads a class. This is the inner call from the multi-threaded load. This load must
     // be protected in some manner.
-    HRESULT LoadTypeHandleFromToken(Module *pModule, mdTypeDef cl, EEClass** ppClass, OBJECTREF *pThrowable);
-
+    // If we're attempting to load a fresh instantiated type then genericType and typars should be filled in
+    HRESULT LoadTypeHandleFromToken(Module *pModule, mdTypeDef cl, EEClass** ppClass, OBJECTREF *pThrowable, 
+      Pending *pending=NULL, TypeHandle genericType = TypeHandle(), TypeHandle* typars = NULL);
 
 private:
     BOOL IsNested(NameHandle* pName, mdToken *mdEncloser);
@@ -562,21 +670,32 @@ private:
     //Does not call other 'magic' lookup places.  You usually want to call
     //FindTypeHandle instead. 
     TypeHandle LookupTypeHandle(NameHandle* pName,
-                                OBJECTREF *pThrowable = NULL);
+                                OBJECTREF *pThrowable,
+				Pending *pending);
 
     // Maps the specified interface to the current domain.
     BOOL MapInterfaceToCurrDomain(TypeHandle InterfaceType, OBJECTREF *pThrowable);
 
-    // Locates a token, the token must be a typedef and GC should be enabled.
+    // The token must be a type def.  GC must be enabled.
+    // If we're attempting to load a fresh instantiated type then genericType and typars should be filled in
     TypeHandle LoadTypeHandle(Module *pModule, mdTypeDef cl, OBJECTREF *pThrowable=NULL,
-                              BOOL dontRestoreType=FALSE);
+			      Pending *pending=NULL, BOOL dontRestoreType=FALSE, 
+			      TypeHandle genericType=TypeHandle(), TypeHandle *typars=NULL);
+
+    // Used for initial loading of parent class and implemented interfaces
+    // When tok represents an instantiated type and approxInst=FALSE, just return the generic type and fill in formalInst with the instantiation
+    // If approxInst=TRUE then return an *approximate* instantiated type (where reference type parameters are replaced by Object)
+    TypeHandle LoadRawType(IMDInternalImport *pInternalImport, Module *pModule, mdToken tok, OBJECTREF *pThrowable, PCCOR_SIGNATURE *formalInst,
+      TypeHandle *typars, BOOL approxInst);
 
     // Locates the parent of a token. The token must be a typedef.
     HRESULT LoadParent(IMDInternalImport *pInternalImport, 
                        Module *pModule, 
                        mdToken cl, 
-                       EEClass** ppClass, 
-                       OBJECTREF *pThrowable=NULL);
+                       MethodTable** ppParentMethodTable, 
+                       PCCOR_SIGNATURE* pParentInst,
+		       TypeHandle *typars,
+                       OBJECTREF *pThrowable);
 
     // Locates the enclosing class of a token if any. The token must be a typedef.
     HRESULT GetEnclosingClass(IMDInternalImport *pInternalImport, 
@@ -587,7 +706,8 @@ private:
 
 
     TypeHandle FindParameterizedType(NameHandle* pName,
-                                     OBJECTREF *pThrowable);
+                                     OBJECTREF *pThrowable,
+                                     Pending *pending);
 
     // Creates a new Method table for an array.  Used to make type handles 
     // Note that if kind == SZARRAY or ARRAY, we get passed the GENERIC_ARRAY
@@ -599,8 +719,7 @@ private:
     MethodTable* CreateGenericArrayMethodTable(TypeHandle elemType);
     
     // Generate a short sig for an array accessor
-    BOOL GenerateArrayAccessorCallSig(TypeHandle elemTypeHnd, 
-                                      DWORD   dwRank,
+    BOOL GenerateArrayAccessorCallSig(DWORD   dwRank,
                                       DWORD   dwFuncType, // Load, store, or <init>
                                       Module* pModule,    // Where the sig gets created
                                       PCCOR_SIGNATURE *ppSig, // Generated signature
@@ -610,6 +729,8 @@ private:
     // Insert the class in the classes hash table and if needed in the case insensitive one
     EEClassHashEntry_t *InsertValue(LPCUTF8 pszNamespace, LPCUTF8 pszClassName, HashDatum Data, EEClassHashEntry_t *pEncloser);
 
+  // Create a *new* instantiation of a generic type
+  TypeHandle NewInstantiation(TypeHandle genericType, TypeHandle *inst, Pending *pending);
 };
 
 //-------------------------------------------------------------------------

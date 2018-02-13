@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -117,23 +122,31 @@ public:
 
     virtual MethodDesc *LookupMethodDescFromToken(Module* pModule,
                                                    mdMemberRef memberRef) = 0;
-    virtual EEClass *FindLoadedClass(Module *pModule,
-                                     mdTypeDef classToken) = 0;
 
-    // This will lookup a class, and if it's not loaded, will load and run
-    // the class init.
+
+    // These will lookup a type, and if it's not loaded, return the null TypeHandle
+    virtual EEClass *FindLoadedClass(Module *pModule,mdTypeDef classToken) = 0;
+    virtual TypeHandle FindLoadedElementType(CorElementType et) = 0;
+    virtual TypeHandle FindLoadedInstantiation(TypeHandle pTyCon, TypeHandle *inst, DWORD ntypars) = 0;
+    virtual TypeHandle FindLoadedFnptrType(TypeHandle *inst, DWORD ntypars) = 0;
+    virtual TypeHandle FindLoadedPointerOrByrefType(CorElementType et, TypeHandle elemtype) = 0;
+    virtual TypeHandle FindLoadedArrayType(CorElementType et, TypeHandle elemtype, unsigned rank) = 0;
+
+    // These will lookup a type, and if it's not loaded, will load and run
+    // the class init etc.
     virtual EEClass *LoadClass(Module *pModule, mdTypeDef classToken) = 0;
+    virtual TypeHandle LoadElementType(CorElementType et) = 0;
+    virtual TypeHandle LoadInstantiation(TypeHandle pTyCon, TypeHandle *inst, DWORD ntypars) = 0;
+    virtual TypeHandle LoadFnptrType(TypeHandle *inst, DWORD ntypars) = 0;
+    virtual TypeHandle LoadPointerOrByrefType(CorElementType et, TypeHandle elemtype) = 0;
+    virtual TypeHandle LoadArrayType(CorElementType et, TypeHandle elemtype, unsigned rank) = 0;
+
 
     virtual HRESULT GetMethodImplProps(Module *pModule, mdToken tk,
                                        DWORD *pRVA, DWORD *pImplFlags) = 0;
     virtual HRESULT GetParentToken(Module *pModule, mdToken tk,
                                    mdToken *pParentToken) = 0;
 
-    virtual HRESULT ResolveSigToken(Module *pModule, mdSignature sigTk, 
-                                    PCCOR_SIGNATURE *ppSig) = 0;
-
-    virtual MethodDesc *GetNonvirtualMethod(Module *module, 
-                                              mdToken token) = 0;   
     virtual MethodDesc *GetVirtualMethod(Module *module,    
                                          Object *object, mdToken token) = 0;    
 
@@ -143,10 +156,6 @@ public:
     virtual void DisablePreemptiveGC() = 0; 
     virtual void EnablePreemptiveGC() = 0;  
 
-    virtual void FieldDescGetSig(FieldDesc *fd,
-                                 PCCOR_SIGNATURE *ppSig,
-                                 DWORD *pcSig) = 0;
-    
     virtual DWORD MethodDescIsStatic(MethodDesc *pFD) = 0;
     
     virtual Module *MethodDescGetModule(MethodDesc *pFD) = 0;

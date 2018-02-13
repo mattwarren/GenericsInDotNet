@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -552,7 +557,7 @@ HRESULT CordbModule::GetFunctionFromRVA(CORDB_ADDRESS rva,
     return E_NOTIMPL;
 }
 
-HRESULT CordbModule::LookupClassByToken(mdTypeDef token,
+HRESULT CordbModule::LookupClassByToken(mdTypeDef token, 
                                         CordbClass **ppClass)
 {
     *ppClass = NULL;
@@ -581,7 +586,7 @@ HRESULT CordbModule::LookupClassByToken(mdTypeDef token,
             return (res);
         }
     }
-    
+
     *ppClass = c;
 
     return S_OK;
@@ -620,7 +625,7 @@ HRESULT CordbModule::LookupClassByName(LPWSTR fullClassName,
     return LookupClassByToken(token, ppClass);
 }
 
-HRESULT CordbModule::GetClassFromToken(mdTypeDef token,
+HRESULT CordbModule::GetClassFromToken(mdTypeDef token, 
                                        ICorDebugClass **ppClass)
 {
     CordbClass *c;
@@ -776,6 +781,20 @@ HRESULT CordbModule::CreateFunction(mdMethodDef funcMetadataToken,
 }
 
 
+
+HRESULT CordbModule::LookupOrCreateClass(mdTypeDef classMetadataToken,CordbClass** ppClass)
+{
+    HRESULT hr = S_OK;
+    *ppClass = LookupClass(classMetadataToken);
+    if (*ppClass == NULL)
+    {
+        hr = CreateClass(classMetadataToken,ppClass);
+        if (!SUCCEEDED(hr))
+            return hr;
+    }
+    return hr;
+}
+
 //
 // LookupClass finds an existing CordbClass in the given module.
 // If the class doesn't exist, it returns NULL.
@@ -865,6 +884,24 @@ HRESULT CordbModule::ResolveTypeRef(mdTypeRef token,
     return GetAppDomain()->ResolveClassByName(pName, ppClass);
 }
 
+HRESULT CordbModule::ResolveTypeRefOrDef(mdToken token,
+                                    CordbClass **ppClass)
+{
+    
+    if ((token == mdTypeRefNil) || 
+		(TypeFromToken(token) != mdtTypeRef && TypeFromToken(token) != mdtTypeDef))
+        return E_INVALIDARG;
+    
+	if (TypeFromToken(token)==mdtTypeRef)
+	{
+		return ( ResolveTypeRef(token, ppClass) );
+	}
+	else
+	{
+		return ( LookupClassByToken(token, ppClass) );
+	}
+
+}
 
 //
 // Copy the metadata from the in-memory cached copy to the output stream given.
@@ -932,18 +969,21 @@ CordbClass::CordbClass(CordbModule *m, mdTypeDef classMetadataToken)
   : CordbBase(classMetadataToken, enumCordbClass),
     m_loadEventSent(FALSE),
     m_hasBeenUnloaded(false),
+    m_classtypes(2),
     m_module(m),
+    m_token(classMetadataToken),
+    m_typarCount(0),
     m_EnCCounterLastSyncClass(0),
     m_continueCounterLastSync(0),
     m_isValueClass(false),
-    m_objectSize(0),
     m_instanceVarCount(0),
     m_staticVarCount(0),
     m_staticVarBase(NULL),
     m_fields(NULL),
-    m_thisSigSize(0)
+    m_objectSize(0)  
 {
 }
+
 
 /*
     A list of which resources owned by this object are accounted for.
@@ -966,10 +1006,17 @@ void CordbClass::Neuter()
 {
     AddRef();
     {   
+		// GENERICS: Constructed types include pointers across to other types - reduce
+		// the reference counts on these....
+        NeuterAndClearHashtable(&m_classtypes);
         CordbBase::Neuter();
     }
     Release();
 }    
+
+
+
+
 
 HRESULT CordbClass::QueryInterface(REFIID id, void **pInterface)
 {
@@ -1004,9 +1051,6 @@ HRESULT CordbClass::GetStaticFieldValue(mdFieldDef fieldDef,
     HRESULT          hr = S_OK;
     *ppValue = NULL;
     BOOL             fSyncBlockField = FALSE;
-    ULONG            cbSigBlobNoMod;
-    PCCOR_SIGNATURE  pvSigBlobNoMod;
-    ULONG            cb;
 
     // Used below for faking out CreateValueByType
     static CorElementType elementTypeClass = ELEMENT_TYPE_CLASS;
@@ -1116,33 +1160,29 @@ HRESULT CordbClass::GetStaticFieldValue(mdFieldDef fieldDef,
         }
     }
 
-    ULONG cbSigBlob;
-    PCCOR_SIGNATURE pvSigBlob;
+  {
+    CordbType *type;
+	hr = CordbType::SigToType(GetModule(), pFieldData->fldFullSig, Instantiation(), &type);
+	if (FAILED(hr))
+		goto LExit;
 
-    cbSigBlob = cbSigBlobNoMod = pFieldData->fldFullSigSize;
-    pvSigBlob = pvSigBlobNoMod = pFieldData->fldFullSig;
+    type = type->SkipFunkyModifiers();
 
-    // If we've got some funky modifier, then remove it.
-    cb =_skipFunkyModifiersInSignature(pvSigBlobNoMod);
-
-    if( cb != 0)
-    {
-        cbSigBlobNoMod -= cb;
-        pvSigBlobNoMod = &pvSigBlobNoMod[cb];
-    }
+	CorElementType et = type->m_elementType;
 
     // If this is a static that is non-primitive, then we have to do an extra level of indirection.
     if (!pFieldData->fldIsTLS &&
         !pFieldData->fldIsContextStatic &&
         !fSyncBlockField &&               // EnC-added fields don't need the extra de-ref.
         !pFieldData->fldIsPrimitive &&    // Classes that are really primitives don't need the extra de-ref.
-        ((pvSigBlobNoMod[0] == ELEMENT_TYPE_CLASS)    || 
-         (pvSigBlobNoMod[0] == ELEMENT_TYPE_OBJECT)   ||
-         (pvSigBlobNoMod[0] == ELEMENT_TYPE_SZARRAY)  || 
-         (pvSigBlobNoMod[0] == ELEMENT_TYPE_ARRAY)    ||
-         (pvSigBlobNoMod[0] == ELEMENT_TYPE_STRING)   ||
-         (pvSigBlobNoMod[0] == ELEMENT_TYPE_VALUETYPE && !pFieldData->fldIsRVA)))
+        ((et == ELEMENT_TYPE_CLASS)    || 
+         (et == ELEMENT_TYPE_OBJECT)   ||
+         (et == ELEMENT_TYPE_SZARRAY)  || 
+         (et == ELEMENT_TYPE_ARRAY)    ||
+         (et == ELEMENT_TYPE_STRING)   ||
+         (et == ELEMENT_TYPE_VALUETYPE && !pFieldData->fldIsRVA)))
     {
+
         REMOTE_PTR pRealRmtStaticValue = NULL;
         
         BOOL succ = ReadProcessMemoryI(GetProcess()->m_handle,
@@ -1169,21 +1209,20 @@ HRESULT CordbClass::GetStaticFieldValue(mdFieldDef fieldDef,
     // Static value classes are stored as handles so that GC can deal with them properly.  Thus, we need to follow the
     // handle like an objectref.  Do this by forcing CreateValueByType to think this is an objectref. Note: we don't do
     // this for value classes that have an RVA, since they're layed out at the RVA with no handle.
-    if (*pvSigBlobNoMod == ELEMENT_TYPE_VALUETYPE &&
+    if (et == ELEMENT_TYPE_VALUETYPE &&
         !pFieldData->fldIsRVA &&
         !pFieldData->fldIsPrimitive &&
         !pFieldData->fldIsTLS &&
         !pFieldData->fldIsContextStatic)
     {
-        pvSigBlob = (PCCOR_SIGNATURE)&elementTypeClass;
-        cbSigBlob = sizeof(elementTypeClass);
+        hr = CordbType::MkNullaryType(GetAppDomain(), elementTypeClass, &type);
+        if (FAILED(hr))
+			goto LExit;
     }
     
     ICorDebugValue *pValue;
     hr = CordbValue::CreateValueByType(GetAppDomain(),
-                                       GetModule(),
-                                       cbSigBlob, pvSigBlob,
-                                       NULL,
+                                       type,
                                        pRmtStaticValue, NULL,
                                        false,
                                        NULL,
@@ -1192,7 +1231,8 @@ HRESULT CordbClass::GetStaticFieldValue(mdFieldDef fieldDef,
 
     if (SUCCEEDED(hr))
         *ppValue = pValue;
-      
+  }
+
 LExit:
     INPROC_UNLOCK();
 
@@ -1200,6 +1240,23 @@ LExit:
     
     return hr;
 }
+
+
+HRESULT CordbClass::GetType(ULONG32 nTypeArgs, ICorDebugType **ppTypeArgs, ICorDebugType **pType)
+{
+	bool isVC;
+	HRESULT hr = IsValueClass(&isVC);
+	if (FAILED(hr))
+		return hr;
+	hr = CordbType::MkConstructedType(GetAppDomain(), isVC ? ELEMENT_TYPE_VALUETYPE : ELEMENT_TYPE_CLASS, this, Instantiation(nTypeArgs,(CordbType **) ppTypeArgs), (CordbType **) pType);
+	if (FAILED(hr))
+		return hr;
+	_ASSERTE(*pType);
+	if (*pType)
+		(*pType)->AddRef();
+	return S_OK;
+}
+
 
 HRESULT CordbClass::PostProcessUnavailableHRESULT(HRESULT hr, 
                                        IMetaDataImport *pImport,
@@ -1244,33 +1301,9 @@ HRESULT CordbClass::GetToken(mdTypeDef *pTypeDef)
 {
     VALIDATE_POINTER_TO_OBJECT(pTypeDef, mdTypeDef *);
     
-    *pTypeDef = m_id;
+    *pTypeDef = m_token;
 
     return S_OK;
-}
-
-HRESULT CordbClass::GetObjectSize(ULONG32 *pObjectSize)
-{
-#ifdef RIGHT_SIDE_ONLY
-    CORDBRequireProcessStateOKAndSync(GetProcess(), GetAppDomain());
-#else 
-    // For the Virtual Right Side (In-proc debugging), we'll
-    // always be synched, but not neccessarily b/c we've
-    // gotten a synch message.
-    CORDBRequireProcessStateOK(GetProcess());
-#endif    
-
-    HRESULT hr = S_OK;
-    *pObjectSize = 0;
-    
-    hr = Init(FALSE);
-
-    if (!SUCCEEDED(hr))
-        return hr;
-
-    *pObjectSize = m_objectSize;
-
-    return hr;
 }
 
 HRESULT CordbClass::IsValueClass(bool *pIsValueClass)
@@ -1297,42 +1330,28 @@ HRESULT CordbClass::IsValueClass(bool *pIsValueClass)
     return hr;
 }
 
-HRESULT CordbClass::GetThisSignature(ULONG *pcbSigBlob,
-                                     PCCOR_SIGNATURE *ppvSigBlob)
+HRESULT CordbClass::GetThisType(const Instantiation &inst, CordbType **pRes)
 {
     HRESULT hr = S_OK;
-    
-    if (m_thisSigSize == 0)
+
+    hr = Init(FALSE);
+	if (!SUCCEEDED(hr))
+		return hr;
+    if (m_isValueClass)
     {
-        hr = Init(FALSE);
-
-        if (!SUCCEEDED(hr))
-            return hr;
-
-        if (m_isValueClass)
-        {
-            // Value class methods implicitly have their 'this'
-            // argument passed by reference.
-            m_thisSigSize += CorSigCompressElementType(
-                                                   ELEMENT_TYPE_BYREF,
-                                                   &m_thisSig[m_thisSigSize]);
-            m_thisSigSize += CorSigCompressElementType(
-                                                   ELEMENT_TYPE_VALUETYPE,
-                                                   &m_thisSig[m_thisSigSize]);
-        }
-        else
-            m_thisSigSize += CorSigCompressElementType(
-                                                   ELEMENT_TYPE_CLASS,
-                                                   &m_thisSig[m_thisSigSize]);
-
-        m_thisSigSize += CorSigCompressToken(m_id,
-                                             &m_thisSig[m_thisSigSize]);
-
-        _ASSERTE(m_thisSigSize <= sizeof(m_thisSig));
-    }
-
-    *pcbSigBlob = m_thisSigSize;
-    *ppvSigBlob = (PCCOR_SIGNATURE) &m_thisSig;
+     	CordbType *ty;
+		hr = CordbType::MkConstructedType(GetAppDomain(),ELEMENT_TYPE_VALUETYPE,this, inst, &ty);
+		if (!SUCCEEDED(hr))
+			return hr;
+		hr = CordbType::MkUnaryType(GetAppDomain(),ELEMENT_TYPE_BYREF,0, ty, pRes);
+		if (!SUCCEEDED(hr))
+			return hr;
+	}
+	else {
+		hr = CordbType::MkConstructedType(GetAppDomain(),ELEMENT_TYPE_CLASS,this,inst, pRes);
+		if (!SUCCEEDED(hr))
+			return hr;
+	}
 
     return hr;
 }
@@ -1375,9 +1394,9 @@ HRESULT CordbClass::Init(BOOL fForceInit)
                            DB_IPCE_GET_CLASS_INFO, 
                            false,
                            (void *)(m_module->GetAppDomain()->m_id));
-    event.GetClassInfo.classMetadataToken = m_id;
-    event.GetClassInfo.classDebuggerModuleToken =
-        m_module->m_debuggerModuleToken;
+    event.GetClassInfo.metadataToken = m_token;
+    event.GetClassInfo.debuggerModuleToken = m_module->m_debuggerModuleToken;
+	event.GetClassInfo.typeHandle = NULL;
 
     hr = pProcess->m_cordb->SendIPCEvent(pProcess, &event,
                                          sizeof(DebuggerIPCEvent));
@@ -1423,7 +1442,9 @@ HRESULT CordbClass::Init(BOOL fForceInit)
 #endif
             
             m_isValueClass = retEvent->GetClassInfoResult.isValueClass;
-            m_objectSize = retEvent->GetClassInfoResult.objectSize;
+            m_typarCount = retEvent->GetClassInfoResult.typarCount;
+  	        // If type is a generic  type then use the size in the instantiated type
+			m_objectSize = (m_typarCount != 0) ? 0xbadbad : retEvent->GetClassInfoResult.objectSize;
             m_staticVarBase = retEvent->GetClassInfoResult.staticVarBase;
             m_instanceVarCount = retEvent->GetClassInfoResult.instanceVarCount;
             m_staticVarCount = retEvent->GetClassInfoResult.staticVarCount;
@@ -1457,7 +1478,6 @@ HRESULT CordbClass::Init(BOOL fForceInit)
              i++)
         {
             m_fields[fieldIndex] = *currentFieldData;
-            m_fields[fieldIndex].fldFullSigSize = 0;
             
             _ASSERTE(m_fields[fieldIndex].fldOffset != FIELD_OFFSET_NEW_ENC_DB);
             
@@ -1483,42 +1503,31 @@ exit:
     return hr;
 }
 
-HRESULT CordbClass::GetFieldSig(mdFieldDef fldToken, DebuggerIPCE_FieldData *pFieldData)
+
+
+
+/* static */ HRESULT CordbClass::GetFieldSig(CordbModule *module, mdFieldDef fldToken, DebuggerIPCE_FieldData *pFieldData)
 {
     HRESULT hr = S_OK;
     
-    if (pFieldData->fldType == ELEMENT_TYPE_VALUETYPE || 
-        pFieldData->fldType == ELEMENT_TYPE_PTR)
-    {
-        hr = GetModule()->m_pIMImport->GetFieldProps(fldToken, NULL, NULL, 0, NULL, NULL,
+    // Go to the metadata for all fields: previously the left-side tranferred over
+	// single-byte signatures as part of the field info.  Since the left-side
+	// goes to the metadata anyway, and we already fetch plenty of other metadata, 
+	// I don't believe that fetching it here instead of transferring it over
+	// is going to slow things down at all, and
+	// in any case will not be where the primary optimizations lie...
+
+        ULONG size;
+        IfFailRet( module->m_pIMImport->GetFieldProps(fldToken, NULL, NULL, 0, NULL, NULL,
                                                      &(pFieldData->fldFullSig),
-                                                     &(pFieldData->fldFullSigSize),
-                                                     NULL, NULL, NULL);
-
-        if (FAILED(hr))
-            return hr;
-
-        // Point past the calling convention, adjusting
-        // the sig size accordingly.
-        UINT_PTR pvSigBlobEnd = (UINT_PTR)pFieldData->fldFullSig + pFieldData->fldFullSigSize;
+                                                     &size,
+                                                     NULL, NULL, NULL) );
+        // Point past the calling convention
 #ifdef _DEBUG
         CorCallingConvention conv = (CorCallingConvention)
 #endif
         CorSigUncompressData(pFieldData->fldFullSig);
         _ASSERTE(conv == IMAGE_CEE_CS_CALLCONV_FIELD);
-
-        pFieldData->fldFullSigSize = pvSigBlobEnd - (UINT_PTR)pFieldData->fldFullSig;
-    }
-    else
-    {
-        pFieldData->fldFullSigSize = 1;
-        BYTE *pvSig = (BYTE *)&pFieldData->fldType;
-#if BIGENDIAN
-        // Make sure we get the byte representing the type;
-        pvSig += 3;
-#endif
-        pFieldData->fldFullSig = (PCCOR_SIGNATURE) pvSig;
-    }
 
     return hr;
 }
@@ -1533,6 +1542,12 @@ HRESULT CordbClass::GetSyncBlockField(mdFieldDef fldToken,
     _ASSERTE(object == NULL || object->m_fIsValid); 
             // What we really want to assert is that
             // IsValid has been called, if this is for an instance value
+
+	if (m_typarCount > 0) 
+	{
+		_ASSERTE(!"sync block field not yet implemented on constructed types!");
+		return E_FAIL;
+	}
 
     BOOL fStatic = (object == NULL);
 
@@ -1581,8 +1596,8 @@ HRESULT CordbClass::GetSyncBlockField(mdFieldDef fldToken,
                           true, // two-way event
                           (void *)m_module->GetAppDomain()->m_id);
                           
-    event.GetSyncBlockField.debuggerModuleToken = (void *)GetModule()->m_id;
-    hr = GetToken(&(event.GetSyncBlockField.classMetadataToken));
+	event.GetSyncBlockField.objectTypeData.debuggerModuleToken = (void *)GetModule()->m_id;
+	hr = GetToken(&(event.GetSyncBlockField.objectTypeData.metadataToken));
     _ASSERTE(!FAILED(hr));
     event.GetSyncBlockField.fldToken = fldToken;
 
@@ -1591,7 +1606,7 @@ HRESULT CordbClass::GetSyncBlockField(mdFieldDef fldToken,
         event.GetSyncBlockField.staticVarBase = m_staticVarBase; // in case it's static.
         
         event.GetSyncBlockField.pObject = NULL;
-        event.GetSyncBlockField.objectType = ELEMENT_TYPE_MAX;
+		event.GetSyncBlockField.objectTypeData.elementType = ELEMENT_TYPE_MAX;
         event.GetSyncBlockField.offsetToVars = NULL;
     }
     else
@@ -1599,7 +1614,7 @@ HRESULT CordbClass::GetSyncBlockField(mdFieldDef fldToken,
         _ASSERTE(object != NULL);
     
         event.GetSyncBlockField.pObject = (void *)object->m_id;
-        event.GetSyncBlockField.objectType = object->m_info.objectType;
+        event.GetSyncBlockField.objectTypeData.elementType = object->m_info.objTypeData.elementType;
         event.GetSyncBlockField.offsetToVars = object->m_info.objOffsetToVars;
         
         event.GetSyncBlockField.staticVarBase = NULL;
@@ -1650,7 +1665,7 @@ HRESULT CordbClass::GetSyncBlockField(mdFieldDef fldToken,
     if (pInfo != NULL)
     {
         // It's important to do this here, once we've got the final memory blob for pInfo
-        hr = GetFieldSig(fldToken, pInfo);
+        hr = GetFieldSig(GetModule(), fldToken, pInfo);
         return hr;
     }
     else
@@ -1669,25 +1684,32 @@ HRESULT CordbClass::GetFieldInfo(mdFieldDef fldToken, DebuggerIPCE_FieldData **p
     if (!SUCCEEDED(hr))
         return hr;
 
-    unsigned int i;
+	return SearchFieldInfo(GetModule(), m_instanceVarCount + m_staticVarCount, m_fields, m_token, fldToken, ppFieldData);
+}
 
-    for (i = 0; i < (m_instanceVarCount + m_staticVarCount); i++)
+
+/* static */ HRESULT CordbClass::SearchFieldInfo(CordbModule *module, unsigned int cData, DebuggerIPCE_FieldData *data, mdTypeDef classToken, mdFieldDef fldToken, DebuggerIPCE_FieldData **ppFieldData)
+{
+	unsigned int i;
+
+	HRESULT hr = S_OK;
+    for (i = 0; i < cData; i++)
     {
-        if (m_fields[i].fldMetadataToken == fldToken)
+        if (data[i].fldMetadataToken == fldToken)
         {
-            if (m_fields[i].fldType == ELEMENT_TYPE_MAX)
+            if (!data[i].fldEnCAvailable)
             {
                 return CORDBG_E_ENC_HANGING_FIELD; // caller should get instance-specific info.
             }
         
-            if (m_fields[i].fldFullSigSize == 0)
+            if (data[i].fldFullSig == NULL)
             {
-                hr = GetFieldSig(fldToken, &m_fields[i]);
+                hr = GetFieldSig(module, fldToken, &data[i]);
                 if (FAILED(hr))
                     return hr;
             }
 
-            *ppFieldData = &(m_fields[i]);
+            *ppFieldData = &(data[i]);
             return S_OK;
         }
     }
@@ -1695,12 +1717,12 @@ HRESULT CordbClass::GetFieldInfo(mdFieldDef fldToken, DebuggerIPCE_FieldData **p
     // Hmmm... we didn't find the field on this class. See if the field really belongs to this class or not.
     mdTypeDef classTok;
     
-    hr = GetModule()->m_pIMImport->GetFieldProps(fldToken, &classTok, NULL, 0, NULL, NULL, NULL, 0, NULL, NULL, NULL);
+    hr = module->m_pIMImport->GetFieldProps(fldToken, &classTok, NULL, 0, NULL, NULL, NULL, 0, NULL, NULL, NULL);
 
     if (FAILED(hr))
         return hr;
 
-    if (classTok == (mdTypeDef) m_id)
+    if (classTok == (mdTypeDef) classToken)
     {
         // Well, the field belongs in this class. The assumption is that the Runtime optimized the field away.
         return CORDBG_E_FIELD_NOT_AVAILABLE;
@@ -1720,13 +1742,10 @@ CordbFunction::CordbFunction(CordbModule *m,
   : CordbBase(funcMetadataToken, enumCordbFunction),
     m_module(m),
     m_class(NULL),
+    m_jitinfos(1),
     m_token(funcMetadataToken),
     m_functionRVA(funcRVA),
-    m_nativeInfoValid(false),
     m_nVersionLastNativeInfo(0),
-    m_argumentCount(0),
-    m_nativeInfoCount(0),
-    m_nativeInfo(NULL),
     m_methodSig(NULL),
     m_argCount(0),
     m_isStatic(false),
@@ -1734,10 +1753,12 @@ CordbFunction::CordbFunction(CordbModule *m,
     m_localVarCount(0),
     m_localVarSigToken(mdSignatureNil),
     m_encCounterLastSynch(0),
-    m_nVersionMostRecentEnC(0),
+    m_nVersionMostRecentEnC(0), 
     m_isNativeImpl(false)
 {
 }
+
+
 
 /*
     A list of which resources owned by this object are accounted for.
@@ -1761,15 +1782,6 @@ CordbFunction::~CordbFunction()
             pCordbCode->Release();
         }
 
-    if ( m_rgnativeCode.Table() != NULL)
-        for (int i =0; i < m_rgnativeCode.Count();i++)
-        {
-            CordbCode * pCordbCode = m_rgnativeCode.Table()[i];
-            pCordbCode->Release();
-        }
-
-    if (m_nativeInfo != NULL)
-        delete [] m_nativeInfo;
 }
 
 // Neutered by CordbModule
@@ -1786,20 +1798,64 @@ void CordbFunction::Neuter()
                 pCordbCode->Neuter();
             }
         }
-
-        // Neuter any/all native CordbCode objects
-        if ( m_rgnativeCode.Table() != NULL)
-        {
-            for (int i =0; i < m_rgnativeCode.Count();i++)
-            {
-                CordbCode * pCordbCode = m_rgnativeCode.Table()[i];
-                pCordbCode->Neuter();
-            }
-        }
+		NeuterAndClearHashtable(&m_jitinfos);
         
         CordbBase::Neuter();
     }
     Release();
+}
+
+
+HRESULT CordbFunction::LookupOrCreateFromFuncData(CordbProcess *pProcess, CordbAppDomain *pAppDomain, DebuggerIPCE_FuncData *data, CordbFunction **ppRes) 
+{
+	CordbModule* pFunctionModule = pAppDomain->LookupModule(data->funcDebuggerModuleToken);
+	_ASSERTE(pFunctionModule != NULL);
+
+	// Does this function already exist?
+	CordbFunction *pFunction = NULL;
+        
+	HRESULT hr = S_OK;
+
+	pFunction = pFunctionModule->LookupFunction(data->funcMetadataToken);
+
+	if (pFunction == NULL)
+	{
+		// New function. Go ahead and create it.
+		hr = pFunctionModule->CreateFunction(data->funcMetadataToken,
+			data->funcRVA,
+			&pFunction);
+
+		_ASSERTE( SUCCEEDED(hr) || !"FAILURE" );
+		if (!SUCCEEDED(hr))
+			return hr;
+
+		pFunction->SetLocalVarToken(data->localVarSigToken);
+	}
+
+	_ASSERTE(pFunction != NULL);
+
+	// Does this function have a class?
+	if ((pFunction->m_class == NULL) && (data->classMetadataToken != mdTypeDefNil))
+	{
+		// No. Go ahead and create the class.
+		CordbModule* pClassModule = pAppDomain->LookupModule(data->funcDebuggerModuleToken);
+		_ASSERTE(pClassModule != NULL);
+
+		// Does the class already exist?
+		CordbClass *pClass;
+		hr = pClassModule->LookupOrCreateClass(data->classMetadataToken,
+			&pClass);
+		_ASSERTE(SUCCEEDED(hr) || !"FAILURE");
+
+		if (!SUCCEEDED(hr)) 
+			return hr;
+
+		_ASSERTE(pClass != NULL);
+		pFunction->m_class = pClass;
+	}
+	*ppRes = pFunction;
+	return hr;
+
 }
 
 HRESULT CordbFunction::QueryInterface(REFIID id, void **pInterface)
@@ -1818,14 +1874,14 @@ HRESULT CordbFunction::QueryInterface(REFIID id, void **pInterface)
     return S_OK;
 }
 
-// if nVersion == const int DJI_VERSION_MOST_RECENTLY_JITTED,
+// if nVersion == const int DMI_VERSION_MOST_RECENTLY_JITTED,
 // get the highest-numbered version.  Otherwise,
 // get the version asked for.
 CordbCode *UnorderedCodeArrayGet( UnorderedCodeArray *pThis, SIZE_T nVersion )
 {
 #ifdef LOGGING
-    if (nVersion == (SIZE_T) DJI_VERSION_MOST_RECENTLY_JITTED)
-        LOG((LF_CORDB,LL_EVERYTHING,"Looking for DJI_VERSION_MOST_"
+    if (nVersion == (SIZE_T) DMI_VERSION_MOST_RECENTLY_JITTED)
+        LOG((LF_CORDB,LL_EVERYTHING,"Looking for DMI_VERSION_MOST_"
             "RECENTLY_JITTED\n"));
     else
         LOG((LF_CORDB,LL_EVERYTHING,"Looking for ver 0x%x\n", nVersion));
@@ -1840,7 +1896,7 @@ CordbCode *UnorderedCodeArrayGet( UnorderedCodeArray *pThis, SIZE_T nVersion )
         for(i = 0,cCode=pThis->Count(); i <cCode; i++)
         {
             pCode = (pThis->Table())[i];
-            if (nVersion == (SIZE_T) DJI_VERSION_MOST_RECENTLY_JITTED )
+            if (nVersion == (SIZE_T) DMI_VERSION_MOST_RECENTLY_JITTED )
             {
                 if (pCode->m_nVersion > pCodeMax->m_nVersion)
                 {   
@@ -1854,7 +1910,7 @@ CordbCode *UnorderedCodeArrayGet( UnorderedCodeArray *pThis, SIZE_T nVersion )
             }
         }
 
-        if (nVersion == (SIZE_T) DJI_VERSION_MOST_RECENTLY_JITTED )
+        if (nVersion == (SIZE_T) DMI_VERSION_MOST_RECENTLY_JITTED )
         {
 #ifdef LOGGING
             if (pCodeMax != NULL )
@@ -1913,7 +1969,7 @@ HRESULT CordbFunction::GetClass(ICorDebugClass **ppClass)
     {
         // We're not looking for any particular version, just
         // the class info.  This seems like the best version to request
-        hr = Populate(DJI_VERSION_MOST_RECENTLY_JITTED);
+        hr = Populate(DMI_VERSION_MOST_RECENTLY_JITTED);
 
         if (FAILED(hr))
             goto LExit;
@@ -1960,7 +2016,7 @@ HRESULT CordbFunction::GetILCode(ICorDebugCode **ppCode)
         return hr;
     
     CordbCode *pCode = NULL;
-    hr = GetCodeByVersion(TRUE, bILCode, DJI_VERSION_MOST_RECENTLY_JITTED, &pCode);
+    hr = GetCodeByVersion(TRUE, DMI_VERSION_MOST_RECENTLY_JITTED, &pCode);
     *ppCode = (ICorDebugCode*)pCode;
 
     INPROC_UNLOCK();
@@ -1968,6 +2024,12 @@ HRESULT CordbFunction::GetILCode(ICorDebugCode **ppCode)
     return hr;
 }
 
+// <REVIEW> GENERICS: this gets a pretty much random version of the native code when the
+// function is a generic method that gets JITted more than once.  The really correct thing
+// to do is have an enumerator that allows the user to visit all of the native code's
+// corresponding to a single IL method. But many V1 BVTs and the VS debugger currently
+// expect to be able to get native code for non-generic methods, so we'll implement
+// this by just choosing an appropriate looking native code blob.</REVIEW>
 HRESULT CordbFunction::GetNativeCode(ICorDebugCode **ppCode)
 {
     VALIDATE_POINTER_TO_OBJECT(ppCode, ICorDebugCode **);
@@ -1978,20 +2040,38 @@ HRESULT CordbFunction::GetNativeCode(ICorDebugCode **ppCode)
     if (FAILED(hr))
         return hr;
 
-    CordbCode *pCode = NULL;
-    hr = GetCodeByVersion(TRUE, bNativeCode, DJI_VERSION_MOST_RECENTLY_JITTED, &pCode);
-    
-    *ppCode = (ICorDebugCode*)pCode;
+	CordbCode *pCode = NULL;
+	HASHFIND srch;
+    for (CordbJITInfo *ji = (CordbJITInfo *)m_jitinfos.FindFirst(&srch); 
+		  ji != NULL;
+		  (ji = (CordbJITInfo *)m_jitinfos.FindNext(&srch)))
+	{ 
+        if (pCode == NULL) 
+		{
+			pCode = ji->m_nativecode;
+			continue;
+		}
+		if (ji->m_nativecode->m_nVersion > pCode->m_nVersion)
+			pCode = ji->m_nativecode;
+	}
 
-    if (SUCCEEDED(hr) && (pCode == NULL))
+    if (pCode == NULL)
+	{
         hr = CORDBG_E_CODE_NOT_AVAILABLE;
+	}
+	else 
+	{
+        pCode->AddRef();
+        *ppCode = pCode;
+		hr = S_OK;
+    }
 
     INPROC_UNLOCK();
     
     return hr;
 }
 
-HRESULT CordbFunction::GetCodeByVersion(BOOL fGetIfNotPresent, BOOL fIsIL, 
+HRESULT CordbFunction::GetCodeByVersion(BOOL fGetIfNotPresent,
                                         SIZE_T nVer, CordbCode **ppCode)
 {
     VALIDATE_POINTER_TO_OBJECT(ppCode, ICorDebugCode **);
@@ -2007,18 +2087,12 @@ HRESULT CordbFunction::GetCodeByVersion(BOOL fGetIfNotPresent, BOOL fIsIL,
 
     LOG((LF_CORDB, LL_EVERYTHING, "Asked to find code ver 0x%x\n", nVer));
 
-    if (((fIsIL && (pCode = UnorderedCodeArrayGet(&m_rgilCode, nVer)) == NULL) ||
-         (!fIsIL && (pCode = UnorderedCodeArrayGet(&m_rgnativeCode, nVer)) == NULL)) &&
+    if ((pCode = UnorderedCodeArrayGet(&m_rgilCode, nVer)) == NULL &&
         fGetIfNotPresent)
         hr = Populate(nVer);
 
     if (SUCCEEDED(hr) && pCode == NULL)
-    {
-        if (fIsIL)
-            pCode=UnorderedCodeArrayGet(&m_rgilCode, nVer);
-        else
-            pCode=UnorderedCodeArrayGet(&m_rgnativeCode, nVer);
-    }
+        pCode=UnorderedCodeArrayGet(&m_rgilCode, nVer);
 
     if (pCode != NULL)
     {
@@ -2093,7 +2167,7 @@ HRESULT CordbFunction::GetCurrentVersionNumber(ULONG32 *pnCurrentVersion)
         return hr;
 
     CordbCode *pCode = NULL;
-    hr = GetCodeByVersion(TRUE, FALSE, DJI_VERSION_MOST_RECENTLY_EnCED, &pCode);
+    hr = GetCodeByVersion(TRUE, DMI_VERSION_MOST_RECENTLY_EnCED, &pCode);
     
     if (FAILED(hr))
         goto LError;
@@ -2111,33 +2185,23 @@ LError:
 }
 
 
-HRESULT CordbFunction::CreateCode(BOOL isIL, REMOTE_PTR startAddress,
+HRESULT CordbFunction::CreateCode(REMOTE_PTR startAddress,
                                   SIZE_T size, CordbCode** ppCode,
-                                  SIZE_T nVersion, void *CodeVersionToken,
-                                  REMOTE_PTR ilToNativeMapAddr,
-                                  SIZE_T ilToNativeMapSize)
+                                  SIZE_T nVersion, void* ilCodeVersionToken)
 {
     _ASSERTE(ppCode != NULL);
 
     *ppCode = NULL;
     
-    CordbCode* pCode = new CordbCode(this, isIL, startAddress, size,
-                                     nVersion, CodeVersionToken,
-                                     ilToNativeMapAddr, ilToNativeMapSize);
+    CordbCode* pCode = new CordbCode(this, startAddress, size,
+                                     nVersion, ilCodeVersionToken);
 
     if (pCode == NULL)
         return E_OUTOFMEMORY;
 
     HRESULT hr = S_OK;
     
-    if (isIL)
-    {
-        hr = UnorderedCodeArrayAdd( &m_rgilCode, pCode);
-    }
-    else
-    {
-        hr = UnorderedCodeArrayAdd( &m_rgnativeCode, pCode);
-    }
+    hr = UnorderedCodeArrayAdd( &m_rgilCode, pCode);
 
     if (FAILED(hr))
     {
@@ -2169,11 +2233,8 @@ HRESULT CordbFunction::Populate( SIZE_T nVersion)
     ULONG ulRVA;
 	BOOL	isDynamic;
 
-    hr = GetModule()->m_pIMImport->GetMethodProps(m_token, NULL, NULL, 0, NULL,
-                                     &attrs, NULL, NULL, &ulRVA, &implAttrs);
-
-    if (FAILED(hr))
-        return hr;
+    IfFailRet( GetModule()->m_pIMImport->GetMethodProps(m_token, NULL, NULL, 0, NULL,
+                                     &attrs, NULL, NULL, &ulRVA, &implAttrs) );
 	IfFailRet( GetModule()->IsDynamic(&isDynamic) );
 
 	// A method has associated IL if it's RVA is non-zero unless it is a dynamic module
@@ -2202,82 +2263,70 @@ HRESULT CordbFunction::Populate( SIZE_T nVersion)
     if (!SUCCEEDED(hr))
         return hr;
 
-    _ASSERTE(event.type == DB_IPCE_FUNCTION_DATA_RESULT);
+    if (!SUCCEEDED(event.hr))
+        return event.hr;
+
+    _ASSERTE(event.type == DB_IPCE_GET_FUNCTION_DATA_RESULT);
 
     // Cache the most recently EnC'ed version number
-    m_nVersionMostRecentEnC = event.FunctionDataResult.nVersionMostRecentEnC;
+    m_nVersionMostRecentEnC = event.FunctionData.basicData.nVersionMostRecentEnC;
 
     // Fill in the proper function data.
-    m_functionRVA = event.FunctionDataResult.funcRVA;
+    m_functionRVA = event.FunctionData.basicData.funcRVA;
     
     CordbCode *pCodeTemp = NULL;
 
     // Should we make or fill in some class data for this function?
-    if ((m_class == NULL) && (event.FunctionDataResult.classMetadataToken != mdTypeDefNil))
+    if ((m_class == NULL) && (event.FunctionData.basicData.classMetadataToken != mdTypeDefNil))
     {
         CordbAssembly *pAssembly = m_module->GetCordbAssembly();
-        CordbModule* pClassModule = pAssembly->m_pAppDomain->LookupModule(event.FunctionDataResult.funcDebuggerModuleToken);
+        CordbModule* pClassModule = pAssembly->m_pAppDomain->LookupModule(event.FunctionData.basicData.funcDebuggerModuleToken);
         _ASSERTE(pClassModule != NULL);
 
-        CordbClass* pClass = pClassModule->LookupClass(event.FunctionDataResult.classMetadataToken);
+        CordbClass *pClass;
+        hr = pClassModule->LookupOrCreateClass(event.FunctionData.basicData.classMetadataToken, &pClass);
 
-        if (pClass == NULL)
-        {
-            hr = pClassModule->CreateClass(event.FunctionDataResult.classMetadataToken, &pClass);
-
-            if (!SUCCEEDED(hr))
-                goto exit;
-        }
-
+        if (!SUCCEEDED(hr))
+            goto exit;
+                
         _ASSERTE(pClass != NULL);
         m_class = pClass;
     }
 
     // Do we need to make any code objects for this function?
-    LOG((LF_CORDB,LL_INFO10000,"R:CF::Pop: looking for IL code, version 0x%x\n", event.FunctionDataResult.ilnVersion));
-
-    if ((UnorderedCodeArrayGet(&m_rgilCode, event.FunctionDataResult.ilnVersion) == NULL) &&
-        (event.FunctionDataResult.ilStartAddress != 0))
+    LOG((LF_CORDB,LL_INFO10000,"R:CF::Pop: looking for IL code, version 0x%x\n", event.FunctionData.basicData.ilnVersion));
+        
+    if ((UnorderedCodeArrayGet(&m_rgilCode, event.FunctionData.basicData.ilnVersion) == NULL) &&
+        (event.FunctionData.basicData.ilStartAddress != 0))
     {
         LOG((LF_CORDB,LL_INFO10000,"R:CF::Pop: not found, creating...\n"));
-        _ASSERTE((SIZE_T) DJI_VERSION_INVALID != event.FunctionDataResult.ilnVersion);
-
-        hr = CreateCode(TRUE,
-                        event.FunctionDataResult.ilStartAddress,
-                        event.FunctionDataResult.ilSize,
-                        &pCodeTemp, event.FunctionDataResult.ilnVersion,
-                        event.FunctionDataResult.CodeVersionToken,
-                        NULL, 0);
+        _ASSERTE((unsigned)DMI_VERSION_INVALID != event.FunctionData.basicData.ilnVersion);
+        
+        hr = CreateCode(event.FunctionData.basicData.ilStartAddress,
+                        event.FunctionData.basicData.ilSize,
+                        &pCodeTemp, event.FunctionData.basicData.ilnVersion,
+                        event.FunctionData.basicData.CodeVersionToken);
 
         if (!SUCCEEDED(hr))
             goto exit;
     }
     
-    LOG((LF_CORDB,LL_INFO10000,"R:CF::Pop: looking for native code, ver 0x%x\n", event.FunctionDataResult.nativenVersion));
-        
-    if (UnorderedCodeArrayGet(&m_rgnativeCode, event.FunctionDataResult.nativenVersion) == NULL &&
-        event.FunctionDataResult.nativeStartAddressPtr != 0)
-    {
-        LOG((LF_CORDB,LL_INFO10000,"R:CF::Pop: not found, creating...\n"));
-        _ASSERTE((SIZE_T) DJI_VERSION_INVALID != event.FunctionDataResult.nativenVersion);
-        
-        if (pCodeTemp)
-            pCodeTemp->Release();
+    SetLocalVarToken(event.FunctionData.basicData.localVarSigToken);
 
-        hr = CreateCode(FALSE,
-                        event.FunctionDataResult.nativeStartAddressPtr,
-                        event.FunctionDataResult.nativeSize,
-                        &pCodeTemp, event.FunctionDataResult.nativenVersion,
-                        event.FunctionDataResult.CodeVersionToken,
-                        event.FunctionDataResult.ilToNativeMapAddr,
-                        event.FunctionDataResult.ilToNativeMapSize);
-
-        if (!SUCCEEDED(hr))
-            goto exit;
-    }
-
-    SetLocalVarToken(event.FunctionDataResult.localVarSigToken);
+	// <REVIEW>To make sure we don't break V1 behaviour, e.g. GetNativeCode,
+	// we allow for CordbFunction's to be associated
+	// with at least one JIT blob.  We could implement an iterator to go and fetch all the
+	// native code blobs and then just choose one, but we may as well keep it simple for the
+	// moment and just return one specified here.</REVIEW>
     
+	if (event.FunctionData.possibleNativeData.nativeCodeVersionToken != NULL)
+	{
+		CordbJITInfo *pInfo = NULL;
+		hr = CordbJITInfo::LookupOrCreateFromJITData(this, &event.FunctionData.basicData, &event.FunctionData.possibleNativeData, &pInfo);
+		if (!SUCCEEDED(hr))
+			goto exit;
+	}
+
 exit:
     if (pCodeTemp)
         pCodeTemp->Release();
@@ -2285,21 +2334,72 @@ exit:
     return hr;
 }
 
+
+HRESULT CordbJITInfo::LookupOrCreateFromJITData(CordbFunction *pFunction, DebuggerIPCE_FuncData *currentFuncData, DebuggerIPCE_JITFuncData* currentJITFuncData, CordbJITInfo **ppRes)
+{
+	_ASSERTE(ppRes != NULL);
+	HRESULT hr = S_OK;
+
+    *ppRes = (CordbJITInfo *)pFunction->m_jitinfos.GetBase((UINT_PTR) currentJITFuncData->nativeCodeVersionToken);
+
+	if (*ppRes == NULL)
+	{
+		LOG((LF_CORDB,LL_INFO10000,"R:CT::RSCreating code w/ ver:0x%x, token:0x%x\n",
+			currentFuncData->ilnVersion,
+			currentJITFuncData->nativeCodeVersionToken));
+
+		CordbCode *pCode = 
+			new CordbCode(pFunction, currentJITFuncData->nativeStartAddressPtr, 
+			currentJITFuncData->nativeSize,
+			currentFuncData->ilnVersion, 
+			currentFuncData->CodeVersionToken,
+			currentJITFuncData->nativeCodeVersionToken,
+			currentJITFuncData->ilToNativeMapAddr, 
+			currentJITFuncData->ilToNativeMapSize);
+
+		if (pCode == NULL) 
+		{
+			hr = E_OUTOFMEMORY;
+			return hr;
+		}
+
+		*ppRes = new CordbJITInfo(pFunction, pCode);
+
+		if (*ppRes == NULL) 
+		{
+			delete pCode;
+			hr = E_OUTOFMEMORY;
+			return hr;
+		}
+		hr = pFunction->m_jitinfos.AddBase(*ppRes);
+		if (FAILED(hr)) 
+		  {
+		    delete pCode;
+		    delete *ppRes;
+		    return hr;
+		  }
+
+	}
+	_ASSERTE(*ppRes != NULL);
+
+	return hr;
+}
+
 //
 // LoadNativeInfo loads from the left side any native variable info
 // from the JIT.
 //
-HRESULT CordbFunction::LoadNativeInfo(void)
+HRESULT CordbJITInfo::LoadNativeInfo(void)
 {
     HRESULT hr = S_OK;
 
     // Then, if we've either never done this before (no info), or we have, but the version number has increased, we
     // should try and get a newer version of our JIT info.
-    if(m_nativeInfoValid && m_nVersionLastNativeInfo >= m_nVersionMostRecentEnC)
+    if(m_nativeInfoValid)
         return S_OK;
 
     // You can't do this if the function is implemented as part of the Runtime.
-    if (m_isNativeImpl)
+    if (m_function->m_isNativeImpl)
         return CORDBG_E_FUNCTION_NOT_IL;
 
     DebuggerIPCEvent *retEvent = NULL;
@@ -2325,9 +2425,7 @@ HRESULT CordbFunction::LoadNativeInfo(void)
 
     DebuggerIPCEvent event;
     pProcess->InitIPCEvent(&event, DB_IPCE_GET_JIT_INFO, false, (void *)(GetAppDomain()->m_id));
-    event.GetJITInfo.funcMetadataToken = m_token;
-    event.GetJITInfo.funcDebuggerModuleToken = m_module->m_debuggerModuleToken;
-    _ASSERTE(m_module->m_debuggerModuleToken != NULL);
+    event.GetJITInfo.nativeCodeVersionToken = m_nativecode->m_nativeCodeVersionToken;
 
     hr = pProcess->m_cordb->SendIPCEvent(pProcess, &event, sizeof(DebuggerIPCEvent));
 
@@ -2401,8 +2499,6 @@ HRESULT CordbFunction::LoadNativeInfo(void)
     m_nativeInfoCount = nativeInfoCount;
     m_nativeInfoValid = true;
     
-    m_nVersionLastNativeInfo = retEvent->GetJITInfoResult.nVersion;
-    
 exit:
 
 #ifndef RIGHT_SIDE_ONLY    
@@ -2414,22 +2510,6 @@ exit:
     return hr;
 }
 
-//
-// Given an IL local variable number and a native IP offset, return the
-// location of the variable in jitted code.
-//
-HRESULT CordbFunction::ILVariableToNative(DWORD dwIndex,
-                                          SIZE_T ip,
-                                          ICorJitInfo::NativeVarInfo **ppNativeInfo)
-{
-    _ASSERTE(m_nativeInfoValid);
-    
-    return FindNativeInfoInILVariableArray(dwIndex,
-                                           ip,
-                                           ppNativeInfo,
-                                           m_nativeInfoCount,
-                                           m_nativeInfo);
-}
 
 HRESULT CordbFunction::LoadSig( void )
 {
@@ -2486,7 +2566,7 @@ HRESULT CordbFunction::UpdateToMostRecentEnCVersion(void)
 
     if (m_encCounterLastSynch < m_module->GetProcess()->m_EnCCounter)
     {
-        hr = Populate(DJI_VERSION_MOST_RECENTLY_EnCED);
+        hr = Populate(DMI_VERSION_MOST_RECENTLY_EnCED);
 
         if (FAILED(hr) && hr != CORDBG_E_FUNCTION_NOT_IL)
             return hr;
@@ -2520,8 +2600,8 @@ HRESULT CordbFunction::UpdateToMostRecentEnCVersion(void)
 // Given an IL argument number, return its type.
 //
 HRESULT CordbFunction::GetArgumentType(DWORD dwIndex,
-                                       ULONG *pcbSigBlob,
-                                       PCCOR_SIGNATURE *ppvSigBlob)
+									   const Instantiation &inst,
+                                      CordbType **res)
 {
     HRESULT hr = S_OK;
     ULONG cb;
@@ -2543,7 +2623,7 @@ HRESULT CordbFunction::GetArgumentType(DWORD dwIndex,
         {
             // Return the signature for the 'this' pointer for the
             // class this method is in.
-            return m_class->GetThisSignature(pcbSigBlob, ppvSigBlob);
+            return m_class->GetThisType(inst, res);
         }
         else
             dwIndex--;
@@ -2557,8 +2637,7 @@ HRESULT CordbFunction::GetArgumentType(DWORD dwIndex,
     //Get rid of funky modifiers
     cb += _skipFunkyModifiersInSignature(&m_methodSig[cb]);
 
-    *pcbSigBlob = m_methodSigSize - cb;
-    *ppvSigBlob = &(m_methodSig[cb]);
+    hr = CordbType::SigToType(m_module, &m_methodSig[cb], inst, res);
     
     return hr;
 }
@@ -2611,8 +2690,8 @@ Exit:
 // Given an IL variable number, return its type.
 //
 HRESULT CordbFunction::GetLocalVariableType(DWORD dwIndex,
-                                            ULONG *pcbSigBlob,
-                                            PCCOR_SIGNATURE *ppvSigBlob)
+                                            const Instantiation &inst,
+											CordbType **res)
 {
     HRESULT hr = S_OK;
     ULONG cb;
@@ -2620,7 +2699,7 @@ HRESULT CordbFunction::GetLocalVariableType(DWORD dwIndex,
     // Load the method's signature if necessary.
     if (m_localsSig == NULL)
     {
-        hr = Populate(DJI_VERSION_MOST_RECENTLY_JITTED);
+        hr = Populate(DMI_VERSION_MOST_RECENTLY_JITTED);
 
         if (FAILED(hr))
             return hr;
@@ -2641,27 +2720,135 @@ HRESULT CordbFunction::GetLocalVariableType(DWORD dwIndex,
     for (unsigned int i = 0; i < dwIndex; i++)
         cb += _skipTypeInSignature(&m_localsSig[cb]);
 
-    //Get rid of funky modifiers
     cb += _skipFunkyModifiersInSignature(&m_localsSig[cb]);
 
-    *pcbSigBlob = m_localsSigSize - cb;
-    *ppvSigBlob = &(m_localsSig[cb]);
-    
+    hr = CordbType::SigToType(m_module, &m_localsSig[cb], inst, res);
+
     return hr;
 }
+
+HRESULT CordbFunction::LookupJITInfo( void *nativeCodeVersionToken, CordbJITInfo **ppInfo )
+{
+    *ppInfo = (CordbJITInfo *)m_jitinfos.GetBase((UINT_PTR) nativeCodeVersionToken);
+	return S_OK;
+}
+
+
+
+/* ------------------------------------------------------------------------- *
+ * FunctionAsNative class: one is created for each realisation (i.e. blob of
+ * native code, e.g. there may be many because of code-generation for
+ * generic methods or for other reasons) of each version of each function.
+ * ------------------------------------------------------------------------- */
+
+CordbJITInfo::CordbJITInfo(CordbFunction *f, CordbCode *code)
+  : CordbBase((UINT_PTR) code->m_nativeCodeVersionToken, enumCordbJITInfo),
+    m_function(f),
+    m_nativecode(code),
+    m_nativeInfoCount(0),
+    m_nativeInfo(NULL),
+    m_nativeInfoValid(0),
+    m_argumentCount(0)
+{
+    if (m_nativecode)
+        m_nativecode->AddRef();
+}
+
+
+/*
+    A list of which resources owened by this object are accounted for.
+
+    UNKNOWN:
+        
+    HANDLED:
+	   m_nativeInfo  Local array - freed in ~CordbJITInfo
+	   m_nativecode   Owned by this object.  Neutered in Neuter()
+*/
+
+CordbJITInfo::~CordbJITInfo()
+{
+    if (m_nativeInfo != NULL)
+        delete [] m_nativeInfo;
+}
+
+// Neutered by CordbFunction
+void CordbJITInfo::Neuter()
+{
+    AddRef();
+    {
+        CordbBase::Neuter();
+        m_nativecode->Neuter();
+        m_nativecode->Release();
+    }
+    Release();
+}
+
+HRESULT CordbJITInfo::QueryInterface(REFIID id, void **pInterface)
+{
+    if (id == IID_IUnknown)
+        *pInterface = (IUnknown*)(ICorDebugFunction*)this;
+    else
+    {
+        *pInterface = NULL;
+        return E_NOINTERFACE;
+    }
+
+    AddRef();
+    return S_OK;
+}
+
+//
+// Given an IL local variable number and a native IP offset, return the
+// location of the variable in jitted code.
+//
+HRESULT CordbJITInfo::ILVariableToNative(DWORD dwIndex,
+                                          SIZE_T ip,
+                                          ICorJitInfo::NativeVarInfo **ppNativeInfo)
+{
+    _ASSERTE(m_nativeInfoValid);
+    
+    return FindNativeInfoInILVariableArray(dwIndex,
+                                           ip,
+                                           ppNativeInfo,
+                                           m_nativeInfoCount,
+                                           m_nativeInfo);
+}
+
 
 /* ------------------------------------------------------------------------- *
  * Code class
  * ------------------------------------------------------------------------- */
 
-CordbCode::CordbCode(CordbFunction *m, BOOL isIL, REMOTE_PTR startAddress,
-                     SIZE_T size, SIZE_T nVersion, void *CodeVersionToken,
-                     REMOTE_PTR ilToNativeMapAddr, SIZE_T ilToNativeMapSize)
-  : CordbBase(0, enumCordbCode), m_function(m), m_isIL(isIL), 
-    m_address(startAddress), m_size(size), m_nVersion(nVersion),
+// To make IL code:
+CordbCode::CordbCode(CordbFunction *m, REMOTE_PTR startAddress,
+                     SIZE_T size, SIZE_T nVersion, void *CodeVersionToken)
+  : CordbBase(0, enumCordbCode),
+    m_function(m),
+    m_isIL(true), 
+    m_address(startAddress),
+    m_size(size),
+    m_nVersion(nVersion),
     m_rgbCode(NULL),
     m_continueCounterLastSync(0),
-    m_CodeVersionToken(CodeVersionToken),
+    m_ilCodeVersionToken(CodeVersionToken),
+    m_nativeCodeVersionToken(NULL),
+    m_ilToNativeMapAddr(NULL),
+    m_ilToNativeMapSize(0)
+{
+}
+
+// To make native code:
+CordbCode::CordbCode(CordbFunction *m, REMOTE_PTR startAddress,
+                     SIZE_T size, SIZE_T nVersion, void *ilCodeVersionToken, void *nativeCodeVersionToken,
+                     REMOTE_PTR ilToNativeMapAddr, SIZE_T ilToNativeMapSize)
+  : CordbBase(0, enumCordbCode),
+    m_function(m),
+    m_isIL(false), 
+    m_address(startAddress),
+    m_size(size),
+    m_nVersion(nVersion),
+    m_ilCodeVersionToken(ilCodeVersionToken),
+    m_nativeCodeVersionToken(nativeCodeVersionToken),
     m_ilToNativeMapAddr(ilToNativeMapAddr),
     m_ilToNativeMapSize(ilToNativeMapSize)
 {
@@ -2877,10 +3064,11 @@ HRESULT CordbCode::GetCode(ULONG32 startOffset,
         event->GetCodeData.funcMetadataToken = m_function->m_token;
         event->GetCodeData.funcDebuggerModuleToken =
             m_function->m_module->m_debuggerModuleToken;
-        event->GetCodeData.il = m_isIL != 0;
+        event->GetCodeData.il = (m_isIL != 0);
         event->GetCodeData.start = start;
         event->GetCodeData.end = end;
-        event->GetCodeData.CodeVersionToken = m_CodeVersionToken;
+        event->GetCodeData.ilCodeVersionToken = m_ilCodeVersionToken;
+        event->GetCodeData.nativeCodeVersionToken = m_nativeCodeVersionToken;
 
         hr = GetProcess()->SendIPCEvent(event, CorDBIPC_BUFFER_SIZE);
 
@@ -3089,5 +3277,1288 @@ HRESULT CordbCode::GetEnCRemapSequencePoints(ULONG32 cMap, ULONG32 *pcMap, ULONG
         delete [] mapInt;
 
     return hr;
+}
+
+
+// GENERICS: code for this class placed at end to minimize DIFF
+/* ------------------------------------------------------------------------- *
+ * Class for types
+ // GENERICS: For the moment                                      
+                                              we keep a hash table in the
+// type constructor (e.g. "Dict" in "Dict<String,String>") that uses
+// the pointers of CordbType's themselves as unique ids for single type applications.
+// Thus the representation for  "Dict<class String,class Foo, class Foo* >" goes as follows:
+//    1. Assume the type Foo is represented by CordbClass *5678x
+//    1b. Assume the hashtable m_sharedtypes in the AppDomain maps E_T_STRING to the CordbType *0ABCx
+//       Assume the hashtable m_classtypes in type Foo (i.e. CordbClass *5678x) maps E_T_CLASS to the CordbTypeeter *0DEFx
+//       Assume the hashtable m_spinetypes in the type Foo maps E_T_PTR to the CordbTypeeter *0647x
+//    2. The hash table m_classtypes in "Dict" maps "0ABCx" to a new CordbClass
+//       representing Dict<String> (a single type application)
+//    3. The hash table m_classtypes in this new CordbClass maps "0DEFx" to a
+//        new CordbClass representing Dict<class String,class Foo>
+//    3. The hash table m_classtypes in this new CordbClass maps "0647" to a
+//        new CordbClass representing Dict<class String,class Foo, class Foo*>
+//
+// This                                       lets us reuse the existing hash table scheme to build
+// up constructed types. 
+//
+// UPDATE: actually we also hack the rank into this....                  
+* ------------------------------------------------------------------------- */
+
+// Combine E_T_s and rank together to get an id for the m_sharedtypes table
+#define CORDBTYPE_ID(elementType,rank) ((unsigned int) elementType * (rank + 1) + 1)
+
+CordbType::CordbType(CordbAppDomain *appdomain, CorElementType et, unsigned int rank)
+: CordbBase( CORDBTYPE_ID(et,rank) , enumCordbType),
+  m_elementType(et),
+  m_appdomain(appdomain),
+  m_class(NULL),
+  m_rank(rank),
+  m_spinetypes(2),
+  m_objectSize(0),
+  m_typeHandle(NULL),
+  m_instancefields(0),
+  m_EnCCounterLastSync(0)
+{
+}
+
+
+CordbType::CordbType(CordbAppDomain *appdomain, CorElementType et, CordbClass *cls)
+: CordbBase( et, enumCordbType),
+  m_elementType(et),
+  m_appdomain(appdomain),
+  m_class(cls),
+  m_rank(0),
+  m_spinetypes(2),
+  m_objectSize(0),
+  m_typeHandle(NULL),
+  m_instancefields(0),
+  m_EnCCounterLastSync(0)
+{
+}
+
+
+CordbType::CordbType(CordbType *tycon, CordbType *tyarg)
+: CordbBase( (unsigned int) tyarg, enumCordbType), 
+  m_elementType(tycon->m_elementType), 
+  m_appdomain(tycon->m_appdomain), 
+  m_class(tycon->m_class),
+  m_rank(tycon->m_rank),
+  m_spinetypes(2),
+  m_objectSize(0),
+  m_typeHandle(NULL),
+  m_instancefields(0),
+  m_EnCCounterLastSync(0)
+  // tyarg is added as part of instantiation -see below...
+{
+}
+
+
+ULONG STDMETHODCALLTYPE CordbType::AddRef()
+{
+	// This AddRef/Release pair creates a very weak ref-counted reference to the class for this
+	// type.  This avoids a circularity in ref-counted references between 
+	// classes and types - if we had a circularity the objects would never get
+	// collected at all...
+	if (m_class)
+		m_class->AddRef();
+	return (BaseAddRef());
+}
+ULONG STDMETHODCALLTYPE CordbType::Release()
+{
+	if (m_class)
+		m_class->Release();
+	return (BaseRelease());
+}
+
+/*
+    A list of which resources owened by this object are accounted for.
+
+    HANDLED:
+        CordbClass *m_class;  Weakly referenced by increasing count directly in AddRef() and Release()
+        Instantiation   m_inst; // Internal pointers to CordbClass released in CordbClass::Neuter
+        CordbHashTable   m_spinetypes; // Neutered
+        CordbHashTable   m_fields; // Deleted in ~CordbType
+*/
+
+CordbType::~CordbType()
+{
+	if(m_inst.m_ppInst)
+        delete [] m_inst.m_ppInst;
+    if(m_instancefields)
+        delete [] m_instancefields;
+}
+
+// Neutered by CordbModule
+void CordbType::Neuter()
+{
+    AddRef();
+    {   
+		for (unsigned int i = 0; i < m_inst.m_cInst; i++) {
+			m_inst.m_ppInst[i]->Release();
+		}
+        NeuterAndClearHashtable(&m_spinetypes);
+        CordbBase::Neuter();
+    }
+    Release();
+}    
+
+HRESULT CordbType::QueryInterface(REFIID id, void **pInterface)
+{
+    if (id == IID_ICorDebugType)
+        *pInterface = (ICorDebugClass*)this;
+    else if (id == IID_IUnknown)
+        *pInterface = (IUnknown*)(ICorDebugType*)this;
+    else
+    {
+        *pInterface = NULL;
+        return E_NOINTERFACE;
+    }
+
+    AddRef();
+    return S_OK;
+}
+
+
+// CordbType's are effectively a full representation of
+// structured types.  They are hashed via a combination of their constituent
+// elements (e.g. CordbClass's or CordbType's) and the element type that is used to
+// combine the elements, or if they have no elements then via 
+// the element type alone.  The following  is used to create all CordbTypes.
+//
+// 
+HRESULT CordbType::MkNullaryType(CordbAppDomain *appdomain, CorElementType et, CordbType **pRes)
+{
+	_ASSERTE(appdomain != NULL);
+	_ASSERTE(pRes != NULL);
+
+	// Some points in the code create types via element types that are clearly objects but where
+	// no further information is given.  This is always done shen creating a CordbValue, prior
+	// to actually going over to the EE to discover what kind of value it is.  In all these 
+	// cases we can just use the type for "Object" - the code for dereferencing the value
+	// will update the type correctly once it has been determined.  We don't do this for ELEMENT_TYPE_STRING
+	// as that is actually a NullaryType and at other places in the code we will want exactly that type!
+	if (et == ELEMENT_TYPE_CLASS || 
+		et == ELEMENT_TYPE_SZARRAY || 
+		et == ELEMENT_TYPE_ARRAY)
+	    et = ELEMENT_TYPE_OBJECT;
+
+	switch (et) 
+	{
+	case ELEMENT_TYPE_VOID:
+	case ELEMENT_TYPE_FNPTR: // this one is included because we need a "seed" type to uniquely hash FNPTR types, i.e. the nullary FNPTR type is used as the type constructor for all function pointer types, when combined with an approproiate instantiation.
+	case ELEMENT_TYPE_BOOLEAN:
+	case ELEMENT_TYPE_CHAR:
+	case ELEMENT_TYPE_I1:
+	case ELEMENT_TYPE_U1:
+	case ELEMENT_TYPE_I2:
+	case ELEMENT_TYPE_U2:
+	case ELEMENT_TYPE_I4:
+	case ELEMENT_TYPE_U4:
+	case ELEMENT_TYPE_I8:
+	case ELEMENT_TYPE_U8:
+	case ELEMENT_TYPE_R4:
+	case ELEMENT_TYPE_R8:
+	case ELEMENT_TYPE_STRING:
+	case ELEMENT_TYPE_OBJECT:
+	case ELEMENT_TYPE_TYPEDBYREF:
+	case ELEMENT_TYPE_I:
+	case ELEMENT_TYPE_U:
+	case ELEMENT_TYPE_R:
+		*pRes = (CordbType *)appdomain->m_sharedtypes.GetBase(CORDBTYPE_ID(et,0));
+		if (*pRes == NULL)
+		{
+			CordbType *pGP = new CordbType(appdomain, et, (unsigned int) 0);
+			if (pGP == NULL)
+				return E_OUTOFMEMORY;
+			HRESULT hr = appdomain->m_sharedtypes.AddBase(pGP);
+			if (SUCCEEDED(hr))
+				*pRes = pGP;
+			else {
+				_ASSERTE(0);
+				delete pGP;
+			}
+
+			return hr;
+		}
+		return S_OK;
+	default:
+		_ASSERTE(!"unexpected element type!");
+		return E_FAIL;
+	}
+
+}
+
+HRESULT CordbType::MkUnaryType(CordbAppDomain *appdomain, CorElementType et, ULONG rank, CordbType *tyarg, CordbType **pRes)
+{
+	_ASSERTE(appdomain != NULL);
+	_ASSERTE(pRes != NULL);
+	switch (et) 
+	{
+
+	case ELEMENT_TYPE_PTR:
+	case ELEMENT_TYPE_BYREF:
+	case ELEMENT_TYPE_CMOD_REQD:
+	case ELEMENT_TYPE_CMOD_OPT:
+	case ELEMENT_TYPE_MODIFIER:
+	case ELEMENT_TYPE_PINNED:
+		_ASSERTE(rank == 0);
+		goto unary;
+
+	case ELEMENT_TYPE_SZARRAY:
+		_ASSERTE(rank == 1);
+		goto unary;
+
+	case ELEMENT_TYPE_ARRAY:
+unary:
+		{
+			CordbType *tycon = (CordbType *)appdomain->m_sharedtypes.GetBase(CORDBTYPE_ID(et,rank));
+			if (tycon == NULL)
+			{
+				tycon = new CordbType(appdomain, et, rank);
+				if (tycon == NULL)
+					return E_OUTOFMEMORY;
+				HRESULT hr = appdomain->m_sharedtypes.AddBase(tycon);
+				if (FAILED(hr))
+				{
+					_ASSERTE(0);
+					delete tycon;
+					return hr;
+				}
+			}
+			Instantiation inst(1, &tyarg);
+			return MkTyAppType(appdomain, tycon, inst, pRes);
+
+		}
+	case ELEMENT_TYPE_VALUEARRAY:
+		_ASSERTE(!"unimplemented!");
+		return E_FAIL;
+	default:
+		_ASSERTE(!"unexpected element type!");
+		return E_FAIL;
+	}
+
+}
+
+HRESULT CordbType::MkTyAppType(CordbAppDomain *appdomain, CordbType *tycon, const Instantiation &inst, CordbType **pRes)
+{
+	CordbType *c = tycon;
+	for (unsigned int i = 0; i<inst.m_cClassTyPars; i++) {
+		CordbType *c2 = (CordbType *)c->m_spinetypes.GetBase((unsigned int) (inst.m_ppInst[i]));
+
+		if (c2 == NULL)
+		{
+			c2 = new CordbType(c, inst.m_ppInst[i]);
+
+			if (c2 == NULL)
+				return E_OUTOFMEMORY;
+
+			HRESULT hr = c->m_spinetypes.AddBase(c2);
+
+			if (FAILED(hr))
+			{
+				_ASSERTE(0);
+				delete c2;
+				return (hr);
+			}
+			c2->m_inst.m_cInst = i+1;
+			c2->m_inst.m_cClassTyPars = i+1;
+			c2->m_inst.m_ppInst = new CordbType *[i+1];
+			if (c2->m_inst.m_ppInst == NULL) {
+				delete c2;
+				return E_OUTOFMEMORY;
+			}
+			for (unsigned int j = 0; j<i+1; j++) {
+				// Constructed types include pointers across to other types - increase
+				// the reference counts on these.... 
+				inst.m_ppInst[j]->AddRef();
+				c2->m_inst.m_ppInst[j] = inst.m_ppInst[j];
+			}
+		}
+		c = c2;
+	}
+	*pRes = c;
+	return S_OK;
+}
+
+HRESULT CordbType::MkConstructedType(CordbAppDomain *appdomain, CorElementType et, CordbClass *tycon, const Instantiation &inst, CordbType **pRes)
+{
+	_ASSERTE(appdomain != NULL);
+	_ASSERTE(pRes != NULL);
+	switch (et) 
+	{
+	case ELEMENT_TYPE_CLASS:
+	case ELEMENT_TYPE_VALUETYPE:
+		{
+			CordbType *tyconty = NULL;
+
+			tyconty = (CordbType *)(tycon->m_classtypes.GetBase(et));
+			if (tyconty == NULL)
+			{
+				tyconty = new CordbType(appdomain, et, tycon);
+				if (tyconty == NULL)
+					return E_OUTOFMEMORY;
+				HRESULT hr = tycon->m_classtypes.AddBase(tyconty);
+				if (!SUCCEEDED(hr)) {
+					delete tyconty;
+					return hr;
+				}
+			}
+			_ASSERTE(tyconty != NULL);
+
+			return CordbType::MkTyAppType(appdomain, tyconty, inst, pRes);
+		}
+	default:
+		_ASSERTE(inst.m_cInst == 0);
+		return MkNullaryType(appdomain, et, pRes);
+
+	}
+}    
+
+
+HRESULT CordbType::MkNaryType(CordbAppDomain *appdomain, CorElementType et, const Instantiation &inst, CordbType **pRes)
+{
+	CordbType *tycon;
+	_ASSERTE(et == ELEMENT_TYPE_FNPTR);
+	HRESULT hr = MkNullaryType(appdomain, et, &tycon);
+	if (!SUCCEEDED(hr)) {
+		return hr;
+	}
+	return CordbType::MkTyAppType(appdomain, tycon, inst, pRes);
+}    
+
+
+
+HRESULT CordbType::GetType(CorElementType *pType)
+{
+	*pType = m_elementType;
+	return S_OK;
+}
+
+HRESULT CordbType::GetClass(ICorDebugClass **pClass)
+{
+	_ASSERTE(m_class);
+	*pClass = m_class;
+	if (*pClass)
+		(*pClass)->AddRef();
+	return S_OK;
+}
+
+HRESULT CordbType::GetRank(ULONG32 *pnRank)
+{
+    VALIDATE_POINTER_TO_OBJECT(pnRank, ULONG32 *);
+    
+    if (m_elementType != ELEMENT_TYPE_SZARRAY &&
+        m_elementType != ELEMENT_TYPE_ARRAY)
+        return E_INVALIDARG;
+
+    *pnRank = (ULONG32) m_rank;
+
+    return S_OK;
+}
+HRESULT CordbType::GetFirstTypeParameter(ICorDebugType **pType)
+{
+	_ASSERTE(m_inst.m_ppInst != NULL);
+	_ASSERTE(m_inst.m_ppInst[0] != NULL);
+	*pType = m_inst.m_ppInst[0];
+	if (*pType)
+		(*pType)->AddRef();
+	return S_OK;
+}
+
+
+HRESULT CordbType::MkNonGenericType(CordbAppDomain *appdomain, CorElementType et, CordbClass *cl,CordbType **pRes)
+{
+	return CordbType::MkConstructedType(appdomain, et, cl, Instantiation(), pRes);
+}
+
+HRESULT CordbType::MkNaturalNonGenericType(CordbAppDomain *appdomain, CordbClass *cl, CordbType **ppType)
+{ 
+	bool isVC;
+	HRESULT hr = cl->IsValueClass(&isVC);
+	if (FAILED(hr))
+	{
+		_ASSERTE(0);
+		return hr;
+	}
+	return MkNonGenericType(appdomain, isVC ? ELEMENT_TYPE_VALUETYPE : ELEMENT_TYPE_CLASS, cl, ppType); 
+}
+
+CordbType *CordbType::SkipFunkyModifiers() 
+{
+	switch (m_elementType) 
+	{
+	case ELEMENT_TYPE_CMOD_REQD:
+	case ELEMENT_TYPE_CMOD_OPT:
+	case ELEMENT_TYPE_MODIFIER:
+	case ELEMENT_TYPE_PINNED:
+		{
+			CordbType *next;
+			this->DestUnaryType(&next);
+			return next->SkipFunkyModifiers();
+		}
+	default:
+		return this;
+	}
+}
+
+
+void
+CordbType::DestUnaryType(CordbType **pRes) 
+{
+    _ASSERTE(m_elementType == ELEMENT_TYPE_PTR 
+		|| m_elementType == ELEMENT_TYPE_BYREF
+		|| m_elementType == ELEMENT_TYPE_ARRAY 
+		|| m_elementType == ELEMENT_TYPE_SZARRAY 
+		|| m_elementType == ELEMENT_TYPE_CMOD_REQD
+		|| m_elementType == ELEMENT_TYPE_CMOD_OPT
+		|| m_elementType == ELEMENT_TYPE_MODIFIER
+		|| m_elementType == ELEMENT_TYPE_PINNED);
+    _ASSERTE(m_elementType != ELEMENT_TYPE_VAR); 
+    _ASSERTE(m_elementType != ELEMENT_TYPE_MVAR);
+	_ASSERTE(m_inst.m_cInst == 1);
+	_ASSERTE(m_inst.m_ppInst != NULL);
+	*pRes = m_inst.m_ppInst[0];
+}
+
+
+void
+CordbType::DestConstructedType(CordbClass **cls, Instantiation *inst) 
+{
+    ASSERT(m_elementType == ELEMENT_TYPE_VALUETYPE || m_elementType == ELEMENT_TYPE_CLASS);
+	*cls = m_class;
+	*inst = m_inst;
+}
+
+void
+CordbType::DestNaryType(Instantiation *inst) 
+{
+    ASSERT(m_elementType == ELEMENT_TYPE_FNPTR);
+	*inst = m_inst;
+}
+
+
+HRESULT
+CordbType::SigToType(CordbModule *module, PCCOR_SIGNATURE pvSigBlob, const Instantiation &inst, CordbType **pRes)
+{
+
+	PCCOR_SIGNATURE blob = pvSigBlob;
+	CorElementType elementType = CorSigUncompressElementType(blob);
+	HRESULT hr;
+	switch (elementType) 
+	{
+	case ELEMENT_TYPE_VAR: 
+	case ELEMENT_TYPE_MVAR: 
+		{
+			ULONG tyvar_num;
+			tyvar_num = CorSigUncompressData(blob);
+			_ASSERTE (tyvar_num < (elementType == ELEMENT_TYPE_VAR ? inst.m_cClassTyPars : inst.m_cInst - inst.m_cClassTyPars));
+			_ASSERTE (inst.m_ppInst != NULL);
+			*pRes = (elementType == ELEMENT_TYPE_VAR ? inst.m_ppInst[tyvar_num] : inst.m_ppInst[tyvar_num + inst.m_cClassTyPars]);
+			return S_OK;
+		}
+	case ELEMENT_TYPE_WITH:
+		{
+			// ignore "WITH", look at next ELEMENT_TYPE to get CLASS or VALUE
+			elementType = CorSigUncompressElementType(blob);
+			mdToken tycon = CorSigUncompressToken(blob);
+			ULONG argCnt = CorSigUncompressData(blob); // Get number of parameters
+			CordbType **ppInst = (CordbType **) _alloca(sizeof(CordbType *) * argCnt);
+			for (unsigned int i = 0; i<argCnt;i++) {
+				IfFailRet( CordbType::SigToType(module, blob, inst, &ppInst[i]) );
+				blob += _skipTypeInSignature(blob);        // Skip the parameter
+			}
+			CordbClass *tyconcc;
+  		    IfFailRet( module->ResolveTypeRefOrDef(tycon,&tyconcc));
+
+			Instantiation tyinst(argCnt,ppInst);
+			return CordbType::MkConstructedType(module->GetAppDomain(), elementType, tyconcc, tyinst, pRes);
+		}
+	case ELEMENT_TYPE_CLASS:
+	case ELEMENT_TYPE_VALUETYPE:
+		{
+			mdToken tycon = CorSigUncompressToken(blob);
+			CordbClass *tyconcc;
+  		    IfFailRet( module->ResolveTypeRefOrDef(tycon,&tyconcc));
+
+			return CordbType::MkNonGenericType(module->GetAppDomain(), elementType, tyconcc, pRes);
+		}
+	case ELEMENT_TYPE_CMOD_REQD:
+	case ELEMENT_TYPE_CMOD_OPT:
+		{    
+			CorSigUncompressToken(blob);
+			CordbType *tyarg;
+			IfFailRet( CordbType::SigToType(module, blob, inst, &tyarg) );
+
+			*pRes = tyarg; // Throw away CMOD on all CordbTypes...
+			return S_OK;
+		}
+
+	case ELEMENT_TYPE_ARRAY:
+		{
+			CordbType *tyarg;
+			IfFailRet( CordbType::SigToType(module, blob, inst, &tyarg) );
+			blob += _skipTypeInSignature(blob);        // Skip the embedded type
+
+			ULONG rank = CorSigUncompressData(blob);
+			return CordbType::MkUnaryType(module->GetAppDomain(), elementType, rank, tyarg, pRes);
+		}
+	case ELEMENT_TYPE_SZARRAY:
+		{
+			CordbType *tyarg;
+			IfFailRet( CordbType::SigToType(module, blob, inst, &tyarg) );
+			return CordbType::MkUnaryType(module->GetAppDomain(), elementType, 1, tyarg, pRes);
+		}
+
+	case ELEMENT_TYPE_PTR:
+	case ELEMENT_TYPE_BYREF:
+	case ELEMENT_TYPE_MODIFIER:
+	case ELEMENT_TYPE_PINNED:
+		{
+			CordbType *tyarg;
+			IfFailRet( CordbType::SigToType(module, blob, inst, &tyarg) );
+			return CordbType::MkUnaryType(module->GetAppDomain(),elementType, 0, tyarg, pRes);
+		}
+
+	case ELEMENT_TYPE_FNPTR:
+		{
+			ULONG argCnt = CorSigUncompressData(blob); // Get number of parameters
+			CordbType **ppInst = (CordbType **) _alloca(sizeof(CordbType *) * argCnt);
+			for (unsigned int i = 0; i<argCnt;i++) {
+				IfFailRet( CordbType::SigToType(module, blob, inst, &ppInst[i]) );
+				blob += _skipTypeInSignature(blob);        // Skip the parameter
+			}
+			Instantiation tyinst(argCnt,ppInst);
+			return CordbType::MkNaryType(module->GetAppDomain(), elementType, tyinst, pRes);
+		}
+
+	case ELEMENT_TYPE_VALUEARRAY:
+		_ASSERTE(!"unimplemented!");
+		return E_FAIL;
+	case ELEMENT_TYPE_VOID:
+	case ELEMENT_TYPE_BOOLEAN:
+	case ELEMENT_TYPE_CHAR:
+	case ELEMENT_TYPE_I1:
+	case ELEMENT_TYPE_U1:
+	case ELEMENT_TYPE_I2:
+	case ELEMENT_TYPE_U2:
+	case ELEMENT_TYPE_I4:
+	case ELEMENT_TYPE_U4:
+	case ELEMENT_TYPE_I8:
+	case ELEMENT_TYPE_U8:
+	case ELEMENT_TYPE_R4:
+	case ELEMENT_TYPE_R8:
+	case ELEMENT_TYPE_STRING:
+	case ELEMENT_TYPE_TYPEDBYREF:
+	case ELEMENT_TYPE_OBJECT:
+	case ELEMENT_TYPE_I:
+	case ELEMENT_TYPE_U:
+	case ELEMENT_TYPE_R:
+		return CordbType::MkNullaryType(module->GetAppDomain(), elementType, pRes);
+	default:
+		_ASSERTE(!"unexpected element type!");
+		return E_FAIL;
+
+	}
+}
+
+HRESULT CordbType::TypeDataToType(CordbAppDomain *pAppDomain, DebuggerIPCE_BasicTypeData *data, CordbType **pRes) 
+{
+	HRESULT hr = S_OK;
+	CorElementType et = data->elementType;
+	switch (et) 
+	{
+	case ELEMENT_TYPE_ARRAY:
+	case ELEMENT_TYPE_VALUEARRAY:
+	case ELEMENT_TYPE_SZARRAY:
+	case ELEMENT_TYPE_PTR:
+	case ELEMENT_TYPE_BYREF:
+		// For these element types the "Basic" type data only contains the type handle.
+		// So we fetch some more data, and the go onto the "Expanded" case...
+		{
+			INPROC_LOCK();
+			DebuggerIPCEvent event;
+			pAppDomain->GetProcess()->InitIPCEvent(&event, 
+				DB_IPCE_GET_EXPANDED_TYPE_INFO, 
+				true,
+				(void *)(pAppDomain->m_id));
+			event.ExpandType.typeHandle = data->typeHandle;
+
+			// two-way event
+			hr = pAppDomain->GetProcess()->m_cordb->SendIPCEvent(pAppDomain->GetProcess(), &event,
+				sizeof(DebuggerIPCEvent));
+
+			if (!SUCCEEDED(hr))
+			{
+				_ASSERTE(0);
+				goto exitevent;
+			}
+
+                        if (!SUCCEEDED(event.hr))
+                                goto exitevent;
+
+			_ASSERTE(event.type == DB_IPCE_GET_EXPANDED_TYPE_INFO_RESULT);
+			hr = CordbType::TypeDataToType(pAppDomain,&event.ExpandTypeResult, pRes);
+			if (!SUCCEEDED(hr))
+			{
+				_ASSERTE(0);
+				goto exitevent;
+			}
+exitevent:
+			INPROC_UNLOCK();
+			return hr;
+		}
+
+	case ELEMENT_TYPE_FNPTR:
+		{
+			DebuggerIPCE_ExpandedTypeData e;
+			e.elementType = et;
+			e.NaryTypeData.typeHandle = data->typeHandle;
+			return CordbType::TypeDataToType(pAppDomain, &e, pRes);
+		}
+	default:
+		// For all other element types the "Basic" view of a type 
+		// contains the same information as the "expanded"
+		// view, so just reuse the code for the Expanded view...
+		DebuggerIPCE_ExpandedTypeData e;
+		e.elementType = et;
+		e.ClassTypeData.metadataToken = data->metadataToken;
+		e.ClassTypeData.debuggerModuleToken = data->debuggerModuleToken;
+		e.ClassTypeData.typeHandle = data->typeHandle;
+		return CordbType::TypeDataToType(pAppDomain, &e, pRes);
+	}
+}
+
+
+// GENERICS: A subtle change in the approach I have adopted is that
+// for the type E_T_STRING m_class is now NULL.  This means that
+// the behaviour revealed to clients also changes slightly: GetClass (which
+// could be deprecated anyway...) now returns NULL for the type STRING
+// and for all objects of type STRING.  
+//
+// I do actually return the class token back from the left-side when
+// getting the type of an object, so in this case we could use this 
+// to lookup the CordbClass for System.String.  Or we could go and resolve
+// the type ourselves on the right-side.  However neither seems very
+// appealing: there is no reason per-se that we need to "know" the class
+// for E_T_STRING on the right-side at all....
+//
+HRESULT CordbType::TypeDataToType(CordbAppDomain *pAppDomain, DebuggerIPCE_ExpandedTypeData *data, CordbType **pRes) 
+{
+    CorElementType et = data->elementType;
+    HRESULT hr;
+    switch (et) 
+    {
+    case ELEMENT_TYPE_OBJECT:
+        // This is just in case we have "OBJECT" but actually have a more specific class....
+        if (data->ClassTypeData.metadataToken != mdTokenNil) {
+            et = ELEMENT_TYPE_CLASS;
+            goto ETClass;
+        }
+        else 
+            goto ETObject;
+
+
+    case ELEMENT_TYPE_VOID:
+    case ELEMENT_TYPE_BOOLEAN:
+    case ELEMENT_TYPE_CHAR:
+    case ELEMENT_TYPE_I1:
+    case ELEMENT_TYPE_U1:
+    case ELEMENT_TYPE_I2:
+    case ELEMENT_TYPE_U2:
+    case ELEMENT_TYPE_I4:
+    case ELEMENT_TYPE_U4:
+    case ELEMENT_TYPE_I8:
+    case ELEMENT_TYPE_U8:
+    case ELEMENT_TYPE_R4:
+    case ELEMENT_TYPE_R8:
+    case ELEMENT_TYPE_STRING:
+    case ELEMENT_TYPE_TYPEDBYREF:
+    case ELEMENT_TYPE_I:
+    case ELEMENT_TYPE_U:
+    case ELEMENT_TYPE_R:
+ETObject:
+        IfFailRet (CordbType::MkNullaryType(pAppDomain, et, pRes));
+        break;
+
+	case ELEMENT_TYPE_CLASS:
+	case ELEMENT_TYPE_VALUETYPE:
+ETClass:
+        {
+            if (data->ClassTypeData.metadataToken == mdTokenNil) {
+                et = ELEMENT_TYPE_OBJECT;
+                goto ETObject;
+            }
+            CordbModule* pClassModule = pAppDomain->LookupModule(data->ClassTypeData.debuggerModuleToken);
+#ifdef RIGHT_SIDE_ONLY
+            _ASSERTE(pClassModule != NULL);
+#else
+            // This case happens if inproc debugging is used from a ModuleLoadFinished
+            // callback for a module that hasn't been bound to an assembly yet.
+            if (pClassModule == NULL)
+                return E_FAIL;
+#endif
+
+            CordbClass *tycon;
+            IfFailRet (pClassModule->LookupOrCreateClass(data->ClassTypeData.metadataToken,&tycon));
+            if (data->ClassTypeData.typeHandle) 
+            {
+                IfFailRet (CordbType::InstantiateFromTypeHandle(pAppDomain, data->ClassTypeData.typeHandle, et, tycon, pRes));  
+                // Set the type handle regardless of how we found
+                // the type.  For example if type was already 
+                // constructed without the type handle still set
+                // it here.
+                if (*pRes) 
+                    (*pRes)->m_typeHandle = data->ClassTypeData.typeHandle;
+                break;
+            } 
+            else 
+            {
+                IfFailRet (CordbType::MkNonGenericType(pAppDomain, et,tycon,pRes));
+                break;
+            }
+        }
+
+    case ELEMENT_TYPE_ARRAY:
+    case ELEMENT_TYPE_SZARRAY:
+        {
+            CordbType *argty;
+            IfFailRet (CordbType::TypeDataToType(pAppDomain, &(data->ArrayTypeData.arrayTypeArg), &argty));
+            IfFailRet (CordbType::MkUnaryType(pAppDomain, et, data->ArrayTypeData.arrayRank, argty, pRes));
+            break;
+        }
+
+    case ELEMENT_TYPE_PTR:
+    case ELEMENT_TYPE_BYREF:
+        {
+            CordbType *argty;
+            IfFailRet (CordbType::TypeDataToType(pAppDomain, &(data->UnaryTypeData.unaryTypeArg), &argty));
+            IfFailRet (CordbType::MkUnaryType(pAppDomain, et, 0, argty, pRes));
+            break;
+        }
+
+    case ELEMENT_TYPE_FNPTR:
+        {
+            IfFailRet (CordbType::InstantiateFromTypeHandle(pAppDomain, data->NaryTypeData.typeHandle, et, NULL, pRes));  
+            if (*pRes) 
+              (*pRes)->m_typeHandle = data->NaryTypeData.typeHandle;
+            break;
+        }
+
+    default:
+        _ASSERTE(!"unexpected element type!");
+        return E_FAIL;
+
+    }
+    return S_OK;
+}
+
+HRESULT CordbType::InstantiateFromTypeHandle(CordbAppDomain *appdomain, REMOTE_PTR typeHandle, CorElementType et, CordbClass *tycon, CordbType **pRes) 
+{
+    HRESULT hr;
+    DebuggerIPCEvent *retEvent;
+    unsigned int typarCount;
+    CordbType **ppInst;
+    DebuggerIPCE_ExpandedTypeData *currentTyParData;
+
+
+    CORDBSyncFromWin32StopIfNecessary(appdomain->GetProcess());
+
+    INPROC_LOCK();
+
+    // We've got a remote address that points to a type handle.
+    // We need to send to the left side to get real information about
+    // the type handle, including the type parameters.
+    DebuggerIPCEvent event;
+    // GENERICS: Collect up the class type parameters
+	appdomain->GetProcess()->InitIPCEvent(&event, 
+        DB_IPCE_GET_TYPE_HANDLE_PARAMS, 
+        false,
+        (void *)(appdomain->m_id));
+    event.GetTypeHandleParams.typeHandle = typeHandle;
+    
+	hr = appdomain->GetProcess()->m_cordb->SendIPCEvent(appdomain->GetProcess(), &event,
+        sizeof(DebuggerIPCEvent));
+    
+    // Stop now if we can't even send the event.
+    if (!SUCCEEDED(hr))
+        goto exit;
+    
+    // Wait for events to return from the RC. We expect at least one
+    // class info result event.                                                           
+    retEvent = (DebuggerIPCEvent *) _alloca(CorDBIPC_BUFFER_SIZE);
+            
+#ifdef RIGHT_SIDE_ONLY
+    hr = appdomain->GetProcess()->m_cordb->WaitForIPCEventFromProcess(appdomain->GetProcess(), 
+		appdomain,
+                retEvent);
+#else 
+    hr = appdomain->GetProcess()->m_cordb->GetFirstContinuationEvent(appdomain->GetProcess(),retEvent);
+#endif //RIGHT_SIDE_ONLY    
+            
+    if (!SUCCEEDED(hr))
+        goto exit;
+            
+    _ASSERTE(retEvent->type == DB_IPCE_GET_TYPE_HANDLE_PARAMS_RESULT);
+            
+    typarCount = retEvent->GetTypeHandleParamsResult.typarCount;
+            
+    currentTyParData = &(retEvent->GetTypeHandleParamsResult.tyParData[0]);
+            
+    ppInst = (CordbType **) _alloca(sizeof(CordbType *) * typarCount);
+
+    for (unsigned int i = 0; i < typarCount;i++)
+    {
+		hr = CordbType::TypeDataToType(appdomain, currentTyParData, &ppInst[i]);
+        if (!SUCCEEDED(hr))
+            goto exit;
+        currentTyParData++;
+    }
+
+	{
+		Instantiation inst(typarCount, ppInst);
+		if (et == ELEMENT_TYPE_FNPTR) 
+		{
+			hr = CordbType::MkNaryType(appdomain, et,inst, pRes);
+		}
+		else 
+		{
+			hr = CordbType::MkConstructedType(appdomain, et,tycon,inst, pRes);
+		}
+	}
+
+exit:    
+
+#ifndef RIGHT_SIDE_ONLY    
+    appdomain->GetProcess()->ClearContinuationEvents();
+#endif
+    
+    INPROC_UNLOCK();
+    
+    return hr;
+}
+
+
+HRESULT CordbType::Init(BOOL fForceInit)
+{
+
+	HRESULT hr = S_OK;
+
+    // We don't have to reinit if the EnC version is up-to-date &
+    // we haven't been told to do the init regardless.
+    if (m_EnCCounterLastSync >= GetProcess()->m_EnCCounter
+        && !fForceInit)
+        return S_OK;
+        
+
+	// Step 1. initialize the type constructor (if one exists)
+	// and the (class) type parameters.... 
+	if (m_elementType == ELEMENT_TYPE_CLASS || m_elementType == ELEMENT_TYPE_VALUETYPE) {
+		_ASSERTE(m_class != NULL);
+		IfFailRet( m_class->Init(fForceInit) );
+		// That's all that's needed for simple classes and value types, the normal case.
+		if (m_class->m_typarCount == 0) 
+		{
+			return hr; // no clean-up required
+		}
+	}
+
+	for (unsigned int i = 0; i<m_inst.m_cClassTyPars; i++)
+	{
+		_ASSERTE(m_inst.m_ppInst != NULL);
+		_ASSERTE(m_inst.m_ppInst[i] != NULL);
+		IfFailRet( m_inst.m_ppInst[i]->Init(fForceInit) );
+	}
+
+    // Step 2. Try to fetch the type handle if necessary (only 
+    // for instantiated class types, pointer types etc.)
+    // We do this by preparing an event specifying the type and 
+    // then fetching the type handle from the left-side.  This
+    // will not always succeed, as getting the type handle is the 
+    // equivalent of doing a FuncEval, i.e. the instantiation may
+    // not have been created.  But we try anyway to reduce the number of
+    // failures.  Also, the attempt will fail if too many type parameters
+    // are specified.
+    //
+    // Note that in the normal case we will have the type handle from the EE
+    // anyway, e.g. if the CordbType was created when reporting the type
+    // of an actual object.
+     CordbProcess *pProcess = GetProcess();
+     INPROC_LOCK();
+     if (m_typeHandle == NULL &&
+         (m_elementType == ELEMENT_TYPE_ARRAY ||
+          m_elementType == ELEMENT_TYPE_SZARRAY ||
+          m_elementType == ELEMENT_TYPE_BYREF ||
+          m_elementType == ELEMENT_TYPE_PTR ||
+          m_elementType == ELEMENT_TYPE_FNPTR ||
+          (m_elementType == ELEMENT_TYPE_CLASS && m_class->m_typarCount > 0)))
+      {
+
+#ifdef RIGHT_SIDE_ONLY
+          CORDBRequireProcessStateOKAndSync(GetProcess(), GetAppDomain());
+#else 
+          CORDBRequireProcessStateOK(GetProcess());
+#endif    
+
+          DebuggerIPCEvent event;
+          pProcess->InitIPCEvent(&event, 
+                                 DB_IPCE_GET_TYPE_HANDLE, 
+                                 true,
+                                 (void *)(m_appdomain->m_id));
+          
+          TypeToTypeData(&(event.GetTypeHandle.typeData));
+           
+          if (m_inst.m_cClassTyPars > CORDB_MAX_TYPARS) 
+          {
+              hr = E_FAIL;
+              goto exit1;
+          }
+          event.GetTypeHandle.typarCount = m_inst.m_cClassTyPars;
+          for (unsigned int i = 0; i<m_inst.m_cClassTyPars; i++)
+          {
+              _ASSERTE(m_inst.m_ppInst != NULL);
+              _ASSERTE(m_inst.m_ppInst[i] != NULL);
+              m_inst.m_ppInst[i]->TypeToTypeData(&event.GetTypeHandle.tyParData[i]);
+          }
+           
+          hr = pProcess->m_cordb->SendIPCEvent(pProcess, 
+                                               &event,
+                                               sizeof(DebuggerIPCEvent));
+           
+          if (!SUCCEEDED(hr) || !SUCCEEDED(event.hr))
+              goto exit1;
+           
+          _ASSERTE(event.type == DB_IPCE_GET_TYPE_HANDLE_RESULT);
+          _ASSERTE(event.GetTypeHandleResult.typeHandle != NULL);
+          m_typeHandle = event.GetTypeHandleResult.typeHandle;
+          
+
+exit1:    
+          if (FAILED(hr))
+              goto exit;
+      }
+
+	//
+	if ((m_elementType == ELEMENT_TYPE_VALUETYPE || m_elementType == ELEMENT_TYPE_CLASS) && m_class->m_typarCount > 0)
+	{
+		_ASSERTE(m_typeHandle);
+
+	    DebuggerIPCEvent event;
+		pProcess->InitIPCEvent(&event, 
+			DB_IPCE_GET_CLASS_INFO, 
+			false,
+			(void *)(m_appdomain->m_id));
+		event.GetClassInfo.metadataToken = 0;
+		event.GetClassInfo.debuggerModuleToken = NULL;
+		event.GetClassInfo.typeHandle = m_typeHandle;
+
+		// two-way event
+        bool wait = true;
+		bool fFirstEvent = true;
+		unsigned int fieldIndex = 0;
+		unsigned int totalFieldCount = 0;
+        DebuggerIPCEvent *retEvent;
+
+		hr = pProcess->m_cordb->SendIPCEvent(pProcess, &event,
+			sizeof(DebuggerIPCEvent));
+
+		// Stop now if we can't even send the event.
+		if (!SUCCEEDED(hr))
+			goto exit2;
+
+		// Wait for events to return from the RC. We expect at least one
+		// class info result event.
+		retEvent = (DebuggerIPCEvent *) _alloca(CorDBIPC_BUFFER_SIZE);
+
+		while (wait)
+		{
+#ifdef RIGHT_SIDE_ONLY
+			hr = pProcess->m_cordb->WaitForIPCEventFromProcess(pProcess, 
+				GetAppDomain(),
+				retEvent);
+#else 
+
+			if (fFirstEvent)
+				hr = pProcess->m_cordb->GetFirstContinuationEvent(pProcess,retEvent);
+			else
+				hr = pProcess->m_cordb->GetNextContinuationEvent(pProcess,retEvent);
+#endif //RIGHT_SIDE_ONLY    
+
+			if (!SUCCEEDED(hr))
+				goto exit2;
+
+			_ASSERTE(retEvent->type == DB_IPCE_GET_CLASS_INFO_RESULT);
+
+			// If this is the first event back from the RC, then create the
+			// array to hold the field.
+			if (fFirstEvent)
+			{
+				fFirstEvent = false;
+
+				m_objectSize = retEvent->GetClassInfoResult.objectSize;
+				// Shouldn't ever loose fields, and should only get back information on 
+				// instance fields.  This should be _exactly_ the number of fields reported
+				// by the parent class, as that will have been updated to take into account
+				// EnC fields when it was initialized above.
+				_ASSERTE(retEvent->GetClassInfoResult.instanceVarCount == m_class->m_instanceVarCount);
+				totalFieldCount = retEvent->GetClassInfoResult.instanceVarCount;
+				// Since we don't keep pointers to the m_instancefields elements, 
+				// just toss it & get a new one.
+				if (m_instancefields != NULL)
+				{
+					delete m_instancefields;
+					m_instancefields = NULL;
+				}
+				if (totalFieldCount > 0)
+				{
+					m_instancefields = new DebuggerIPCE_FieldData[totalFieldCount];
+
+					if (m_instancefields == NULL)
+					{
+						hr = E_OUTOFMEMORY;
+						goto exit;
+					}
+				}
+			}
+
+			DebuggerIPCE_FieldData *currentFieldData =
+				&(retEvent->GetClassInfoResult.fieldData);
+
+			for (unsigned int i = 0; i < retEvent->GetClassInfoResult.fieldCount;
+				i++)
+			{
+				m_instancefields[fieldIndex] = *currentFieldData;
+
+				_ASSERTE(m_instancefields[fieldIndex].fldOffset != FIELD_OFFSET_NEW_ENC_DB);
+
+				currentFieldData++;
+				fieldIndex++;
+			}
+		
+			if (fieldIndex >= totalFieldCount)
+				wait = false;
+		}
+
+		// Remember the most recently acquired version of this class
+		m_EnCCounterLastSync = GetProcess()->m_EnCCounter;
+
+exit2:    
+#ifndef RIGHT_SIDE_ONLY    
+		GetProcess()->ClearContinuationEvents();
+#endif
+
+		if (FAILED(hr))
+			goto exit;
+
+	}
+
+exit:
+	INPROC_UNLOCK();
+	return hr;
+
+}
+
+
+HRESULT
+CordbType::GetObjectSize(ULONG32 *pObjectSize)
+{
+    switch (m_elementType)
+	{
+	case ELEMENT_TYPE_VALUETYPE:
+		{
+			HRESULT hr = S_OK;
+			*pObjectSize = 0;
+
+			hr = Init(FALSE);
+
+			if (!SUCCEEDED(hr))
+				return hr;
+
+			*pObjectSize = (ULONG) ((m_class->m_typarCount == 0) ? m_class->m_objectSize : this->m_objectSize);
+
+			return hr;
+		}
+	default:
+		*pObjectSize = _sizeOfElementInstance((PCCOR_SIGNATURE) &m_elementType);
+		return S_OK;
+	}
+
+}
+
+void CordbType::TypeToTypeData(DebuggerIPCE_BasicTypeData *data)
+{
+	data->elementType = m_elementType;
+	switch (m_elementType) 
+	{
+	case ELEMENT_TYPE_ARRAY:
+	case ELEMENT_TYPE_VALUEARRAY:
+	case ELEMENT_TYPE_SZARRAY:
+	case ELEMENT_TYPE_BYREF:
+	case ELEMENT_TYPE_PTR:
+		_ASSERTE(m_typeHandle != NULL);
+		data->metadataToken = mdTokenNil;
+		data->debuggerModuleToken = NULL;
+		data->typeHandle = m_typeHandle; 
+		break;
+
+	case ELEMENT_TYPE_VALUETYPE:
+	case ELEMENT_TYPE_CLASS:
+		_ASSERTE(m_class != NULL);
+		data->metadataToken = m_class->m_token;
+		data->debuggerModuleToken = m_class->GetModule()->m_debuggerModuleToken;
+		data->typeHandle = m_typeHandle; //normally null
+		break;
+	default:
+		data->metadataToken = mdTokenNil;
+		data->debuggerModuleToken = NULL;
+		data->typeHandle = NULL; 
+		break;
+	}
+}
+
+// Nb. CordbType::Init need NOT have been called before this...
+// Also, this does not write the type arguments.  How this is done depends
+// depends on where this is called from.
+void CordbType::TypeToTypeData(DebuggerIPCE_ExpandedTypeData *data)
+{
+
+	switch (m_elementType) 
+	{
+	case ELEMENT_TYPE_ARRAY:
+	case ELEMENT_TYPE_SZARRAY:
+
+		data->ArrayTypeData.arrayRank = m_rank;
+		data->elementType = m_elementType;
+		break;
+
+	case ELEMENT_TYPE_BYREF:
+	case ELEMENT_TYPE_PTR:
+	case ELEMENT_TYPE_FNPTR:
+
+		data->elementType = m_elementType;
+		break;
+
+	case ELEMENT_TYPE_CLASS:
+		{
+			data->elementType = m_elementType;
+			data->ClassTypeData.metadataToken = m_class->m_token;
+			data->ClassTypeData.debuggerModuleToken = m_class->m_module->m_debuggerModuleToken;
+			data->ClassTypeData.typeHandle = NULL;
+
+			break;
+		}
+	case ELEMENT_TYPE_VALUEARRAY:
+		_ASSERTE(!"unimplemented!");
+	case ELEMENT_TYPE_END:
+		_ASSERTE(!"bad element type!");
+
+	default:
+		data->elementType = m_elementType;
+		break;
+	}
+}
+
+HRESULT CordbType::EnumerateTypeParameters(ICorDebugTypeEnum **ppTypeParameterEnum)
+{
+    VALIDATE_POINTER_TO_OBJECT(ppTypeParameterEnum, ICorDebugTypeEnum **);
+
+#ifdef RIGHT_SIDE_ONLY
+    CORDBRequireProcessStateOKAndSync(m_appdomain->GetProcess(), GetAppDomain());
+#else 
+    // For the Virtual Right Side (In-proc debugging), we'll always be synched, but not neccessarily b/c we've gotten a
+    // synch message.
+    CORDBRequireProcessStateOK(m_appdomain->GetProcess());
+#endif    
+
+	ICorDebugTypeEnum *icdTPE = new CordbTypeEnum(this->m_inst.m_cInst, this->m_inst.m_ppInst);
+    if ( icdTPE == NULL )
+    {
+        (*ppTypeParameterEnum) = NULL;
+        return E_OUTOFMEMORY;
+    }
+    
+    (*ppTypeParameterEnum) = icdTPE;
+    icdTPE->AddRef();
+    return S_OK;
+}
+
+HRESULT CordbType::GetBase(ICorDebugType **ppType)
+{
+	HRESULT hr;
+    VALIDATE_POINTER_TO_OBJECT(ppType, ICorDebugType **);
+
+	if (m_elementType != ELEMENT_TYPE_CLASS && m_elementType != ELEMENT_TYPE_VALUETYPE)
+		return E_INVALIDARG;
+
+	CordbType *res = NULL;
+
+	_ASSERTE(m_class != NULL);
+
+	// Get the supertype from metadata for m_class
+	mdToken extends;
+	_ASSERTE(m_class->GetModule()->m_pIMImport != NULL);
+	IfFailRet (m_class->GetModule()->m_pIMImport->GetTypeDefProps(m_class->m_token, NULL, 0, NULL, NULL, &extends));
+
+	if (extends == mdTypeDefNil || extends == mdTypeRefNil || extends == mdTokenNil)
+	{
+		res = NULL;
+	}
+	else if (TypeFromToken(extends) == mdtTypeSpec)
+	{
+        PCCOR_SIGNATURE sig;
+		ULONG sigsz;
+   	    // Get the signature for the constructed supertype...
+        IfFailRet (m_class->GetModule()->m_pIMImport->GetTypeSpecFromToken(extends,&sig,&sigsz));
+		_ASSERTE(sig);
+
+     	// Instantiate the signature of the supertype using the type instantiation for
+		// the current type....
+		IfFailRet( SigToType(m_class->GetModule(), sig, m_inst, &res) );
+	}
+	else if (TypeFromToken(extends) == mdtTypeRef || TypeFromToken(extends) == mdtTypeDef)
+	{
+		CordbClass *superclass;
+		IfFailRet( m_class->GetModule()->ResolveTypeRefOrDef(extends,&superclass));
+		_ASSERTE(superclass != NULL);
+		IfFailRet( MkNaturalNonGenericType(m_appdomain, superclass, &res) );
+	}
+	else 
+	{
+		res = NULL;
+		_ASSERTE(!"unexpected token!");
+	}
+
+    (*ppType) = res;
+    if (*ppType)
+		res->AddRef();
+    return S_OK;
+}
+
+HRESULT CordbType::GetFieldInfo(mdFieldDef fldToken, DebuggerIPCE_FieldData **ppFieldData)
+{
+    HRESULT hr = S_OK;
+
+	if (m_elementType != ELEMENT_TYPE_CLASS && m_elementType != ELEMENT_TYPE_VALUETYPE)
+		return E_INVALIDARG;
+
+	*ppFieldData = NULL;
+    
+    hr = Init(FALSE);
+
+    if (!SUCCEEDED(hr))
+        return hr;
+
+	if (m_class->m_typarCount > 0) 
+	{
+		hr = CordbClass::SearchFieldInfo(m_class->GetModule(), m_class->m_instanceVarCount, m_instancefields, m_class->m_token, fldToken, ppFieldData);
+	}
+	else
+	{
+		hr = CORDBG_E_FIELD_NOT_AVAILABLE;
+	}
+	if (hr == CORDBG_E_FIELD_NOT_AVAILABLE)
+		return m_class->GetFieldInfo(fldToken, ppFieldData); // this is for static fields an non-generic types....
+	else
+		return hr;
 }
 

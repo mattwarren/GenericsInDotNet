@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -36,26 +41,6 @@ PSTR Spaces (int iIndent)
     static  CHAR    szBuf[256];
     memset (szBuf, ' ', iIndent * 2);
     szBuf[iIndent*2] = 0;
-    return szBuf;
-}
-
-PWSTR BuildQualifiedName (BASENODE *pName)
-{
-    static  WCHAR   szBuf[1024];
-    WCHAR   *psz = szBuf;
-
-    while (pName->asDOT()->p1->kind == NK_DOT)
-        pName = pName->asDOT()->p1;
-
-    wcscpy (psz, pName->asDOT()->p1->asNAME()->pName->text);
-    psz += wcslen (psz);
-    while (pName->kind == NK_DOT)
-    {
-        *psz++ = '.';
-        wcscpy (psz, pName->asDOT()->p2->asNAME()->pName->text);
-        psz += wcslen (psz);
-       pName = pName->pParent;
-    }
     return szBuf;
 }
 
@@ -167,8 +152,18 @@ void DumpTree (BASENODE *pNode)
             DumpTree (((CLASSNODE *)pNode)->pAttr);
             HEADING ("NAME");
             DumpTree (((CLASSNODE *)pNode)->pName);
+            if (((CLASSNODE *)pNode)->pTypeParams)
+            {
+                HEADING ("TYPEPARAMS");
+                DumpTree (((CLASSNODE *)pNode)->pTypeParams);
+            }
             HEADING ("BASES");
             DumpTree (((CLASSNODE *)pNode)->pBases);
+            if (((CLASSNODE *)pNode)->pConstraints)
+            {
+                HEADING ("CONSTRAINTS");
+                DumpTree (((CLASSNODE *)pNode)->pConstraints);
+            }
             HEADING ("MEMBERS");
             DumpTree (((CLASSNODE *)pNode)->pMembers);
             break;
@@ -215,8 +210,18 @@ void DumpTree (BASENODE *pNode)
             DumpTree (pNode->asDELEGATE()->pType);
             HEADING ("NAME");
             DumpTree (pNode->asDELEGATE()->pName);
+            if (pNode->asDELEGATE()->pTypeParams)
+            {
+                HEADING ("TYPEPARAMS");
+                DumpTree (pNode->asDELEGATE()->pTypeParams);
+            }
             HEADING ("PARAMETERS");
             DumpTree (pNode->asDELEGATE()->pParms);
+            if (pNode->asDELEGATE()->pConstraints)
+            {
+                HEADING ("CONSTRAINTS");
+                DumpTree (pNode->asDELEGATE()->pConstraints);
+            }
             break;
 
         case NK_DO                :    // LOOPSTMT
@@ -321,6 +326,11 @@ void DumpTree (BASENODE *pNode)
                 HEADING ((pNode->other & NFEX_CTOR_BASE) ? "ARGS TO BASE" : "ARGS TO THIS");
                 DumpTree (((METHODNODE *)pNode)->pCtorArgs);
             }
+            if (((METHODNODE *)pNode)->pConstraints)
+            {
+                HEADING ("CONSTRAINTS");
+                DumpTree (((METHODNODE *)pNode)->pConstraints);
+            }
 
             HEADING ("BODY");
             DumpTree (((METHODNODE *)pNode)->pBody);
@@ -328,6 +338,22 @@ void DumpTree (BASENODE *pNode)
 
         case NK_NAME              :    // NAME
             printf ("%sNAME: \"%S\"\n", Spaces(iIndent), pNode->asNAME()->pName->text);
+            break;
+
+        case NK_GENERICNAME       :    // GENERICNAME
+            printf ("%sGENERICNAME: \"%S\"\n", Spaces(iIndent), pNode->asGENERICNAME()->pName->text);
+            HEADING ("TYPE PARAMETERS");
+            DumpTree (pNode->asGENERICNAME()->pParams);
+            break;
+            
+        case NK_CONSTRAINT        :    // CONSTRAINT
+            HEADING ("CONSTRAINT");
+            DumpTree (pNode->asCONSTRAINT()->pName);
+            HEADING ("TYPE");
+            if (pNode->flags & NF_CONSTRAINTNEWABLE)
+                printf ("new ()");
+            else
+                DumpTree (pNode->asCONSTRAINT()->pType);
             break;
 
         case NK_NAMESPACE         :    // NAMESPACE

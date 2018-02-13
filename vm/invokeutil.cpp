@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -33,6 +38,7 @@
 #include "comclass.h"
 #include "customattribute.h"
 #include "eeconfig.h"
+#include "generics.h"
 
 // The Attributes Table
 //  20 bits for built in types and 12 bits for Properties
@@ -200,7 +206,7 @@ void InvokeUtil::CheckArg(TypeHandle th, OBJECTREF* obj, RefSecContext *pSCtx)
                 if ((*obj)->GetMethodTable()->IsTransparentProxyType())
                 {
                     GCPROTECT_BEGININTERIOR(obj);
-                    if (!CRemotingServices::CheckCast(*obj, thBaseType.GetClass()))
+                    if (!CRemotingServices::CheckCast(*obj, thBaseType))
                     {
                         COMPlusThrow(kArgumentException,L"Arg_ObjObj");
                     }
@@ -699,7 +705,7 @@ void InvokeUtil::CheckType(TypeHandle dstTH, OBJECTREF *psrcObj)
     {
         MethodTable *pDstMT = dstTH.GetMethodTable();
         GCPROTECT_BEGININTERIOR(psrcObj);
-        if (!CRemotingServices::CheckCast(*psrcObj, pDstMT->GetClass()))
+        if (!CRemotingServices::CheckCast(*psrcObj, pDstMT))
         {
             COMPlusThrow(kArgumentException,L"Arg_ObjObj");
         }
@@ -838,7 +844,7 @@ HRESULT InvokeUtil::ValidField(TypeHandle th, OBJECTREF* value, RefSecContext *p
             // Give thunking classes a second chance to check the cast
             if((*value)->GetMethodTable()->IsThunking())
             {
-                fCastOK = CRemotingServices::CheckCast(*value, th.AsClass());
+                fCastOK = CRemotingServices::CheckCast(*value, th);
             }
 
             if(!fCastOK)
@@ -870,7 +876,7 @@ void InvokeUtil::CreateCustomAttributeObject(EEClass *pAttributeClass,
     CUSTOMATTRIBUTEREF pNewObj = (CUSTOMATTRIBUTEREF)AllocateObject(_pMTCustomAttribute);
     OBJECTREF caType = NULL;
     GCPROTECT_BEGIN(pNewObj);
-    caType = pAttributeClass->GetExposedClassObject();
+    caType = pAttributeClass->GetMethodTable()->GetExposedClassObject();
     GCPROTECT_END();
     pNewObj->SetData(*pProtectedCA, caType, tkCtor, blobData, blobCnt, pModule, inheritedLevel);
     *pProtectedCA = pNewObj;
@@ -1079,7 +1085,7 @@ EEClass* InvokeUtil::GetAnyRef()
 
 // GetGlobalMethodInfo
 // Given a MethodDesc* and Module get the methodInfo associated with it.
-OBJECTREF InvokeUtil::GetGlobalMethodInfo(MethodDesc* pMeth,Module* pMod)
+OBJECTREF InvokeUtil::GetGlobalMethodInfo(MethodDesc* pMeth,Module* pMod, TypeHandle owner)
 {
     _ASSERTE(pMeth);
     _ASSERTE(pMod);
@@ -1095,11 +1101,11 @@ OBJECTREF InvokeUtil::GetGlobalMethodInfo(MethodDesc* pMeth,Module* pMod)
         if (pML->methods[i].pMethod == pMeth) {
             ReflectClass* pRC = 0;
             if (pML->dwMethods > 0) {
-                EEClass* pEEC = pML->methods[0].pMethod->GetClass();
-                if (pEEC) {
-                    REFLECTCLASSBASEREF o = (REFLECTCLASSBASEREF) pEEC->GetExposedClassObject();
-                    pRC = (ReflectClass*) o->GetData();
-                }       
+	      MethodTable* pMT = pML->methods[0].pMethod->GetMethodTable();
+              if (pMT) {
+	        REFLECTCLASSBASEREF o = (REFLECTCLASSBASEREF) pMT->GetExposedClassObject();
+                pRC = (ReflectClass*) o->GetData();
+              }
             }
             return (OBJECTREF) pML->methods[0].GetMethodInfo(pRC);
         }
@@ -1111,21 +1117,50 @@ OBJECTREF InvokeUtil::GetGlobalMethodInfo(MethodDesc* pMeth,Module* pMod)
 
 // GetMethodInfo
 // Given a MethodDesc* get the methodInfo associated with it.
-OBJECTREF InvokeUtil::GetMethodInfo(MethodDesc* pMeth)
+OBJECTREF InvokeUtil::GetMethodInfo(MethodDesc* pMeth, TypeHandle owner)
 {
     THROWSCOMPLUSEXCEPTION();
 
-    EEClass* pEEC = pMeth->GetClass();
     ReflectMethodList* pRML = 0;
     ReflectClass* pRC = 0;
     bool method = true;
+    MethodTable* pMT = pMeth->GetMethodTable();
 
-    REFLECTCLASSBASEREF o = (REFLECTCLASSBASEREF) pEEC->GetExposedClassObject();
+    if (pMT->HasInstantiation())
+    {
+      if (!owner.IsNull())
+        pMT = Generics::GetMethodDeclaringType(owner, pMeth, NULL).AsMethodTable();
+      _ASSERTE(pMT != NULL);
+    }
+
+    REFLECTCLASSBASEREF o = (REFLECTCLASSBASEREF) pMT->GetExposedClassObject();
     _ASSERTE(o != NULL);
     
     pRC = (ReflectClass*) o->GetData();
     _ASSERTE(pRC);
 
+    // If it's an instantiated method then no class will contain it so we create a fresh ReflectMethod
+    if (pMeth->HasMethodInstantiation())
+    {
+      ReflectMethod *pInstRM = (ReflectMethod*) 
+        GetAppDomain()->GetReflectionHeap()->AllocMem(sizeof(ReflectMethod));
+
+      if (!pInstRM)
+        COMPlusThrowOM();
+      pInstRM->pMethod = pMeth;
+      pInstRM->szName = pMeth->GetName();
+      pInstRM->dwNameCnt = (DWORD) strlen(pInstRM->szName);
+      pInstRM->pSignature = 0;
+      pInstRM->attrs = pMeth->GetAttrs();
+      pInstRM->dwFlags = 0;
+      pInstRM->declType = TypeHandle(pMT);
+      pInstRM->pNext = NULL;
+      pInstRM->pIgnNext = NULL;
+      GetAppDomain()->AllocateObjRefPtrsInLargeTable(1, &(pInstRM->pMethodObj));
+
+      return (OBJECTREF) pInstRM->GetMethodInfo(pRC);
+    }
+    
     // Check to see if this is a constructor.
     if (IsMdRTSpecialName(pMeth->GetAttrs())) {
         LPCUTF8 szName = pMeth->GetName();
@@ -1172,7 +1207,7 @@ OBJECTREF InvokeUtil::ChangeType(OBJECTREF binder,OBJECTREF srcObj,TypeHandle th
     MethodDesc* pCTMeth = g_Mscorlib.GetMethod(METHOD__BINDER__CHANGE_TYPE);
 
     // Now call this method on this object.
-    MetaSig sigCT(pCTMeth->GetSig(),pCTMeth->GetModule());
+    MetaSig sigCT(pCTMeth);
     typeClass = th.CreateClassObj();
 
     ARG_SLOT pNewArgs[] = {
@@ -1212,7 +1247,7 @@ EEClass* InvokeUtil::GetEEClass(TypeHandle th)
 // ValidateObjectTarget
 // This method will validate the Object/Target relationship
 //  is correct.  It throws an exception if this is not the case.
-void InvokeUtil::ValidateObjectTarget(FieldDesc* pField, EEClass* fldEEC, OBJECTREF target)
+void InvokeUtil::ValidateObjectTarget(FieldDesc* pField, TypeHandle declType, OBJECTREF target)
 {
 
     THROWSCOMPLUSEXCEPTION();
@@ -1227,20 +1262,20 @@ void InvokeUtil::ValidateObjectTarget(FieldDesc* pField, EEClass* fldEEC, OBJECT
 
     if (!pField->IsStatic()) {
         // Verify that the object is of the proper type...
-        EEClass* pEEC = target->GetClass();
-        if (pEEC->IsThunking()) {
-            pEEC = pEEC->AdjustForThunking(target);
+        TypeHandle ty = target->GetTypeHandle();
+        if (ty.GetClass()->IsThunking()) {
+            ty = TypeHandle(ty.GetMethodTable()->AdjustForThunking(target));
         }
-        while (pEEC && pEEC != fldEEC)
-            pEEC = pEEC->GetParentClass();
+        while (!ty.IsNull() && ty != declType)
+            ty = ty.GetParent();
 
         // Give a second chance to thunking classes to do the 
         // correct cast
-        if (!pEEC) {
+        if (ty.IsNull()) {
 
             BOOL fCastOK = FALSE;
             if (target->GetClass()->IsThunking()) {
-                fCastOK = CRemotingServices::CheckCast(target, fldEEC);
+                fCastOK = CRemotingServices::CheckCast(target, declType);
             }
             if(!fCastOK) {
                 COMPlusThrow(kArgumentException,L"Arg_ObjObj");
@@ -1252,18 +1287,15 @@ void InvokeUtil::ValidateObjectTarget(FieldDesc* pField, EEClass* fldEEC, OBJECT
 // GetFieldTypeHandle
 // This will return type type handle and CorElementType for a field.
 //  It may throw an exception of the TypeHandle cannot be found due to a TypeLoadException.
-TypeHandle InvokeUtil::GetFieldTypeHandle(FieldDesc* pField,CorElementType* pType)
+TypeHandle InvokeUtil::GetFieldTypeHandle(FieldDesc* pField,CorElementType* pType, TypeHandle declType)
 {
     THROWSCOMPLUSEXCEPTION();
 
     // Verify that the value passed can be widened into the target
-    PCCOR_SIGNATURE pSig;
-    DWORD           cSig;
     TypeHandle      th;
 
-    pField->GetSig(&pSig, &cSig);
-    FieldSig sig(pSig, pField->GetModule());
-    *pType = sig.GetFieldType();
+    MetaSig sig(pField, declType.GetInstantiation());    
+    *pType = sig.NextArgNormalized();
 
     OBJECTREF throwable = NULL;
     GCPROTECT_BEGIN(throwable);
@@ -2114,15 +2146,11 @@ PTRARRAYREF InvokeUtil::CreateParameterArray(REFLECTBASEREF* meth)
     IMDInternalImport *pInternalImport = pMeth->GetMDImport();
     mdMethodDef md = pMeth->GetMemberDef();
 
-    PCCOR_SIGNATURE pSignature;     // The signature of the found method
-    DWORD           cSignature;
-    pMeth->GetSig(&pSignature, &cSignature);
-    MetaSig sig(pSignature, pMeth->GetModule());
+    // The signature of the found method
+    TypeHandle *classInst = pRM->declType.GetClassOrArrayInstantiation();
+    TypeHandle *methodInst = pMeth->GetMethodInstantiation();
+    MetaSig sig(pMeth, classInst, methodInst);
 
-    TypeHandle varTypes;
-    if (pRM->typeHnd.IsArray()) 
-        varTypes = pRM->typeHnd.AsTypeDesc()->GetTypeParam();
-    
     // COMMember::m_pMTParameter is initialized
     COMMember::GetParameterInfo();
     _ASSERTE(COMMember::m_pMTParameter);
@@ -2227,7 +2255,7 @@ PTRARRAYREF InvokeUtil::CreateParameterArray(REFLECTBASEREF* meth)
     _ASSERTE(pVMCParam);
     pCtorMeth= pVMCParam->FindConstructor(pBinarySig,cbBinarySigLength,pVMCParam->GetModule());
     _ASSERTE(pCtorMeth);
-    MetaSig sigCtor(pCtorMeth->GetSig(),pCtorMeth->GetModule());
+    MetaSig sigCtor(pCtorMeth);
 
     // Populate the Array
     sig.Reset();
@@ -2267,7 +2295,8 @@ PTRARRAYREF InvokeUtil::CreateParameterArray(REFLECTBASEREF* meth)
         sig.NextArg();
 
         Throwable = NULL;
-        TypeHandle argTypeHnd = sig.GetArgProps().GetTypeHandle(sig.GetModule(), &Throwable, FALSE, FALSE, &varTypes);
+        TypeHandle argTypeHnd = sig.GetArgProps().GetTypeHandle(sig.GetModule(), &Throwable, FALSE, FALSE, FALSE,
+          classInst, methodInst);
         if (Throwable != NULL)
             COMPlusThrow(Throwable);
 
@@ -2476,12 +2505,12 @@ bool InvokeUtil::CheckAccess(RefSecContext *pCtx, DWORD dwAttr, MethodTable *pPa
     if ( (! ((pParentMT->GetClass()->GetCl() == COR_GLOBAL_PARENT_TOKEN) && 
              (pParentMT->GetModule() != pCallerMT->GetModule())) )) {
         BOOL canAccess;
-        if (pCtx->GetClassOfInstance()) 
+        if (!pCtx->GetClassOfInstance().IsNull()) 
              canAccess = ClassLoader::CanAccess(pCallerMT->GetClass(),
                                                  pCallerMT->GetAssembly(),
                                                  pParentMT->GetClass(),
                                                  pParentMT->GetAssembly(),
-                                                 pCtx->GetClassOfInstance(),
+                                                 pCtx->GetClassOfInstance().GetClass(),
                                                  dwAttr);
         else
             canAccess = ClassLoader::CanAccess(pCallerMT->GetClass(),
@@ -2539,8 +2568,7 @@ BOOL InvokeUtil::CanCast(TypeHandle destinationType, TypeHandle sourceType, RefS
 {
     if (pObject) {
         if ((*pObject)->GetMethodTable()->IsTransparentProxyType()) {
-            MethodTable *pDstMT = destinationType.GetMethodTable();
-            return CRemotingServices::CheckCast(*pObject, pDstMT->GetClass());
+            return CRemotingServices::CheckCast(*pObject, destinationType);
         }
     }
 

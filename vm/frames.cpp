@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -211,8 +216,8 @@ FramedMethodFrame::UnwindSynchronized()
 
     if (pMD->IsStatic())
     {
-        EEClass    *pClass = pMD->GetClass();
-        orUnwind = pClass->GetExposedClassObject();
+        MethodTable *pMT = pMD->GetMethodTable();
+        orUnwind = pMT->GetExposedClassObject();
     }
     else
     {
@@ -479,9 +484,9 @@ void ProtectByRefsFrame::GcScanRoots(promote_func *fn, ScanContext *sc)
     {
         if (!CorIsPrimitiveType(pByRefInfos->typ))
         {
-            if (pByRefInfos->pClass->IsValueClass())
+            if (pByRefInfos->typeHandle.IsValueType())
             {
-                ProtectValueClassFrame::PromoteValueClassEmbeddedObjects(fn, sc, pByRefInfos->pClass, 
+                ProtectValueClassFrame::PromoteValueClassEmbeddedObjects(fn, sc, pByRefInfos->typeHandle, 
                                                  pByRefInfos->data);
             }
             else
@@ -524,11 +529,11 @@ void ProtectValueClassFrame::GcScanRoots(promote_func *fn, ScanContext *sc)
     {
         if (!CorIsPrimitiveType(pVCInfo->typ))
         {
-            _ASSERTE(pVCInfo->pClass->IsValueClass());
+            _ASSERTE(pVCInfo->typeHandle.IsValueType());
             PromoteValueClassEmbeddedObjects(
                 fn, 
                 sc, 
-                pVCInfo->pClass, 
+                pVCInfo->typeHandle, 
                 pVCInfo->pData);
         }
         pVCInfo = pVCInfo->pNext;
@@ -548,10 +553,11 @@ void ProtectValueClassFrame::Pop()
     m_pThread->SetFrame(m_Next);
 }
 
+//<REVIEW>GENERICS: check that this is doing the right thing wrt exact types</REVIEW>>
 void ProtectValueClassFrame::PromoteValueClassEmbeddedObjects(promote_func *fn, ScanContext *sc, 
-                                                          EEClass *pClass, PVOID pvObject)
+                                                          TypeHandle ty, PVOID pvObject)
 {
-    FieldDescIterator fdIterator(pClass, FieldDescIterator::INSTANCE_FIELDS);
+    FieldDescIterator fdIterator(ty.GetClass(), FieldDescIterator::INSTANCE_FIELDS);
     FieldDesc* pFD;
 
     while ((pFD = fdIterator.Next()) != NULL)
@@ -561,7 +567,7 @@ void ProtectValueClassFrame::PromoteValueClassEmbeddedObjects(promote_func *fn, 
             if (pFD->IsByValue())
             {
                 // recurse
-                PromoteValueClassEmbeddedObjects(fn, sc, pFD->GetTypeOfField(),
+                PromoteValueClassEmbeddedObjects(fn, sc, pFD->LoadType().GetMethodTable(),
                                                 pFD->GetAddress(pvObject));
             }
             else
@@ -600,7 +606,7 @@ void FramedMethodFrame::PromoteCallerStackWorker(promote_func* fn,
     //If not "vararg" calling convention, assume "default" calling convention
     if (MetaSig::GetCallingConvention(GetModule(),pCallSig) != IMAGE_CEE_CS_CALLCONV_VARARG)
     {
-        MetaSig msig (pCallSig,pFunction->GetModule());
+        MetaSig msig(pFunction);
         ArgIterator argit (this, &msig);
         PromoteCallerStackHelper (fn, sc, fPinArgs, &argit, &msig);
     }
@@ -617,7 +623,7 @@ void FramedMethodFrame::PromoteCallerStackWorker(promote_func* fn,
                                                     + (msig_temp.HasThis() ? sizeof(void*) : 0 )
                                                     + (msig_temp.HasRetBuffArg() ? sizeof(void*) : 0)
                                                     ));
-        MetaSig msig (varArgSig->mdVASig, varArgSig->pModule);
+        MetaSig msig (varArgSig->mdVASig, varArgSig->pModule, NULL, NULL);
         ArgIterator argit ((BYTE*)this, &msig, sizeof(FramedMethodFrame),
             FramedMethodFrame::GetOffsetOfArgumentRegisters());
         PromoteCallerStackHelper (fn, sc, fPinArgs, &argit, &msig);
@@ -695,7 +701,17 @@ void FramedMethodFrame::PromoteCallerStackHelper(promote_func* fn,
                 (fn)(*(Object**)pArgAddr, sc, GC_CALL_PINNED);
 
             }
-            else if (typ == ELEMENT_TYPE_CLASS || typ == ELEMENT_TYPE_OBJECT || typ == ELEMENT_TYPE_VAR)
+            else if (typ == ELEMENT_TYPE_VAR || typ == ELEMENT_TYPE_MVAR)
+	    {
+              // Shouldn't appear because PeekArg does the instantiation
+              _ASSERTE(!"Class or method variable");
+            }
+            else if (typ == ELEMENT_TYPE_WITH)
+	    { 
+              // Shouldn't appear because PeekArg looks at the generic type element type
+              _ASSERTE(!"ELEMENT_TYPE_WITH");
+            }
+            else if (typ == ELEMENT_TYPE_CLASS || typ == ELEMENT_TYPE_OBJECT)
             {
                 Object *pObj = *(Object**)pArgAddr;
                 if (pObj != NULL)
@@ -865,8 +881,8 @@ void UMThkCallFrame::PromoteCalleeStack(promote_func* fn,
     pModule = GetTargetModule();
     _ASSERTE(pModule);      // or value classes won't promote correctly
 
-    MetaSig msig(pCallSig,pModule);
-    MetaSig msig2(pCallSig,pModule);
+    MetaSig msig(pCallSig,pModule,NULL,NULL);
+    MetaSig msig2(pCallSig,pModule,NULL,NULL);
     ArgIterator argit(NULL, &msig2, GetUMEntryThunk()->GetUMThunkMarshInfo()->IsStatic());
 
     //
@@ -1848,7 +1864,7 @@ void HelperMethodFrame::GcScanRoots(promote_func *fn, ScanContext* sc)
     ctx.sc = sc;
 
     MethodDesc* pMD = (MethodDesc*) m_Datum;
-    MetaSig msig(pMD->GetSig(), pMD->GetModule());
+    MetaSig msig(pMD);
 
     BYTE * framedMethodFrameBase;
 #if defined(_X86_)

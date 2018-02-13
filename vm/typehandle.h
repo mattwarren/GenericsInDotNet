@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -35,9 +40,19 @@
 //      2) A TypeDesc       (all other cases)  
 //
 // TypeDesc in turn break down into several variants.  To the extent
-// possible, you should probably be using TypeHandles, and only use
-// TypeDesc* when you are 'deconstructing' a type into its component parts. 
+// possible, you should probably be using TypeHandles.  TypeDescs are
+// for special cases around the edges
+//    - array types whose method tables get share
+//    - types for function pointers for verification and reflection
+//    - types for generic parameters for verification and reflection
 //
+
+// Generic type instantiations (in C# syntax: C<ty_1,...,ty_n>) are represented by
+// MethodTables, i.e. a new MethodTable gets allocated for each such instantiation.
+// The entries in these tables (i.e. the code) are, however, often shared.
+// Clients of TypeHandle don't need to know any of this detail; just use the
+// GetInstantiation, GetNumGenericArgs, GetGenericTypeDefinition 
+// and HasInstantiation methods.
 
 class TypeDesc;
 class ArrayTypeDesc;
@@ -77,7 +92,8 @@ public:
         INDEBUG(Verify());
     }
 
-    TypeHandle(EEClass* aClass);
+    // only valid when EEClass is not shared between instantiations
+    explicit TypeHandle(EEClass* aClass); 
 
     TypeHandle(TypeDesc *aType) {
         m_asInt = (((INT_PTR) aType) | 2); 
@@ -125,21 +141,110 @@ public:
     // Store the full, correct, name for this type into the given buffer.  
     unsigned GetName(char* buff, unsigned buffLen);
 
-        // Returns the ELEMENT_TYPE_* that you would use in a signature
-    CorElementType GetSigCorElementType() {
-        if (IsEnum())
-            return(ELEMENT_TYPE_VALUETYPE);
-        return(GetNormCorElementType());
-        }
-        
-        // This version normalizes enum types to be their underlying type
+    // Returns the ELEMENT_TYPE_* that you would use in a signature
+    // The only normalization that happens is that for type handles
+    // for instantiated types (e.g. class List<String> or
+	// value type Pair<int,int>)) this returns either ELEMENT_TYPE_CLASS
+ 	// or ELEMENT_TYPE_VALUE, _not_ ELEMENT_TYPE_WITH.
+    CorElementType GetSigCorElementType();
+         
+    // This helper:
+    // - Will return enums underlying type
+    // - Will return underlying primitive for System.Int32 etc...
+    // - Will return underlying primitive as will be used in the calling convention
+    //      For example
+    //              struct t
+    //              {
+    //                  public int i;
+    //              }
+    //      will return ELEMENT_TYPE_I4 in x86 instead of ELEMENT_TYPE_VALUETYPE. We
+    //      call this type of value type a primitive value type
+    //
+    // Internal representation is used among another things for the calling convention
+    // (jit benefits of primitive value types) or optimizing marshalling.
+    //
+    // This will NOT convert E_T_ARRAY, E_T_SZARRAY etc. to E_T_CLASS (though it probably
+    // should).  Use CorTypeInfo::IsObjRef for that.
     CorElementType GetNormCorElementType(); 
 
-        // returns true of 'this' can be cast to 'type' 
+    // This helper will return the same as GetSignatueCorElementType except:
+    // - Will return enums underlying type
+    CorElementType GetVerifierCorElementType();
+
+    // returns true of 'this' can be cast to 'type' 
     BOOL CanCastTo(TypeHandle type);
     
-        // get the parent (superclass) of this type
+    // get the parent (superclass) of this type
     TypeHandle GetParent(); 
+
+    // Obtain underlying uninstantiated generic type from an instantiated type
+    // Null if not instantiated
+    TypeHandle GetGenericTypeDefinition();
+
+    // Obtain element type for an array or pointer, returning NULL otherwise
+    TypeHandle GetTypeParam();
+
+    // Obtain instantiation from an instantiated type
+    // NULL if not instantiated
+    TypeHandle* GetInstantiation();
+
+    // Obtain instantiation from an instantiated type *or* a pointer to the element type for an array 
+    TypeHandle* GetClassOrArrayInstantiation();
+
+    // Is this type instantiated?
+    BOOL HasInstantiation();
+
+    // Is this an uninstantiated generic type?
+    BOOL IsGenericTypeDefinition() {
+      return !HasInstantiation() && GetNumGenericArgs() != 0;
+    }
+
+    // Strip off the instantiation if there is one
+    TypeHandle StripInstantiation() {
+      TypeHandle t = GetGenericTypeDefinition();
+      if (t.IsNull())
+          return *this;
+      else
+          return t;
+    }
+
+    // Obtain the "underlying" type that has a corresponding TypeDef
+    // This is what determines a type's accessibility, namespace, assembly, etc.
+    // First remove array & pointer qualifiers (e.g. string*[][] -> string)
+    // Then remove instantiation (e.g. List<int>[]& -> List)
+    TypeHandle GetTypeWithDef(); 
+
+    // Given the current ShareRef and ShareVal settings, is the specified type representation-sharable as a type parameter to a generic type or method ?
+    BOOL IsSharableRep();
+
+    static BOOL IsSharableInstantiation(DWORD ntypars, TypeHandle *inst);
+
+    // For an uninstantiated generic type, return the number of type parameters required for instantiation
+    // For an instantiated type, return the number of type parameters in the instantiation
+    // Otherwise return 0
+    DWORD GetNumGenericArgs();
+
+    // For an generic type instance return the representative within the class of
+    // all type handles that share code.  For example, 
+    //    <int> --> <int>,
+    //    <object> --> <object>,
+    //    <string> --> <object>,
+    //    <List<string>> --> <object>,
+    //    <Struct<string>> --> <Struct<object>>
+    //
+    // If the code for the type handle is not shared then return 
+    // the type handle itself.
+    TypeHandle GetCanonicalFormAsGenericArgument();
+
+#ifdef _DEBUG
+    static BOOL CheckInstantiationIsCanonical(DWORD ntypars, TypeHandle *inst);
+#endif
+
+    //@GENERICS: these are just indirected through EEClass; they're here as well to make things simple
+    BOOL IsValueType();
+    BOOL IsInterface();
+    WORD GetNumVtableSlots();
+    WORD GetNumMethodSlots();
 
         // Unlike the AsMethodTable, GetMethodTable, will get the method table
         // of the type, regardless of whether it is an array etc. Note, however
@@ -151,10 +256,13 @@ public:
 
     Assembly* GetAssembly();
 
+    // BEWARE using this on instantiated types whose EEClass pointer may be shared
+    // between compatible instantiations as described above
     EEClass* GetClass();
 
         // Shortcuts
     BOOL IsArray();
+    BOOL IsGenericVariable();
     BOOL IsByRef();
     BOOL IsRestored();
     void CheckRestore();
@@ -178,6 +286,7 @@ public:
     BOOL IsArrayOfElementsCheckAppDomainAgile();
 #endif
 
+    //<REVIEW>GENERICS: review this</REVIEW>
     EEClass* GetClassOrTypeParam();
 
     OBJECTREF CreateClassObj();
@@ -221,7 +330,7 @@ public:
         return (CorElementType) u.m_Type;
     }
 
-    // Get the parent (superclass) of this type  
+    // Get the exact parent (superclass) of this type  
     TypeHandle GetParent();
 
     // Returns the name of the array.  Note that it returns
@@ -244,6 +353,7 @@ public:
 
     MethodTable*  GetMethodTable();         // only meaningful for ParamTypeDesc
     TypeHandle GetTypeParam();              // only meaningful for ParamTypeDesc
+    TypeHandle* GetClassOrArrayInstantiation();      // only meaningful for ParamTypeDesc; see above
     BaseDomain *GetDomain();                // only meaningful for ParamTypeDesc
 
 protected:
@@ -310,5 +420,42 @@ public:
 protected:
     ExpandSig* m_Sig;       // Signature for function type
 };
+
+
+/*************************************************************************/
+/* represents a class or method type variable  */
+
+class TypeVarTypeDesc : public TypeDesc {
+public:
+    TypeVarTypeDesc(EEClass* gClass, unsigned int index)
+      : TypeDesc(ELEMENT_TYPE_VAR), m_GenericClass(gClass), m_index(index){}
+
+    TypeVarTypeDesc(MethodDesc* gMethod, unsigned int index)
+      : TypeDesc(ELEMENT_TYPE_MVAR), m_index(index), m_GenericMethod(gMethod){}
+
+        // placement new operator
+    void* operator new(size_t size, void* spot) {   return (spot); }
+
+    EEClass* GetGenericClass()     
+    { 
+        _ASSERTE(GetNormCorElementType() == ELEMENT_TYPE_VAR);
+        return(m_GenericClass); 
+    }
+    MethodDesc* GetGenericMethod() 
+    {
+        _ASSERTE(GetNormCorElementType() == ELEMENT_TYPE_MVAR);
+        return(m_GenericMethod); 
+    }
+    unsigned int GetIndex() {return(m_index);}
+    
+protected:
+    union { 
+      EEClass* m_GenericClass;       
+      MethodDesc* m_GenericMethod; 
+    };
+
+    unsigned int m_index;
+};
+
 
 #endif // TYPEHANDLE_H

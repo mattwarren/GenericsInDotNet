@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -513,7 +518,12 @@ public class OpCodes {
 	/// <include file='doc\OpCodes.uex' path='docs/doc[@for="OpCodes.Stelem_Ref"]/*' />
 	public static readonly OpCode Stelem_Ref           = new OpCode("stelem.ref", StackBehaviour.Popref_popi_popref, StackBehaviour.Push0, OperandType.InlineNone, OpCodeType.Objmodel, 1, (byte)0xff, (byte)0xa2, FlowControl.Next, false,  -3);
 
-	/// <include file='doc\OpCodes.uex' path='docs/doc[@for="OpCodes.Conv_Ovf_I1"]/*' />
+	public static readonly OpCode Ldelem_Any           = new OpCode("ldelem.any", StackBehaviour.Popref_popi, StackBehaviour.Push1, OperandType.InlineType, OpCodeType.Objmodel, 1, (byte)0xff, (byte)0xa3, FlowControl.Next, false,  -1);
+
+	public static readonly OpCode Stelem_Any           = new OpCode("stelem.any", StackBehaviour.Popref_popi_popref, StackBehaviour.Push0, OperandType.InlineType, OpCodeType.Objmodel, 1, (byte)0xff, (byte)0xa4, FlowControl.Next, false,  0);
+
+	public static readonly OpCode Unbox_Any            = new OpCode("unbox.any", StackBehaviour.Popref, StackBehaviour.Push1, OperandType.InlineType, OpCodeType.Objmodel, 1, (byte)0xff, (byte)0xa5, FlowControl.Next, false,  0);
+
 	public static readonly OpCode Conv_Ovf_I1          = new OpCode("conv.ovf.i1", StackBehaviour.Pop1, StackBehaviour.Pushi, OperandType.InlineNone, OpCodeType.Primitive, 1, (byte)0xff, (byte)0xb3, FlowControl.Next, false,  0);
 
 	/// <include file='doc\OpCodes.uex' path='docs/doc[@for="OpCodes.Conv_Ovf_U1"]/*' />

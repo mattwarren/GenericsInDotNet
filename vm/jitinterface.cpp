@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -70,6 +75,7 @@
 #include "comstringbuffer.h"
 #include "comobject.h"
 #include "asmconstants.h"
+#include "generics.h"
 
 #include "stackprobe.h"
 
@@ -192,7 +198,7 @@ Object* __fastcall JIT_TrialAllocSFastMP(MethodTable *mt);   // JITinterfaceX86.
 FCDECL0(VOID, JIT_StressGC);                 // JITinterfaceX86.cpp/JITinterfaceGen.cpp
 FCDECL1(Object*, JIT_CheckObj, Object* obj); 
 FCDECL0(void, JIT_UserBreakpoint);
-Object* __cdecl JIT_NewObj(CORINFO_MODULE_HANDLE scopeHnd, unsigned constrTok, ...);
+Object* __cdecl JIT_NewObj(CORINFO_MODULE_HANDLE classHnd, CORINFO_METHOD_HANDLE constrMeth, ...);
 BOOL InitJITHelpers1();
 
 FCDECL2(double, JIT_FloatDiv,  double a, double b);
@@ -249,7 +255,52 @@ inline HRESULT __stdcall CEEJitInfo::alloc (
 
 /*********************************************************************/
 
-inline static CorInfoType toJitType(CorElementType eeType) {
+// This normalizes EE type information into the form
+// expected by the JIT.
+inline static CorInfoType toJitType(CorElementType eeType, 
+                                    TypeHandle typeHnd = TypeHandle() /* optional in */, 
+                                    CORINFO_CLASS_HANDLE *clsRet = NULL /* optional out */ ) {
+
+    _ASSERTE(!(eeType == ELEMENT_TYPE_VAR && typeHnd.IsNull()));
+    _ASSERTE(!(eeType == ELEMENT_TYPE_MVAR && typeHnd.IsNull()));
+    _ASSERTE(eeType != ELEMENT_TYPE_WITH);
+
+    TypeHandle typeHndUpdated = typeHnd;
+
+    if (!typeHnd.IsNull())
+    {
+        // GenerivVariables are used during the verification of 
+        // generic code and for reflection.  
+    
+        if (typeHnd.IsGenericVariable())
+            eeType = ELEMENT_TYPE_VAR;
+
+        CorElementType normType = typeHnd.GetNormCorElementType();
+        // If we have a type handle, then it has the better type 
+        // in some cases
+        if (eeType == ELEMENT_TYPE_VALUETYPE && !CorTypeInfo::IsObjRef(normType))
+            eeType = normType;
+
+        // Zap the typeHnd when the type _really_ is a primitive 
+        // as far as verification is concerned. Returning a null class 
+        // handle means it is is a primitive.  
+        //
+        // Enums are exactly like primitives, even from a verification standpoint,
+        // so we zap the type handle in this case.
+        //
+        // However RuntimeTypeHandle etc. are reported as E_T_INT (or something like that)
+        // but don't count as primitives as far as verification is concerned...
+        //
+        // To make things stranger, TypedReference returns true for "IsTruePrimitive".
+        // However the JIT likes us to report the type handle in that case.
+        if ((typeHnd.IsUnsharedMT() && 
+             typeHnd.GetClass()->IsTruePrimitive() && 
+             typeHnd.GetSigCorElementType() != ELEMENT_TYPE_TYPEDBYREF) 
+            || typeHnd.IsEnum())
+        {
+            typeHndUpdated = TypeHandle(); 
+        }
+    }
 
     static const BYTE map[] = {
         CORINFO_TYPE_UNDEF,
@@ -271,9 +322,9 @@ inline static CorInfoType toJitType(CorElementType eeType) {
         CORINFO_TYPE_BYREF,
         CORINFO_TYPE_VALUECLASS,
         CORINFO_TYPE_CLASS,
-        CORINFO_TYPE_CLASS,          // VAR (type variable)
-        CORINFO_TYPE_CLASS,          // MDARRAY
-        CORINFO_TYPE_BYREF,          // COPYCTOR
+        CORINFO_TYPE_VAR,            // VAR (type variable)
+        CORINFO_TYPE_CLASS,          // ARRAY
+        CORINFO_TYPE_CLASS,          // WITH
         CORINFO_TYPE_REFANY,
         CORINFO_TYPE_VALUECLASS,     // VALUEARRAY
         CORINFO_TYPE_INT,            // I
@@ -284,7 +335,8 @@ inline static CorInfoType toJitType(CorElementType eeType) {
         CORINFO_TYPE_PTR,            // FNPTR
         CORINFO_TYPE_CLASS,          // OBJECT
         CORINFO_TYPE_CLASS,          // SZARRAY
-        CORINFO_TYPE_CLASS,          // GENERICARRAY
+        CORINFO_TYPE_VAR,            // MVAR
+
         CORINFO_TYPE_UNDEF,          // CMOD_REQD
         CORINFO_TYPE_UNDEF,          // CMOD_OPT
         CORINFO_TYPE_UNDEF,          // INTERNAL
@@ -299,13 +351,42 @@ inline static CorInfoType toJitType(CorElementType eeType) {
     _ASSERTE((CorInfoType) map[ELEMENT_TYPE_TYPEDBYREF] == CORINFO_TYPE_REFANY);
     _ASSERTE((CorInfoType) map[ELEMENT_TYPE_R] == CORINFO_TYPE_DOUBLE);
 
-    return((CorInfoType) map[eeType]);
+    CorInfoType res = ((CorInfoType) map[eeType]);
+
+    if (clsRet)
+        *clsRet = CORINFO_CLASS_HANDLE(typeHndUpdated.AsPtr());
+    return res;
+}
+
+
+inline static CorInfoType toJitType(TypeHandle typeHnd, CORINFO_CLASS_HANDLE *clsRet = NULL)
+{
+    return toJitType(typeHnd.GetNormCorElementType(), typeHnd, clsRet);
 }
 
 /*********************************************************************/
-static HRESULT ConvToJitSig(PCCOR_SIGNATURE sig, CORINFO_MODULE_HANDLE scopeHnd, mdToken token, CORINFO_SIG_INFO* sigRet, bool localSig=false)
-{
+//@GENERICS: 
+// The method handle is used to instantiate method and class type parameters
+// It's also used to determine whether an extra dictionary parameter is required
+/*********************************************************************/
+static HRESULT ConvToJitSig(PCCOR_SIGNATURE sig, CORINFO_MODULE_HANDLE scopeHnd, mdToken token, CORINFO_SIG_INFO* sigRet, CORINFO_METHOD_HANDLE context = NULL, bool localSig=false, TypeHandle owner = TypeHandle())
+{    
     THROWSCOMPLUSEXCEPTION();
+
+    TypeHandle* classInst = NULL;
+    TypeHandle* methodInst = NULL;
+
+    if (context)
+    {
+      MethodDesc* md = (MethodDesc*)context;
+      if (md->GetMethodTable()->IsArray())
+          classInst = md->GetMethodTable()->GetClassOrArrayInstantiation();
+      else
+          // Use class instantiation of any provided owner
+          classInst = md->GetClassInstantiation(owner);
+
+      methodInst = md->GetMethodInstantiation();
+    }
 
     SigPointer ptr(sig);
     _ASSERTE(CORINFO_CALLCONV_DEFAULT == (CorInfoCallConv) IMAGE_CEE_CS_CALLCONV_DEFAULT);
@@ -313,24 +394,30 @@ static HRESULT ConvToJitSig(PCCOR_SIGNATURE sig, CORINFO_MODULE_HANDLE scopeHnd,
     _ASSERTE(CORINFO_CALLCONV_MASK == (CorInfoCallConv) IMAGE_CEE_CS_CALLCONV_MASK);
     _ASSERTE(CORINFO_CALLCONV_HASTHIS == (CorInfoCallConv) IMAGE_CEE_CS_CALLCONV_HASTHIS);
 
+    TypeHandle typeHnd = TypeHandle();
+
     sigRet->sig = (CORINFO_SIG_HANDLE) sig;
     sigRet->retTypeClass = 0;
     sigRet->retTypeSigClass = 0;
     sigRet->scope = scopeHnd;
     sigRet->token = token;
+    sigRet->classInst = (CORINFO_CLASS_HANDLE *) classInst;
+    sigRet->methodInst = (CORINFO_CLASS_HANDLE *) methodInst;
 
     if (!localSig) {
         _ASSERTE(sig != 0);
         Module* module = GetModule(scopeHnd);
         sigRet->callConv = (CorInfoCallConv) ptr.GetCallingConvInfo();
+	// Skip number of type arguments
+        if (sigRet->callConv & IMAGE_CEE_CS_CALLCONV_GENERIC)
+          ptr.GetData();
         sigRet->numArgs = (unsigned short) ptr.GetData();
-        CorElementType type = ptr.PeekElemType();
 
+        CorElementType type = ptr.PeekElemType();
         if (!CorTypeInfo::IsPrimitiveType(type)) {
-            TypeHandle typeHnd;
             OBJECTREF Throwable = NULL;
             GCPROTECT_BEGIN(Throwable);
-            typeHnd = ptr.GetTypeHandle(module, &Throwable);
+            typeHnd = ptr.GetTypeHandle(module, &Throwable, FALSE, FALSE, FALSE, (TypeHandle*) classInst, (TypeHandle*) methodInst);
             if (typeHnd.IsNull()) {
                 if (Throwable == NULL)
                     COMPlusThrow(kTypeLoadException);
@@ -339,21 +426,12 @@ static HRESULT ConvToJitSig(PCCOR_SIGNATURE sig, CORINFO_MODULE_HANDLE scopeHnd,
             }
             GCPROTECT_END();
 
-            CorElementType normType = typeHnd.GetNormCorElementType();
-            // if we are looking up a value class don't morph it to a refernece type 
-            // (This can only happen in illegal IL
-            if (!CorTypeInfo::IsObjRef(normType))
-                type = normType;
-
-                // a null class handle means it is is a primitive.  
-                // enums are exactly like primitives, even from a verificaiton standpoint
-			sigRet->retTypeSigClass = CORINFO_CLASS_HANDLE(typeHnd.AsPtr());
-			if (!typeHnd.IsEnum())
-                sigRet->retTypeClass = CORINFO_CLASS_HANDLE(typeHnd.AsPtr());
-
+	        type = typeHnd.GetSigCorElementType();
+ 
         }
-        sigRet->retType = toJitType(type);
-
+        sigRet->retType = toJitType(type, typeHnd, &sigRet->retTypeClass);
+        sigRet->retTypeSigClass = CORINFO_CLASS_HANDLE(typeHnd.AsPtr());
+ 
         ptr.Skip();     // must to a skip so we skip any class tokens associated with the return type
         _ASSERTE(sigRet->retType < CORINFO_TYPE_COUNT);
 
@@ -367,12 +445,12 @@ static HRESULT ConvToJitSig(PCCOR_SIGNATURE sig, CORINFO_MODULE_HANDLE scopeHnd,
         // it can walk the stack during collection.
         //
         for(unsigned i=0; i < sigRet->numArgs; i++) {
-            unsigned type = ptr.Normalize(module);
+            unsigned type = ptr.Normalize(module, (TypeHandle*) classInst, (TypeHandle*) methodInst);
             if (type == ELEMENT_TYPE_VALUETYPE) {
                 OBJECTREF throwable = NULL;
                 GCPROTECT_BEGIN(throwable);
 
-                TypeHandle typeHnd = ptr.GetTypeHandle(module, &throwable);
+                TypeHandle typeHnd = ptr.GetTypeHandle(module, &throwable, FALSE, FALSE, FALSE, (TypeHandle*) classInst, (TypeHandle*) methodInst);
                 if (typeHnd.IsNull()) {
                     _ASSERTE(throwable != NULL);
                     COMPlusThrow(throwable);
@@ -429,6 +507,11 @@ CORINFO_GENERIC_HANDLE __stdcall CEEInfo::findToken (
     case mdtTypeSpec:
         ret = CORINFO_GENERIC_HANDLE(findClass(scopeHnd, metaTOK, context));
         tokenType = CORINFO_CLASS_HANDLE(s_pRuntimeTypeHandle);
+        break;
+
+    case mdtMethodSpec:
+        ret = CORINFO_GENERIC_HANDLE(findMethod(scopeHnd, metaTOK, context));
+        tokenType = CORINFO_CLASS_HANDLE(s_pRuntimeMethodHandle);
         break;
 
     case mdtMemberRef:
@@ -555,23 +638,47 @@ CORINFO_CLASS_HANDLE __stdcall CEEInfo::findClass (
 
     if (TypeFromToken(metaTOK) != mdtTypeDef && 
         TypeFromToken(metaTOK) != mdtTypeRef &&
-        TypeFromToken(metaTOK) != mdtTypeSpec)
+        TypeFromToken(metaTOK) != mdtTypeSpec &&
+        TypeFromToken(metaTOK) != mdtModuleRef)
     {
         BAD_FORMAT_ASSERT(!"Error, bad class token");
         COMPlusThrowHR(COR_E_BADIMAGEFORMAT);
     }
 
     Module* module = GetModule(scopeHnd);
+    TypeHandle* classInst = NULL;
+    TypeHandle* methodInst = NULL;
+    if (context)
+    {
+      MethodDesc* md = (MethodDesc*) context;
+      classInst = md->GetClassInstantiation();
+      methodInst = md->GetMethodInstantiation();
+    }
 
     OBJECTREF throwable = NULL;
     GCPROTECT_BEGIN(throwable);
-    NameHandle name(module, metaTOK);
-    TypeHandle clsHnd = module->GetClassLoader()->LoadTypeHandle(&name, &throwable);
+
+    TypeHandle clsHnd;
+    if (TypeFromToken(metaTOK) == mdtModuleRef)
+    { Module * thatModule;
+      HRESULT hr = module->GetAssembly()->FindModuleByModuleRef(module->GetMDImport(),
+								metaTOK,
+								mdModuleRefNil,
+								&thatModule,
+								&throwable);
+      if (SUCCEEDED(hr))
+        { clsHnd = TypeHandle(thatModule->GetMethodTable());}
+    }
+    else 
+    { NameHandle name(module, metaTOK);
+      clsHnd = module->GetClassLoader()->LoadTypeHandle(&name, &throwable, classInst, methodInst);
+    };
 
     ret = CORINFO_CLASS_HANDLE(clsHnd.AsPtr());
 
-        // make certain m_BaseSize is aligned properly
-    _ASSERTE(clsHnd.IsNull() || !clsHnd.IsUnsharedMT() || clsHnd.GetMethodTable()->GetBaseSize() % sizeof(void*) == 0);
+     // make certain m_BaseSize is aligned properly
+    _ASSERTE(clsHnd.IsNull() || !clsHnd.IsUnsharedMT() ||
+             clsHnd.GetMethodTable()->GetBaseSize() % sizeof(void*) == 0);
 
 #ifdef JIT_LINKTIME_SECURITY
 
@@ -585,6 +692,54 @@ CORINFO_CLASS_HANDLE __stdcall CEEInfo::findClass (
     return ret;
 }
 
+// Modified to do the right thing for MethodSpecs too
+// Given a field or method token metaTOK return its parent token
+unsigned __stdcall CEEInfo::getMemberParent(CORINFO_MODULE_HANDLE scopeHnd, unsigned metaTOK)
+{
+    COOPERATIVE_TRANSITION_BEGIN();
+
+    Module* module = GetModule(scopeHnd);
+
+    OBJECTREF pThrowable = NULL;
+    GCPROTECT_BEGIN(pThrowable);
+
+
+    // Extended to extract parent class of a method spec
+    if (TypeFromToken(metaTOK) == mdtMethodSpec) 
+    {
+      PCCOR_SIGNATURE pSig;
+      ULONG cSig;
+      mdMemberRef GenericMemberRef;
+      module->GetMDImport()->GetMethodSpecProps(metaTOK, &GenericMemberRef, &pSig, &cSig);
+      _ASSERTE(TypeFromToken(GenericMemberRef) == mdtMethodDef || TypeFromToken(GenericMemberRef) == mdtMemberRef);
+      metaTOK = GenericMemberRef;
+    }
+
+
+    // Extended to extract parent class of a member-ref, method-def or field-def
+
+    if (TypeFromToken(metaTOK) == mdtMemberRef)
+    {
+      metaTOK = module->GetMDImport()->GetParentOfMemberRef(metaTOK);
+    }
+    else if (TypeFromToken(metaTOK) == mdtMethodDef || TypeFromToken(metaTOK) == mdtFieldDef)
+    {
+      module->GetMDImport()->GetParentToken(metaTOK,&metaTOK);
+    }
+
+    _ASSERTE(TypeFromToken(metaTOK) == mdtTypeDef ||
+             TypeFromToken(metaTOK) == mdtTypeRef ||
+             TypeFromToken(metaTOK) == mdtTypeSpec ||
+             TypeFromToken(metaTOK) == mdtModuleRef 
+	        );
+
+    GCPROTECT_END();
+    COOPERATIVE_TRANSITION_END();
+
+    return metaTOK;
+}
+
+
 /*********************************************************************/
 CORINFO_FIELD_HANDLE __stdcall CEEInfo::findField (
             CORINFO_MODULE_HANDLE  scopeHnd,
@@ -595,6 +750,14 @@ CORINFO_FIELD_HANDLE __stdcall CEEInfo::findField (
     REQUIRES_4K_STACK;
 
     FieldDesc* fieldDesc = 0;
+    MethodDesc* method = (MethodDesc*) context;
+    TypeHandle* classInst = NULL;
+    TypeHandle* methodInst = NULL;
+    if (context)
+    {
+      classInst = method->GetClassInstantiation();
+      methodInst = method->GetMethodInstantiation();
+    }
 
     COOPERATIVE_TRANSITION_BEGIN();
     THROWSCOMPLUSEXCEPTION();
@@ -607,12 +770,11 @@ CORINFO_FIELD_HANDLE __stdcall CEEInfo::findField (
     }
 
     Module* module = GetModule(scopeHnd);
-    MethodDesc* method = (MethodDesc*) context;
 
     START_NON_JIT_PERF();
     OBJECTREF throwable = NULL;
     GCPROTECT_BEGIN(throwable);
-    HRESULT res = EEClass::GetFieldDescFromMemberRef(module, (mdMemberRef) metaTOK, &fieldDesc, &throwable);
+    HRESULT res = EEClass::GetFieldDescFromMemberRef(module, (mdMemberRef) metaTOK, &fieldDesc, &throwable, classInst, methodInst);
 
     if (SUCCEEDED(res))
     {
@@ -624,13 +786,11 @@ CORINFO_FIELD_HANDLE __stdcall CEEInfo::findField (
             {
                 CreateFieldExceptionObject(kFieldAccessException, fieldDesc, &throwable);
                 fieldDesc = NULL;
-                goto exit;
             }
 
         }
     }
 
-exit:
     STOP_NON_JIT_PERF();
 
 #ifdef JIT_LINKTIME_SECURITY
@@ -654,17 +814,20 @@ void* __stdcall CEEInfo::findPtr(CORINFO_MODULE_HANDLE  scopeHnd, unsigned ptrTO
     return NULL;
 }
 
-CORINFO_METHOD_HANDLE __stdcall CEEInfo::findMethod(CORINFO_MODULE_HANDLE  scopeHnd, unsigned metaTOK, CORINFO_METHOD_HANDLE context)
+CORINFO_METHOD_HANDLE __stdcall CEEInfo::findMethod(CORINFO_MODULE_HANDLE  scopeHnd, unsigned annotatedMetaTOK, CORINFO_METHOD_HANDLE context)
 {
     REQUIRES_8K_STACK;
 
     MethodDesc* funcDesc = 0;
     HRESULT res = S_OK;
 
+    unsigned metaTOK = annotatedMetaTOK & ~CORINFO_ANNOT_MASK;
+
     COOPERATIVE_TRANSITION_BEGIN();
     THROWSCOMPLUSEXCEPTION();     
 
     if (TypeFromToken(metaTOK) != mdtMethodDef && 
+        TypeFromToken(metaTOK) != mdtMethodSpec &&
         TypeFromToken(metaTOK) != mdtMemberRef)
     {
         BAD_FORMAT_ASSERT(!"Error, bad method token");
@@ -674,14 +837,21 @@ CORINFO_METHOD_HANDLE __stdcall CEEInfo::findMethod(CORINFO_MODULE_HANDLE  scope
     Module* module = GetModule(scopeHnd);
     MethodDesc* method = (MethodDesc*)context;
 
-
     START_NON_JIT_PERF();
+
+    TypeHandle* classInst = NULL;
+    TypeHandle* methodInst = NULL;
+    if (context)
+    {
+      classInst = method->GetClassInstantiation();
+      methodInst = method->GetMethodInstantiation();
+    }
 
     OBJECTREF throwable = NULL;
     GCPROTECT_BEGIN(throwable);
 
-    res = EEClass::GetMethodDescFromMemberRef(module, (mdMemberRef) metaTOK,(MethodDesc **) &funcDesc, &throwable);
-
+    res = EEClass::GetMethodDescFromMemberRef(module, (mdMemberRef) metaTOK,(MethodDesc **) &funcDesc, &throwable, classInst, methodInst,
+      (annotatedMetaTOK & CORINFO_ANNOT_ALLOWINSTPARAM) != 0);
     if (SUCCEEDED(res))
     {
         if (method != NULL)
@@ -747,8 +917,9 @@ exit:
 /*********************************************************************/
 void __stdcall CEEInfo::findCallSiteSig (
         CORINFO_MODULE_HANDLE       scopeHnd,
-        unsigned            		sigMethTok,
-        CORINFO_SIG_INFO *      	sigRet)
+        unsigned                    sigMethTok,
+        CORINFO_METHOD_HANDLE       context,
+        CORINFO_SIG_INFO *          sigRet)
 {
     REQUIRES_4K_STACK;
 
@@ -783,7 +954,7 @@ void __stdcall CEEInfo::findCallSiteSig (
 #ifdef _DEBUG
     HRESULT hr =
 #endif
-    ConvToJitSig(sig, scopeHnd, sigMethTok, sigRet);
+    ConvToJitSig(sig, scopeHnd, sigMethTok, sigRet, context, false);
     _ASSERTE(SUCCEEDED(hr));
 
     COOPERATIVE_TRANSITION_END();
@@ -791,9 +962,10 @@ void __stdcall CEEInfo::findCallSiteSig (
 
 /*********************************************************************/
 void __stdcall CEEInfo::findSig (
-        CORINFO_MODULE_HANDLE        scopeHnd,
-        unsigned            sigTok,
-                CORINFO_SIG_INFO *      sigRet)
+        CORINFO_MODULE_HANDLE  scopeHnd,
+        unsigned               sigTok,
+        CORINFO_METHOD_HANDLE  context,
+        CORINFO_SIG_INFO *     sigRet)
 {
     REQUIRES_4K_STACK;
 
@@ -812,7 +984,7 @@ void __stdcall CEEInfo::findSig (
 #ifdef _DEBUG
     HRESULT hr =
 #endif
-    ConvToJitSig(sig, scopeHnd, sigTok, sigRet);
+    ConvToJitSig(sig, scopeHnd, sigTok, sigRet,context,false);
     _ASSERTE(SUCCEEDED(hr));
     COOPERATIVE_TRANSITION_END();
 }
@@ -881,7 +1053,8 @@ unsigned __stdcall CEEInfo::getClassGClayout (CORINFO_CLASS_HANDLE clsHnd, BYTE*
                 ret = 0;
                 break;
         }
-    } else {
+    }
+    else {
         TypeHandle VMClsHnd(clsHnd);
 
         if (g_Mscorlib.IsClass(VMClsHnd.AsMethodTable(), CLASS__TYPED_REFERENCE))
@@ -1013,7 +1186,6 @@ CORINFO_CLASS_HANDLE __stdcall CEEInfo::getSDArrayForClass(CORINFO_CLASS_HANDLE 
     return((CORINFO_CLASS_HANDLE) ret.AsPtr());
 }
 
-/*********************************************************************/
 CorInfoType __stdcall CEEInfo::asCorInfoType (CORINFO_CLASS_HANDLE clsHnd)
 {
     REQUIRES_4K_STACK;
@@ -1021,8 +1193,438 @@ CorInfoType __stdcall CEEInfo::asCorInfoType (CORINFO_CLASS_HANDLE clsHnd)
     CANNOTTHROWCOMPLUSEXCEPTION();
 
     TypeHandle VMClsHnd(clsHnd);
-    return toJitType(VMClsHnd.GetNormCorElementType());
+    return toJitType(VMClsHnd);
 }
+
+//@GENERICS:
+// Given a module scope (scopeHnd), a method handle (context) and an annotated metadata token (annotatedMetaTOK),
+// attempt to load the handle (type, field or method) associated with the token.
+// If this is not possible at compile-time (because the method code is shared and the token contains type parameters)
+// then indicate how the handle should be looked up at run-time.
+// 
+// Type tokens can be combined with CORINFO_ANNOT_MASK flags to obtain array type handles and method entry points
+// These are required by newarr and invariant.newarray instructions which take a token for the *element* type of the array
+// and by call/ldftn instructions.
+//
+// See corinfo.h for more details
+//
+CORINFO_GENERICHANDLE_RESULT __stdcall CEEInfo::embedGenericHandle(
+            CORINFO_MODULE_HANDLE  scopeHnd,
+            unsigned      annotatedMetaTOK,
+            CORINFO_METHOD_HANDLE context,
+            void** ppIndirection,
+            CORINFO_CLASS_HANDLE& tokenType)
+{
+    REQUIRES_4K_STACK;
+    CORINFO_GENERICHANDLE_RESULT result;
+    result.handle = NULL;
+
+    COOPERATIVE_TRANSITION_BEGIN();
+
+    // Class or method type parameters present in token
+    VarKind varKind = hasNoVars;
+
+    // Strip off the annotation
+    mdToken     metaTOK = annotatedMetaTOK & ~CORINFO_ANNOT_MASK;
+    unsigned annotation = annotatedMetaTOK & CORINFO_ANNOT_MASK;
+    mdToken     tokType = TypeFromToken(metaTOK);
+
+    // Where does the token live?
+    Module* pModule = GetModule(scopeHnd);
+    IMDInternalImport *pInternalImport = pModule->GetMDImport();
+
+    // Is the context shared code (wrt either method or class type parameters)?
+    MethodDesc *pContextMD = (MethodDesc*)context;
+    BOOL contextShared = pContextMD->IsSharedByGenericInstantiations() != 0;
+
+    InitStaticTypeHandles();
+
+    if (ppIndirection != NULL)
+        *ppIndirection = NULL;
+
+    switch (tokType)
+    {
+    case mdtTypeRef:
+    case mdtTypeDef:
+    case mdtTypeSpec:
+        tokenType = CORINFO_CLASS_HANDLE(s_pRuntimeTypeHandle);
+        if (tokType == mdtTypeSpec && contextShared)
+        {
+            PCCOR_SIGNATURE pSig;
+            ULONG cSig;
+            pInternalImport->GetTypeSpecFromToken(metaTOK, &pSig, &cSig);
+            SigPointer psig(pSig);
+            varKind = psig.IsPolyType(pContextMD);
+        }
+
+        if (varKind == hasNoVars)
+        {
+            result.kind = CORINFO_LOOKUP_CONST;
+            CORINFO_CLASS_HANDLE clsHnd = findClass(scopeHnd, metaTOK, context);
+
+            switch (annotation)
+            {
+            case CORINFO_ANNOT_ARRAY :    
+                clsHnd = getSDArrayForClass(clsHnd);
+                break;
+            }
+
+            result.handle = CORINFO_GENERIC_HANDLE(clsHnd);
+            goto Finish;
+        }       
+        break;
+
+    case mdtMemberRef:
+    {
+        // OK, we have to look at the metadata to see if it's a field or method
+        PCCOR_SIGNATURE pSig;
+        ULONG cSig;
+        pModule->GetMDImport()->GetNameAndSigOfMemberRef(metaTOK, &pSig, &cSig);
+
+        // Fields are always resolved at compile-time (rethink this if we introduce per-instantiation static fields)
+        if (isCallConv(MetaSig::GetCallingConventionInfo(pModule, pSig), IMAGE_CEE_CS_CALLCONV_FIELD))
+        {
+            tokenType = CORINFO_CLASS_HANDLE(s_pRuntimeFieldHandle);
+            result.kind = CORINFO_LOOKUP_CONST;
+            result.handle = CORINFO_GENERIC_HANDLE(findField(scopeHnd, metaTOK, context));
+            goto Finish;
+        }
+        else
+        {
+            tokenType = CORINFO_CLASS_HANDLE(s_pRuntimeMethodHandle);
+
+            // If the context is shared then we'd better check for type/method type parameters
+            if (contextShared)
+            {
+                unsigned parentTok = pInternalImport->GetParentOfMemberRef(metaTOK);
+                if (TypeFromToken(parentTok) == mdtTypeSpec)
+                {
+                    pInternalImport->GetTypeSpecFromToken(parentTok, &pSig, &cSig);
+                    SigPointer psig(pSig);
+                    varKind = psig.IsPolyType(pContextMD); 
+                }
+            }
+
+            MethodDesc *resultMD = (MethodDesc*)(findMethod(scopeHnd,
+                                                            annotatedMetaTOK & ~CORINFO_ANNOT_ENTRYPOINT,
+                                                            context));
+
+            // If both context and target are shared then we can get away with a static look up
+            if (varKind == hasNoVars)
+            {
+                result.kind = CORINFO_LOOKUP_CONST;
+                if (annotation & CORINFO_ANNOT_ENTRYPOINT)
+                {
+                    void* addr = (void*) (resultMD->GetAddrOfCodeForLdFtn());
+                    result.handle = CORINFO_GENERIC_HANDLE(addr);
+                }
+                else 
+                    result.handle = CORINFO_GENERIC_HANDLE(resultMD);
+                goto Finish;
+            }
+        }
+        break;
+    }
+
+    case mdtMethodDef:
+    {
+        tokenType = CORINFO_CLASS_HANDLE(s_pRuntimeMethodHandle);
+        result.kind = CORINFO_LOOKUP_CONST;
+        MethodDesc *resultMD = (MethodDesc*)((findMethod(scopeHnd, annotatedMetaTOK & ~CORINFO_ANNOT_ENTRYPOINT, context)));
+
+        if (annotation & CORINFO_ANNOT_ENTRYPOINT)
+        {
+            void* addr = (void*) (resultMD->GetAddrOfCodeForLdFtn());
+            result.handle = CORINFO_GENERIC_HANDLE(addr);
+        }
+        else 
+            result.handle = CORINFO_GENERIC_HANDLE(resultMD);
+        goto Finish;
+    }
+
+    case mdtMethodSpec:
+      {
+        if (!g_pConfig->IsGenericsEnabled())
+          COMPlusThrowHR(COR_E_BADIMAGEFORMAT);
+
+        tokenType = CORINFO_CLASS_HANDLE(s_pRuntimeMethodHandle);
+        
+        // If any of the context is shared then we'd better check for type/method type parameters
+        if (contextShared)
+        {
+          PCCOR_SIGNATURE pSig;
+          ULONG cSig;
+          mdMemberRef MemberRef;
+
+          // Get the member def/ref and instantiation signature
+          pInternalImport->GetMethodSpecProps(metaTOK, &MemberRef, &pSig, &cSig);
+
+          if (TypeFromToken(MemberRef) == mdtMemberRef)
+          {
+            PCCOR_SIGNATURE pParentSig;
+            ULONG cParentSig;
+            unsigned parentTok = pInternalImport->GetParentOfMemberRef(MemberRef);
+            if (TypeFromToken(parentTok) == mdtTypeSpec)
+            {
+              pInternalImport->GetTypeSpecFromToken(parentTok, &pParentSig, &cParentSig);
+              SigPointer psig(pParentSig);
+              varKind = psig.IsPolyType(pContextMD); 
+            }
+          }
+
+          _ASSERT(*pSig == IMAGE_CEE_CS_CALLCONV_INSTANTIATION);
+          pSig++;
+
+          SigPointer sp(pSig);
+          DWORD ntypars = sp.GetData();
+
+          for (DWORD i = 0; i < ntypars; i++)
+          {
+            varKind = (VarKind) (sp.IsPolyType(pContextMD) | varKind);
+            sp.SkipExactlyOne();
+          }
+        }
+
+        MethodDesc *resultMD = (MethodDesc*)((findMethod(scopeHnd, annotatedMetaTOK & ~CORINFO_ANNOT_ENTRYPOINT, context)));
+
+        if (varKind == hasNoVars)
+        {
+          result.kind = CORINFO_LOOKUP_CONST;
+          if (annotation & CORINFO_ANNOT_ENTRYPOINT)
+          {
+            void* addr = (void*) (resultMD->GetAddrOfCodeForLdFtn());
+            result.handle = CORINFO_GENERIC_HANDLE(addr);
+          }
+          else 
+            result.handle = CORINFO_GENERIC_HANDLE(resultMD);
+          goto Finish;
+        }
+      }
+      break;
+
+    case mdtFieldDef:
+        tokenType = CORINFO_CLASS_HANDLE(s_pRuntimeFieldHandle);
+        result.kind = CORINFO_LOOKUP_CONST;
+        result.handle = CORINFO_GENERIC_HANDLE(findField(scopeHnd, metaTOK, context));
+        goto Finish;
+
+    default:
+        COMPlusThrowHR(COR_E_BADIMAGEFORMAT);
+        _ASSERTE(!"Error bad token type");
+    }
+
+
+    // If we've got this far we need to do the lookup at run-time
+    _ASSERTE(varKind != hasNoVars);
+    _ASSERTE(contextShared);
+
+    // If we've got a free method type parameter then we must look in the method desc arg
+    if ((varKind & hasMethodVar) != 0)
+        result.kind = CORINFO_LOOKUP_METHODPARAM;
+
+    // Otherwise we must just have class type variables
+    else {
+      _ASSERTE(varKind == hasClassVar);
+
+      // If we've got a vtable extra argument, go through that
+      if (pContextMD->GetMethodTable()->IsValueClass())
+        result.kind = CORINFO_LOOKUP_CLASSPARAM;
+      
+      // If we've got an object, go through its vtable
+      else if (!pContextMD->IsStatic())
+        result.kind = CORINFO_LOOKUP_THISOBJ;
+
+      // Otherwise go through the method-desc argument
+      else {
+        result.kind = CORINFO_LOOKUP_METHODPARAM;
+      }
+    }
+
+    // Unless we decide otherwise, just do the lookup via a helper function
+    result.indirections = CORINFO_USEHELPER;
+
+    // It's a method dictionary lookup
+    if (result.kind == CORINFO_LOOKUP_METHODPARAM)
+    {
+        // Special cases: 
+        // (1) Naked method type variable: look up directly in instantiation hanging off runtime md
+        // (2) Reference to method-spec of current method (e.g. a recursive call) i.e. currentmeth<!0,...,!(n-1)>
+        if (tokType == mdtTypeSpec && annotation == 0)
+        {
+            PCCOR_SIGNATURE pSig;
+            ULONG cSig;
+            pInternalImport->GetTypeSpecFromToken(metaTOK, &pSig, &cSig);
+            SigPointer sigptr = SigPointer(pSig);
+            CorElementType type = sigptr.GetElemType();
+            if (type == ELEMENT_TYPE_MVAR)
+            {
+                result.indirections = 2;
+                result.testForNull = 0;
+                result.offsets[0] = offsetof(InstantiatedMethodDesc, m_pPerInstInfo);
+                result.offsets[1] = (WORD)sizeof(TypeHandle) * sigptr.GetData();
+            }
+        }
+        else if (tokType == mdtMethodSpec && annotation == 0)
+        {
+          PCCOR_SIGNATURE pSig;
+          ULONG cSig;
+          mdMemberRef MemberRef;
+
+          // Get the member def/ref and instantiation signature
+          pInternalImport->GetMethodSpecProps(metaTOK, &MemberRef, &pSig, &cSig);
+
+          // It's the context itself (i.e. a recursive call)
+          if (TypeFromToken(MemberRef) == mdtMethodDef && MemberRef == pContextMD->GetMemberDef())
+          {
+            // Now just check that the instantiation is (!!0, ..., !!(n-1))
+            _ASSERT(*pSig == IMAGE_CEE_CS_CALLCONV_INSTANTIATION);
+            pSig++;
+
+            SigPointer sigptr(pSig);
+            DWORD ntypars = sigptr.GetData();
+
+            for (unsigned i = 0; i < ntypars; i++)
+            {
+              CorElementType type = sigptr.GetElemType();
+              if (type != ELEMENT_TYPE_MVAR)
+                goto NoSpecialCase1;
+              if (sigptr.GetData() != i)
+                goto NoSpecialCase1;
+            }
+
+            // Just use the method descriptor that was passed in!
+            result.indirections = 0;
+            result.testForNull = 0;
+          }
+        }
+
+        NoSpecialCase1:
+        // No special-casing has been applied
+        if (result.indirections == CORINFO_USEHELPER)
+        {
+          _ASSERTE(pContextMD != NULL);
+          _ASSERTE(pContextMD->GetMethodInstantiation() != NULL);
+          result.indirections = ((InstantiatedMethodDesc*) pContextMD)->FindDictionaryToken(annotatedMetaTOK, result.offsets + 1);
+          if (result.indirections != CORINFO_USEHELPER)
+          {
+            _ASSERTE(result.indirections+1 <= CORINFO_MAXINDIRECTIONS);
+
+            result.testForNull = 1;
+
+            // Indirect through dictionary table pointer in InstantiatedMethodDesc
+            result.offsets[0] = offsetof(InstantiatedMethodDesc, m_pPerInstInfo);
+
+            // ...and we've added an indirection
+            result.indirections += 1;
+          }
+        }
+    }
+
+    // It's a class dictionary lookup (CORINFO_LOOKUP_CLASSPARAM or CORINFO_LOOKUP_THISOBJ)
+    else
+    {
+        EEClass *pClass = pContextMD->GetClass();
+        _ASSERTE(pClass->GetNumGenericArgs() > 0);
+
+        // Special cases: 
+        // (1) Naked class type variable: look up directly in instantiation hanging off vtable
+        // (2) C<!0,...,!(n-1)> where C is the context's class and C is sealed: just return vtable ptr
+        if (tokType == mdtTypeSpec && annotation == 0)
+        {
+           PCCOR_SIGNATURE pSig;
+           ULONG cSig;
+           pInternalImport->GetTypeSpecFromToken(metaTOK, &pSig, &cSig);
+           SigPointer sigptr = SigPointer(pSig);
+           CorElementType type = sigptr.GetElemType();
+           if (type == ELEMENT_TYPE_VAR)
+           {
+             result.indirections = 3;
+             result.testForNull = 0;
+             result.offsets[0] = offsetof(MethodTable, m_pPerInstInfo);
+             result.offsets[1] = (WORD)sizeof(TypeHandle*) * (pClass->GetNumDicts()-1);
+             result.offsets[2] = (WORD)sizeof(TypeHandle) * sigptr.GetData();
+           }
+           else if (type == ELEMENT_TYPE_WITH && IsTdSealed(pClass->GetAttrClass()))
+           {
+                if (sigptr.GetElemType() == ELEMENT_TYPE_CLASS)
+                {
+                    mdTypeRef typeref = sigptr.GetToken();          
+                    if (TypeFromToken(typeref) == mdtTypeDef && typeref == pClass->GetCl())
+                    {
+                        unsigned ntypars = sigptr.GetData();
+                        for (unsigned i = 0; i < ntypars; i++)
+                        {
+                            type = sigptr.GetElemType();
+                            if (type != ELEMENT_TYPE_VAR)
+                                goto NoSpecialCase2;
+                            if (sigptr.GetData() != i)
+                                goto NoSpecialCase2;
+                        }
+
+                        // Just use the vtable pointer itself!
+                        result.indirections = 0;
+                        result.testForNull = 0;
+                    }
+                }
+           }
+        }
+        NoSpecialCase2:
+
+        // No special-casing has been applied
+        if (result.indirections == CORINFO_USEHELPER)
+        {
+            result.indirections = Generics::FindClassDictionaryToken(pClass, annotatedMetaTOK, result.offsets + 2);
+            if (result.indirections != CORINFO_USEHELPER)
+            {
+                _ASSERTE(result.indirections+2 <= CORINFO_MAXINDIRECTIONS);
+
+                result.testForNull = 1;
+
+                // Indirect through dictionary table pointer in vtable
+                result.offsets[0] = offsetof(MethodTable, m_pPerInstInfo);
+
+                // Next indirect through the dictionary appropriate to this instantiated type
+                result.offsets[1] = (WORD)sizeof(TypeHandle*) * (pClass->GetNumDicts()-1);
+
+                // ...and we've added a couple of indirections
+                result.indirections += 2;
+            }
+        }
+    }
+
+Finish:
+
+    result.compileTimeHandle = result.handle;
+
+    COOPERATIVE_TRANSITION_END();
+
+    return result;
+}
+
+BYTE* __stdcall CEEInfo::unpackMethodInst(CORINFO_MODULE_HANDLE scopeHnd, unsigned metaTOK, unsigned *memberRef)
+{
+    *memberRef = mdTokenNil;
+
+    Module* pModule = GetModule(scopeHnd);
+    IMDInternalImport *pInternalImport = pModule->GetMDImport();
+
+    if (TypeFromToken(metaTOK) == mdtMethodSpec)
+    {
+      PCCOR_SIGNATURE pSig;
+      ULONG cSig;
+
+      // Get the member def/ref and instantiation signature
+      pInternalImport->GetMethodSpecProps(metaTOK, memberRef, &pSig, &cSig);
+
+      _ASSERT(*pSig == IMAGE_CEE_CS_CALLCONV_INSTANTIATION);
+      pSig++;
+
+      return (BYTE*) pSig;
+    }
+    else
+      return NULL;
+}
+
 
 /*********************************************************************/
 const char* __stdcall CEEInfo::getClassName (CORINFO_CLASS_HANDLE clsHnd)
@@ -1077,107 +1679,119 @@ DWORD __stdcall CEEInfo::getClassAttribs (CORINFO_CLASS_HANDLE clsHnd, CORINFO_M
     _ASSERTE(!isValueArray(clsHnd));
 
     TypeHandle     VMClsHnd(clsHnd);
-    MethodTable    *pMT = VMClsHnd.GetMethodTable();
-    EEClass        *cls = pMT->GetClass();
-    _ASSERTE(cls->GetMethodTable()->GetClass() == cls);
 
-    // Get the calling method
-    MethodDesc* method = (MethodDesc*) context;
-
-    if (pMT->IsArray())
-        ret |= CORINFO_FLG_ARRAY;
-
-    // Set the INITIALIZED bit if the class is initialized 
-    if (pMT->IsClassInited())
-        ret |= CORINFO_FLG_INITIALIZED;
-    else if (pMT->IsShared() && !method->GetMethodTable()->IsShared())
+    // For now, type variables simply report "variable".  
+    if (VMClsHnd.IsGenericVariable())
     {
-        // If we are accessing from unshared to shared code, we can check the
-        // state of the current domain as well.
-
-        COMPLUS_TRY 
-          {
-              DomainLocalBlock *pBlock = GetAppDomain()->GetDomainLocalBlock();
-              if (pBlock->IsClassInitialized(pMT->GetSharedClassIndex()))
-                  ret |= CORINFO_FLG_INITIALIZED;
-          }
-        COMPLUS_CATCH
-          {
-              // just eat the exception and assume class not inited
-          }
-        COMPLUS_END_CATCH;
+        ret |= CORINFO_FLG_GENERIC_TYPE_VARIABLE;
     }
-
-    // Set the NEEDS_INIT bit if we require the JIT to insert cctor logic before
-    // access.  This is currently used only for static field accesses and method inlining.
-    // Note that this is set independently of the INITIALIZED bit above.
-
-    if (pMT != method->GetMethodTable())
+    else
     {
-        if (pMT->IsShared())
+        MethodTable    *pMT = VMClsHnd.GetMethodTable();
+        if (pMT != NULL)
         {
-            // For shared classes, the inited bit is only set when we never need
-            // class initialzation (no cctor or static handles)
-
-            if (!pMT->IsClassInited())
+            EEClass        *cls = pMT->GetClass();
+            _ASSERTE(cls->GetMethodTable()->GetClass() == cls);
+            
+            // Get the calling method
+            MethodDesc* method = (MethodDesc*) context;
+            
+            if (pMT->IsArray())
+                ret |= CORINFO_FLG_ARRAY;
+            
+            // Set the INITIALIZED bit if the class is initialized 
+            if (pMT->IsClassInited())
+                ret |= CORINFO_FLG_INITIALIZED;
+            else if (pMT->IsShared() && !method->GetMethodTable()->IsShared())
             {
-                // 
-                // For the shared->shared access, it turns out we never have to do any initialization
-                // in this case.  There are 2 cases:
-                // 
-                // BeforeFieldInit: in this case, no init is required on method calls, and 
-                //  the shared helper will perform the required init on static field accesses.
-                // Exact:  in this case we do need an init on method calls, but this will be
-                //  provided by a prolog of the method itself.
-
-                if (!method->GetMethodTable()->IsShared())
+                // If we are accessing from unshared to shared code, we can check the
+                // state of the current domain as well.
+                
+                COMPLUS_TRY 
+                    {
+                        DomainLocalBlock *pBlock = GetAppDomain()->GetDomainLocalBlock();
+                        if (pBlock->IsClassInitialized(pMT->GetSharedClassIndex()))
+                            ret |= CORINFO_FLG_INITIALIZED;
+                    }
+                COMPLUS_CATCH
+                    {
+                        // just eat the exception and assume class not inited
+                    }
+                COMPLUS_END_CATCH;
+            }
+            
+            // Set the NEEDS_INIT bit if we require the JIT to insert cctor logic before
+            // access.  This is currently used only for static field accesses and method inlining.
+            // Note that this is set independently of the INITIALIZED bit above.
+            
+            if (pMT != method->GetMethodTable())
+            {
+                if (pMT->IsShared())
                 {
-                    // Unshared->shared access.  The difference in this case (from above) is 
-                    // that we don't use the shared helper.  Thus we need the JIT to provide
-                    // a class construction call.  
-
-                    ret |= CORINFO_FLG_NEEDS_INIT;
+                    // For shared classes, the inited bit is only set when we never need
+                    // class initialzation (no cctor or static handles)
+                    
+                    if (!pMT->IsClassInited())
+                    {
+                        // 
+                        // For the shared->shared access, it turns out we never have to do any initialization
+                        // in this case.  There are 2 cases:
+                        // 
+                        // BeforeFieldInit: in this case, no init is required on method calls, and 
+                        //  the shared helper will perform the required init on static field accesses.
+                        // Exact:  in this case we do need an init on method calls, but this will be
+                        //  provided by a prolog of the method itself.
+                        
+                        if (!method->GetMethodTable()->IsShared())
+                        {
+                            // Unshared->shared access.  The difference in this case (from above) is 
+                            // that we don't use the shared helper.  Thus we need the JIT to provide
+                            // a class construction call.  
+                            
+                            ret |= CORINFO_FLG_NEEDS_INIT;
+                        }
+                    }
+                }
+                else
+                {
+                    // For accesses to unshared classes (which are by necessity from other unshared classes),
+                    // we need initialization iff we have a class constructor.
+                    
+                    if (pMT->HasClassConstructor())
+                        ret |= CORINFO_FLG_NEEDS_INIT;
                 }
             }
-        }
-        else
-        {
-            // For accesses to unshared classes (which are by necessity from other unshared classes),
-            // we need initialization iff we have a class constructor.
-
-            if (pMT->HasClassConstructor())
-                ret |= CORINFO_FLG_NEEDS_INIT;
+            
+            if (cls->IsInterface())
+                ret |= CORINFO_FLG_INTERFACE;
+            
+            if (cls->HasVarSizedInstances())
+                ret |= CORINFO_FLG_VAROBJSIZE;
+            
+            if (cls->IsValueClass()) 
+            {
+                ret |= CORINFO_FLG_VALUECLASS;
+                
+                if (cls->ContainsStackPtr())
+                    ret |= CORINFO_FLG_CONTAINS_STACK_PTR;
+            }
+            
+            if (cls->IsContextful())
+                ret |= CORINFO_FLG_CONTEXTFUL;
+            
+            if (cls->IsMarshaledByRef())
+                ret |= CORINFO_FLG_MARSHAL_BYREF;
+            
+            if (cls == g_pObjectClass->GetClass())
+                ret |= CORINFO_FLG_OBJECT;
+            
+            if (pMT->ContainsPointers())
+                ret |= CORINFO_FLG_CONTAINS_GC_PTR;
+            
+            if (cls->IsAnyDelegateClass())
+                ret |= CORINFO_FLG_DELEGATE;
         }
     }
-
-    if (cls->IsInterface())
-        ret |= CORINFO_FLG_INTERFACE;
-
-    if (cls->HasVarSizedInstances())
-        ret |= CORINFO_FLG_VAROBJSIZE;
-
-    if (cls->IsValueClass()) 
-    {
-        ret |= CORINFO_FLG_VALUECLASS;
-
-        if (cls->ContainsStackPtr())
-            ret |= CORINFO_FLG_CONTAINS_STACK_PTR;
-    }
-
-    if (cls->IsContextful())
-        ret |= CORINFO_FLG_CONTEXTFUL;
-
-    if (cls->IsMarshaledByRef())
-        ret |= CORINFO_FLG_MARSHAL_BYREF;
-
-    if (cls == g_pObjectClass->GetClass())
-        ret |= CORINFO_FLG_OBJECT;
-
-    if (pMT->ContainsPointers())
-        ret |= CORINFO_FLG_CONTAINS_GC_PTR;
-
-    if (cls->IsAnyDelegateClass())
-        ret |= CORINFO_FLG_DELEGATE;
 
     STOP_NON_JIT_PERF();
 
@@ -1256,8 +1870,14 @@ BOOL __stdcall CEEInfo::loadClass (CORINFO_CLASS_HANDLE clsHnd,
                                    BOOL speculative)
 {
     REQUIRES_4K_STACK;
+    
+    TypeHandle th = TypeHandle(clsHnd);
+    
+    //@GENERICSVER: (generic verification time) type variables do not need to be loaded 
+    if (th.IsGenericVariable()) 
+       return TRUE;
 
-    MethodTable    *pMT = TypeHandle(clsHnd).GetMethodTable();
+    MethodTable    *pMT = th.GetMethodTable();
 
     //
     // It is always safe to restore a class at jit time, as it happens 
@@ -1315,6 +1935,8 @@ CORINFO_CLASS_HANDLE __stdcall CEEInfo::getBuiltinClass(CorInfoClassId classId)
 
     return result;
 }
+
+
 
 /*********************************************************************/
 CorInfoType __stdcall CEEInfo::getTypeForPrimitiveValueClass(
@@ -1445,7 +2067,7 @@ CorInfoType __stdcall CEEInfo::getChildType (
 
     CorInfoType ret = CORINFO_TYPE_UNDEF;
     *clsRet = 0;
-    TypeHandle  retType;
+    TypeHandle  retType = TypeHandle();
 
     COOPERATIVE_TRANSITION_BEGIN();
     THROWSCOMPLUSEXCEPTION();
@@ -1512,16 +2134,7 @@ CorInfoType __stdcall CEEInfo::getChildType (
 
     if (!retType.IsNull()) {
         CorElementType type = retType.GetNormCorElementType();
-            // if it is true primtive (System.Int32 ..., return 0, to 
-            // indicate that it is a primitive and not something like
-            // a RuntimeArgumentHandle, that simply looks like a primitive
-
-        if (!(retType.IsUnsharedMT() && retType.GetClass()->IsTruePrimitive())) 
-            *clsRet = CORINFO_CLASS_HANDLE(retType.AsPtr());
-        ret = toJitType(type);
-
-        if (retType.IsEnum())
-            *clsRet = 0;
+        ret = toJitType(type,retType, clsRet);
 
     }
 
@@ -1675,8 +2288,8 @@ BOOL CEEInfo::CompatibleMethodSig(MethodDesc *pMethDescA, MethodDesc *pMethDescB
     pModA = pMethDescA->GetModule();
     pModB = pMethDescB->GetModule();
 
-    MetaSig SigA(pSigA, pModA);
-    MetaSig SigB(pSigB, pModB);
+    MetaSig SigA(pMethDescA);
+    MetaSig SigB(pMethDescB);
 
     // check everyting CompareMethodSigs() does not check
     if (SigA.GetCallingConventionInfo() != SigB.GetCallingConventionInfo())
@@ -1695,7 +2308,7 @@ BOOL CEEInfo::CompatibleMethodSig(MethodDesc *pMethDescA, MethodDesc *pMethDescB
         return FALSE;
     }
 
-    return MetaSig::CompareMethodSigs(pSigA, dwSigA, pModA, pSigB, dwSigB, pModB);
+    return MetaSig::CompareMethodSigs(pSigA, dwSigA, pModA, NULL, pSigB, dwSigB, pModB, NULL);
 }
 
 /*********************************************************************/
@@ -1814,7 +2427,7 @@ CorInfoHelpFunc CEEInfo::getNewHelper (CORINFO_CLASS_HANDLE newClsHnd, CORINFO_M
     MethodTable * pMT    = VMClsHnd.AsMethodTable();
 
 
-    if(CRemotingServices::IsRemoteActivationRequired(pMT->GetClass()))
+    if(CRemotingServices::IsRemoteActivationRequired(VMClsHnd))
     {
         return CORINFO_HELP_NEW_CROSSCONTEXT;
     }
@@ -1868,6 +2481,11 @@ CorInfoHelpFunc CEEInfo::getNewHelper (CORINFO_CLASS_HANDLE newClsHnd, CORINFO_M
 }
 
 /***********************************************************************/
+//<REVIEW>GENERICS: this only works for shared generic code because all the
+// helpers are actually the same. If they were different then things might
+// break because the same helper would end up getting used for different but
+// representation-compatible arrays (e.g. one with a default constructor
+// and one without)</REVIEW>
 CorInfoHelpFunc CEEInfo::getNewArrHelper (CORINFO_CLASS_HANDLE arrayClsHnd,
                                           CORINFO_METHOD_HANDLE context)
 {
@@ -1877,6 +2495,15 @@ CorInfoHelpFunc CEEInfo::getNewArrHelper (CORINFO_CLASS_HANDLE arrayClsHnd,
     ArrayTypeDesc* arrayTypeDesc = arrayType.AsArray();
     _ASSERTE(arrayTypeDesc->GetNormCorElementType() == ELEMENT_TYPE_SZARRAY);
 
+    // This is if we're asked for newarr !0 when verifying generic code
+    // Of course ideally you wouldn't even be generating code when
+    // simply doing verification (we run the JIT importer in import-only 
+    // mode), but importing does more than one would like so we try to be
+    // tolerant when asked for non-sensical helpers.  
+    if(arrayTypeDesc->GetTypeParam().IsGenericVariable())
+        return CORINFO_HELP_NEWARR_1_OBJ;
+
+    // This is the normal case
     if(arrayTypeDesc->GetMethodTable()->HasSharedMethodTable()) {
                 // It is an array of object refs
         _ASSERTE(CorTypeInfo::IsObjRef(arrayTypeDesc->GetTypeParam().GetNormCorElementType()));
@@ -1922,12 +2549,11 @@ CorInfoHelpFunc CEEInfo::getIsInstanceOfHelper (CORINFO_CLASS_HANDLE IsInstClsHn
 {
     REQUIRES_4K_STACK;
     CANNOTTHROWCOMPLUSEXCEPTION();
-
     _ASSERTE(!isValueArray(IsInstClsHnd));
     TypeHandle  clsHnd(IsInstClsHnd);
 
     // Sanity test for class
-    _ASSERTE(!clsHnd.IsUnsharedMT() ||
+    _ASSERTE(!clsHnd.IsUnsharedMT() || clsHnd.HasInstantiation() || 
             clsHnd.AsClass()->GetMethodTable()->GetClass() == clsHnd.AsClass());
 
     // If it is a class, but not a interface, use an optimized handler.
@@ -1948,7 +2574,7 @@ CorInfoHelpFunc CEEInfo::getChkCastHelper (CORINFO_CLASS_HANDLE IsInstClsHnd)
     TypeHandle  clsHnd(IsInstClsHnd);
 
     // Sanity test for class
-    _ASSERTE(!clsHnd.IsUnsharedMT() ||
+    _ASSERTE(!clsHnd.IsUnsharedMT() || clsHnd.HasInstantiation() || 
             clsHnd.AsClass()->GetMethodTable()->GetClass() == clsHnd.AsClass());
 
     // If it is a class, but not a interface, use an optimized handler.
@@ -1961,7 +2587,8 @@ CorInfoHelpFunc CEEInfo::getChkCastHelper (CORINFO_CLASS_HANDLE IsInstClsHnd)
 /***********************************************************************/
 // This returns the typedesc from a method token. 
 CORINFO_CLASS_HANDLE __stdcall CEEInfo::findMethodClass(CORINFO_MODULE_HANDLE scopeHnd, 
-                                                        mdToken methodTOK)
+                                                        mdToken methodTOK,
+                                                        CORINFO_METHOD_HANDLE context)
 {
     REQUIRES_8K_STACK;
     TypeHandle type;
@@ -1979,27 +2606,22 @@ CORINFO_CLASS_HANDLE __stdcall CEEInfo::findMethodClass(CORINFO_MODULE_HANDLE sc
     pInternalImport->GetParentToken(methodTOK, &typeSpec);
     _ASSERTE(SUCCEEDED(hr));
 
+    TypeHandle* classInst = NULL;
+    TypeHandle* methodInst = NULL;
+    if (context)
+    {
+      MethodDesc* md = (MethodDesc*) context;
+      classInst = md->GetClassInstantiation();
+      methodInst = md->GetMethodInstantiation();
+    }
+
     NameHandle typeNameHnd(module, typeSpec);
-    type = module->GetClassLoader()->LoadTypeHandle(&typeNameHnd);
-    // Note at the moment we pass the typeHandle itself as the instantiation parameter
-    // (because we have only arrays, and these only have one type parameter)
-    // when we go to true parameterized types, this will be pointer to a list of type
-    // handles
+    type = module->GetClassLoader()->LoadTypeHandle(&typeNameHnd, NULL, classInst, methodInst);
 
     COOPERATIVE_TRANSITION_END();
     return(CORINFO_CLASS_HANDLE(type.AsPtr()));
 }
-/***********************************************************************/
-LPVOID __stdcall CEEInfo::getInstantiationParam(CORINFO_MODULE_HANDLE scopeHnd, 
-                mdToken methodTOK, void **ppIndirection)
-{
-    REQUIRES_8K_STACK;
 
-    if (ppIndirection != NULL)
-        *ppIndirection = NULL;
-
-    return  findMethodClass(scopeHnd,methodTOK);
-}
 
 /***********************************************************************/
         // registers a vararg sig & returns a class-specific cookie for it.
@@ -2051,19 +2673,19 @@ const char* __stdcall CEEInfo::getMethodName (CORINFO_METHOD_HANDLE ftnHnd, cons
 
     if (scopeName != 0)
     {
-        EEClass* cls = ftn->GetClass();
+        TypeHandle t = TypeHandle(ftn->GetMethodTable());
         *scopeName = "";
-        if (cls) 
+        if (!t.IsNull()) 
         {
 #ifdef _DEBUG
-            cls->_GetFullyQualifiedNameForClassNestedAware(clsNameBuff, MAX_CLASSNAME_LENGTH);
+            t.GetName(clsNameBuff, MAX_CLASSNAME_LENGTH);
             *scopeName = clsNameBuff;
 #else 
             // since this is for diagnostic purposes only,
             // give up on the namespace, as we don't have a buffer to concat it
             // also note this won't show array class names.         
             LPCUTF8 nameSpace;
-            *scopeName= cls->GetFullyQualifiedNameInfo(&nameSpace);
+            *scopeName= t.GetClass()->GetFullyQualifiedNameInfo(&nameSpace);
 #endif
         }
     }
@@ -2164,6 +2786,11 @@ DWORD __stdcall CEEInfo::getMethodAttribs (CORINFO_METHOD_HANDLE ftnHnd, CORINFO
         ret |= CORINFO_FLG_EnC;
     }
 
+    if (ftn->IsSharedByGenericInstantiations())
+    {
+        ret |= CORINFO_FLG_SHAREDINST;
+    }
+
     if (ftn->IsNDirect())
     {
         if (!Security::IsSecurityOn() || (ftn->GetSecurityFlags() == 0))
@@ -2208,7 +2835,7 @@ static void *GetClassSync(MethodTable *pMT)
 
     OBJECTREF ref = NULL;
 
-    ref = pMT->GetClass()->GetExposedClassObject();
+    ref = pMT->GetExposedClassObject();
     if (ref == NULL)
         ret = NULL;
     else
@@ -2329,13 +2956,20 @@ bool __stdcall      CEEInfo::getMethodInfo (CORINFO_METHOD_HANDLE     ftnHnd,
         methInfo->options         = (CorInfoOptions) header.GetFlags();
 
         /* Fetch the method signature */
-        hr = ConvToJitSig(ftn->GetSig(), GetScopeHandle(ftn), mdTokenNil, &methInfo->args, false);
+	// Type parameters in the signature should be instantiated according to the class/method/array instantiation of ftnHnd
+        hr = ConvToJitSig(ftn->GetSig(), GetScopeHandle(ftn), mdTokenNil, &methInfo->args, ftnHnd, false);
         _ASSERTE(SUCCEEDED(hr));
+
+        //@GENERICS:
+        // Shared generic methods and shared methods on generic structs take an extra argument representing their instantiation
+        if (ftn->HasInstParam())
+          methInfo->args.callConv = (CorInfoCallConv) (methInfo->args.callConv | CORINFO_CALLCONV_PARAMTYPE);
 
         _ASSERTE( (IsMdStatic(ftn->GetAttrs()) == 0) == ((methInfo->args.callConv & CORINFO_CALLCONV_HASTHIS) != 0));
 
         /* And its local variables */
-        hr = ConvToJitSig(header.LocalVarSig, GetScopeHandle(ftn), mdTokenNil, &methInfo->locals, true);
+	// Type parameters in the signature should be instantiated according to the class/method/array instantiation of ftnHnd
+        hr = ConvToJitSig(header.LocalVarSig, GetScopeHandle(ftn), mdTokenNil, &methInfo->locals, ftnHnd, true);
         _ASSERTE(SUCCEEDED(hr));
 
         LOG((LF_JIT, LL_INFO100000, "Getting method info (possible inline) %s::%s%s\n",
@@ -2459,6 +3093,113 @@ CorInfoInline __stdcall      CEEInfo::canInline (CORINFO_METHOD_HANDLE hCaller,
 	return (res);
 }
 
+/*************************************************************
+ * Check if a method to be compiled is an instantiation
+ * of generic code that has already been verified.  Three
+ * possible return values (see corinfo.h)
+ *************************************************************/
+CorInfoInstantiationVerification __stdcall  CEEInfo::isInstantiationOfVerifiedGeneric(CORINFO_METHOD_HANDLE hMethod)
+{
+    CorInfoInstantiationVerification res;
+
+    REQUIRES_16K_STACK;
+    COOPERATIVE_TRANSITION_BEGIN();
+
+    LOG((LF_JIT, LL_INFO1000, "GENERICSVER: entering isInstantiationOfVerifiedGeneric\n"));
+
+    MethodDesc* pMethod = (MethodDesc*)hMethod;
+
+    if (!(pMethod->HasClassInstantiation() || pMethod->HasMethodInstantiation()))
+    {
+        res = INSTVER_NOT_INSTANTIATION;
+    }
+    else
+    {
+        MethodTable *pMT;
+        if (pMethod->HasClassInstantiation())
+        {
+            EEClass *pClass = pMethod->GetClass();
+            TypeHandle th = ClassLoader::LoadGenericInstantiation(
+                                                                  pMethod->GetMethodTable()->GetGenericTypeDefinition(),
+                                                                  pClass->GetMethodTable()->GetInstantiation(),
+                                                                  pClass->GetNumGenericArgs()
+                                                                  );
+            pMT = th.GetMethodTable();
+        } 
+        else 
+        {
+            pMT = pMethod->GetMethodTable();
+        }
+        
+        MethodDesc *pGenMethod;
+        if (pMethod->HasMethodInstantiation())
+        { InstantiatedMethodDesc *pIMD = (InstantiatedMethodDesc *) pMT->GetMethodDescForSlot(pMethod->GetSlot());
+        pGenMethod = InstantiatedMethodDesc::CreateGenericInstantiation(pMT,pIMD,pIMD->GetTypicalMethodInstantiation(),pIMD->GetNumGenericMethodArgs());
+        }
+        else 
+        {  
+            pGenMethod = pMT->GetMethodDescForSlot(pMethod->GetSlot());
+        }
+        
+        // We use physical equality to detect whether pMethod is the typical instantiation, pGenMethod, just created
+        if (pGenMethod == pMethod)
+        {
+            res = INSTVER_NOT_INSTANTIATION;
+        }
+        else
+        {
+            bool passedOrSkippedVerification = false;
+            _ASSERTE(pGenMethod->GetModule());
+            _ASSERTE(pGenMethod->GetModule()->GetClassLoader());
+            
+            if (pGenMethod->IsVerified())
+            {
+                passedOrSkippedVerification = !pGenMethod->IsNotInline();
+                LOG((LF_JIT, LL_INFO1000, "GENERICSVER: skipping verification of generic method, IsVerified = %d, IsNotInline = %d \n", pGenMethod->IsVerified(),pGenMethod->IsNotInline()));
+            }
+            else if (Security::LazyCanSkipVerification(pGenMethod->GetModule()))
+            {
+                LOG((LF_JIT, LL_INFO1000, "GENERICSVER: skipping verification of generic method, IsVerified = %d, IsNotInline = %d \n", pGenMethod->IsVerified(),pGenMethod->IsNotInline()));
+                passedOrSkippedVerification = true;
+            }
+            else
+            {
+                COR_ILMETHOD_DECODER header(pGenMethod->GetILHeader(), pGenMethod->GetMDImport(), true /*VERIFY*/);
+                if(header.Code)
+                {
+                    IMAGE_DATA_DIRECTORY dir;
+                    dir.VirtualAddress = pGenMethod->GetRVA();
+                    dir.Size = header.CodeSize + (header.EH ? header.EH->DataSize() : 0);
+                    if (pGenMethod->GetModule()->IsPEFile() &&
+                        FAILED(pGenMethod->GetModule()->GetPEFile()->VerifyDirectory(&dir,IMAGE_SCN_MEM_WRITE))) header.Code = 0;
+                }
+                BAD_FORMAT_ASSERT(header.Code != 0);
+                if (header.Code == 0)
+                    COMPlusThrowHR(COR_E_BADIMAGEFORMAT);
+                
+#ifdef _X86_
+                
+                LOG((LF_JIT, LL_INFO1000, "GENERICSVER: verifying generic method\n"));
+                
+                BOOL dummy;
+                JITFunction(pGenMethod, &header, &dummy, CORJIT_FLG_IMPORT_ONLY);
+                
+                passedOrSkippedVerification = !pGenMethod->IsNotInline();
+                LOG((LF_JIT, LL_INFO1000, "GENERICSVER: generic method IsVerified = %d, IsNotInline = %d \n",pGenMethod->IsVerified(),pGenMethod->IsNotInline()));
+                
+#endif
+            }
+            res = 
+                passedOrSkippedVerification
+                ? INSTVER_GENERIC_PASSED_OR_SKIPPED_VERIFICATION 
+                : INSTVER_GENERIC_FAILED_VERIFICATION;
+        }
+    }
+    COOPERATIVE_TRANSITION_END();
+    return (res );
+
+}
+
 
 /*************************************************************
  * Similar to above, but perform check for tail call
@@ -2490,6 +3231,7 @@ bool __stdcall      CEEInfo::canTailCall (CORINFO_METHOD_HANDLE hCaller,
     if(pCallee == NULL ||
        pCallee->GetModule()->GetClassLoader() != pCaller->GetModule()->GetClassLoader())
     {
+
         // We'll allow code with SkipVerification permission to tailcall into
         // another assembly anyway. It's the responsiblity of such code to make
         // sure that they're not opening up a security hole by calling untrusted
@@ -2543,7 +3285,8 @@ void __stdcall CEEInfo::getEHinfo(
 /*********************************************************************/
 void __stdcall CEEInfo::getMethodSig (
             CORINFO_METHOD_HANDLE ftnHnd,
-            CORINFO_SIG_INFO* sigRet
+            CORINFO_SIG_INFO* sigRet,
+            CORINFO_CLASS_HANDLE owner
             )
 {
     REQUIRES_8K_STACK;
@@ -2560,8 +3303,14 @@ void __stdcall CEEInfo::getMethodSig (
 #ifdef _DEBUG
     HRESULT hr =
 #endif
-    ConvToJitSig(sig, GetScopeHandle(ftn), mdTokenNil, sigRet);
+    ConvToJitSig(sig, GetScopeHandle(ftn), mdTokenNil, sigRet, ftnHnd, false, (TypeHandle) owner);
     _ASSERTE(SUCCEEDED(hr));
+
+    //@GENERICS:
+    // Shared generic methods and shared methods on generic structs take an extra argument representing their instantiation
+    if (ftn->HasInstParam())
+      sigRet->callConv = (CorInfoCallConv) (sigRet->callConv | CORINFO_CALLCONV_PARAMTYPE);
+
 
         // We want the calling convention bit to be consistant with the method attribute bit
     _ASSERTE( (IsMdStatic(ftn->GetAttrs()) == 0) == ((sigRet->callConv & CORINFO_CALLCONV_HASTHIS) != 0) );
@@ -2569,7 +3318,12 @@ void __stdcall CEEInfo::getMethodSig (
     COOPERATIVE_TRANSITION_END();
 }
 
+
 /***********************************************************************/
+// For a method desc in a typical instantiation of a generic class, 
+// this will return the typical instantiation of the generic class, 
+// but only provided type variables are never shared.
+// The JIT verifier relies on this behaviour to extract the typical class from an instantiated method's typical method handle.
 CORINFO_CLASS_HANDLE __stdcall CEEInfo::getMethodClass (CORINFO_METHOD_HANDLE methodHnd)
 {
     REQUIRES_4K_STACK;
@@ -2577,10 +3331,9 @@ CORINFO_CLASS_HANDLE __stdcall CEEInfo::getMethodClass (CORINFO_METHOD_HANDLE me
 
     START_NON_JIT_PERF();
 
-    MethodDesc* method = (MethodDesc*) methodHnd;
-    CORINFO_CLASS_HANDLE clsHnd;
-
-    clsHnd = CORINFO_CLASS_HANDLE(TypeHandle(method->GetMethodTable()).AsPtr());
+    MethodDesc* method = (MethodDesc*)methodHnd;
+    TypeHandle th = TypeHandle(method->GetMethodTable());
+    CORINFO_CLASS_HANDLE clsHnd = CORINFO_CLASS_HANDLE(th.AsPtr());
 
     STOP_NON_JIT_PERF();
     return clsHnd;
@@ -2637,7 +3390,11 @@ unsigned __stdcall CEEInfo::getMethodVTableOffset (CORINFO_METHOD_HANDLE methodH
     unsigned methodVtabOffset;
 
     MethodDesc* method = (MethodDesc*) methodHnd;
-    const int methTabOffset = (int)(size_t)((MethodTable*) 0)->GetVtable();
+
+    //@GENERICS: shouldn't be doing this for instantiated methods as they live elsewhere
+    _ASSERTE(!method->HasMethodInstantiation());
+
+    const DWORD methTabOffset = MethodTable::GetOffsetOfVtable();
     _ASSERTE(methTabOffset < 256);  // a rough sanity check
 
         // better be in the vtable
@@ -2710,9 +3467,13 @@ void* __stdcall CEEInfo::getMethodPointer(CORINFO_METHOD_HANDLE ftnHnd,
     } 
     else 
     {
-        pClass = ftn->GetClass();
-        pvCode = pClass->GetMethodSlot(ftn);
-    }
+        if (ftn->HasMethodInstantiation())
+        {
+          pvCode = ((InstantiatedMethodDesc*) ftn)->GetCodeAddr();
+        }
+        else
+          pvCode = pClass->GetMethodSlot(ftn);
+    } 
 
     _ASSERTE(pvCode);
     ret = pvCode;
@@ -2740,8 +3501,12 @@ void* __stdcall CEEInfo::getFunctionEntryPoint(
     if (!ftn->PointAtPreStub() && !ftn->MayBeRemotingIntercepted() && *pAccessType == IAT_VALUE
         )
     {
-		*pAccessType = IAT_VALUE;
-		return *(ftn->GetClass()->GetMethodSlot(ftn));
+                *pAccessType = IAT_VALUE;
+
+                //@GENERICS: extract address from method descriptor itself; why isn't this done normally anyhow?
+                if (ftn->HasMethodInstantiation())
+                        return (void*) (ftn->GetUnsafeAddrofCode());
+                return *(ftn->GetClass()->GetMethodSlot(ftn));
     }
 
     void *pAddr;
@@ -2826,19 +3591,19 @@ const char* __stdcall CEEInfo::getFieldName (CORINFO_FIELD_HANDLE fieldHnd, cons
     FieldDesc* field = (FieldDesc*) fieldHnd;
     if (scopeName != 0)
     {
-        EEClass* cls = field->GetEnclosingClass();
+        TypeHandle t = TypeHandle(field->GetMethodTableOfEnclosingClass());
         *scopeName = "";
-        if (cls)
+        if (!t.IsNull())
         {
 #ifdef _DEBUG
-            cls->_GetFullyQualifiedNameForClass(clsNameBuff, MAX_CLASSNAME_LENGTH);
+            t.GetName(clsNameBuff, MAX_CLASSNAME_LENGTH);
             *scopeName = clsNameBuff;
 #else 
             // since this is for diagnostic purposes only,
             // give up on the namespace, as we don't have a buffer to concat it
             // also note this won't show array class names.
             LPCUTF8 nameSpace;
-            *scopeName= cls->GetFullyQualifiedNameInfo(&nameSpace);
+            *scopeName= t.GetClass()->GetFullyQualifiedNameInfo(&nameSpace);
 #endif
         }
     }
@@ -2982,14 +3747,15 @@ CORINFO_CLASS_HANDLE __stdcall CEEInfo::getFieldClass (CORINFO_FIELD_HANDLE fiel
 }
 
 /*********************************************************************/
-CorInfoType __stdcall CEEInfo::getFieldType (CORINFO_FIELD_HANDLE fieldHnd, CORINFO_CLASS_HANDLE* structType)
+CorInfoType __stdcall CEEInfo::getFieldType (CORINFO_FIELD_HANDLE fieldHnd, CORINFO_CLASS_HANDLE* structType, CORINFO_CLASS_HANDLE owner)
 {
-
     REQUIRES_8K_STACK;
 
     *structType = 0;
     CorElementType type;
 
+    CorInfoType ret;
+    TypeHandle clsHnd = TypeHandle();
     COOPERATIVE_TRANSITION_BEGIN();
     THROWSCOMPLUSEXCEPTION();
 
@@ -2997,6 +3763,12 @@ CorInfoType __stdcall CEEInfo::getFieldType (CORINFO_FIELD_HANDLE fieldHnd, CORI
     type = field->GetFieldType();
 
     _ASSERTE(type != ELEMENT_TYPE_BYREF);
+
+    // For verifying code involving generics, use the class instantiation
+    // of the optional owner (to provide exact, not representative, 
+    // type information)
+    TypeHandle* classInst = field->GetExactClassInstantiation((TypeHandle) owner);
+
     if (!CorTypeInfo::IsPrimitiveType(type))
     {
         PCCOR_SIGNATURE sig;
@@ -3009,12 +3781,10 @@ CorInfoType __stdcall CEEInfo::getFieldType (CORINFO_FIELD_HANDLE fieldHnd, CORI
         _ASSERTE(isCallConv(conv, IMAGE_CEE_CS_CALLCONV_FIELD));
 
         SigPointer ptr(sig);
-        //_ASSERTE(ptr.PeekElemType() ==  ELEMENT_TYPE_VALUETYPE);
 
-        TypeHandle clsHnd;
         OBJECTREF Throwable = NULL;
         GCPROTECT_BEGIN(Throwable);
-        clsHnd = ptr.GetTypeHandle(field->GetModule(), &Throwable);
+        clsHnd = ptr.GetTypeHandle(field->GetModule(), &Throwable, FALSE, FALSE, FALSE, classInst);
 
         if (clsHnd.IsNull()) {
             if (Throwable == NULL)
@@ -3023,21 +3793,14 @@ CorInfoType __stdcall CEEInfo::getFieldType (CORINFO_FIELD_HANDLE fieldHnd, CORI
                 COMPlusThrow(Throwable);
         }
         GCPROTECT_END();
-
-        CorElementType normType = clsHnd.GetNormCorElementType();
-        // if we are looking up a value class don't morph it to a refernece type 
-        // (This can only happen in illegal IL), reference types don't need morphing. 
-        if (type == ELEMENT_TYPE_VALUETYPE && !CorTypeInfo::IsObjRef(normType))
-            type = normType;
-        
-        if (clsHnd.IsEnum())
-            clsHnd = TypeHandle();
-        *structType = CORINFO_CLASS_HANDLE(clsHnd.AsPtr());
+        type = clsHnd.GetSigCorElementType();
     }
+
+    ret = toJitType(type, clsHnd, structType);
 
     COOPERATIVE_TRANSITION_END();
 
-    return(toJitType(type));
+    return(ret);
 }
 
 /*********************************************************************/
@@ -3328,11 +4091,19 @@ CorInfoTypeWithMod __stdcall CEEInfo::getArgType (
         ret = CORINFO_TYPE_MOD_PINNED;
     }
 
-    TypeHandle typeHnd;
-    if (type == ELEMENT_TYPE_VALUETYPE || type == ELEMENT_TYPE_TYPEDBYREF) {
+    TypeHandle typeHnd = TypeHandle();
+
+    switch (type)
+    {
+      case ELEMENT_TYPE_VAR :
+      case ELEMENT_TYPE_MVAR :
+      case ELEMENT_TYPE_VALUETYPE :
+      case ELEMENT_TYPE_TYPEDBYREF :
+      case ELEMENT_TYPE_WITH :
+        {
         OBJECTREF Throwable = NULL;
         GCPROTECT_BEGIN(Throwable);
-        typeHnd = ptr.GetTypeHandle(GetModule(sig->scope), &Throwable, TRUE);
+        typeHnd = ptr.GetTypeHandle(GetModule(sig->scope), &Throwable, TRUE, FALSE, FALSE, (TypeHandle*) sig->classInst, (TypeHandle*) sig->methodInst);
         if (typeHnd.IsNull()) {
             if (Throwable == NULL)
                 COMPlusThrow(kTypeLoadException);
@@ -3340,21 +4111,16 @@ CorInfoTypeWithMod __stdcall CEEInfo::getArgType (
                 COMPlusThrow(Throwable);
         }
         GCPROTECT_END();
+        }
 
-        CorElementType normType = typeHnd.GetNormCorElementType();
-            // if we are looking up a value class don't morph it to a refernece type 
-            // (This can only happen in illegal IL
-        if (!CorTypeInfo::IsObjRef(normType))
-            type = normType;
-        
-            // a null class handle means it is is a primitive.  
-            // enums are exactly like primitives, even from a verificaiton standpoint
-        if (typeHnd.IsEnum())
-            typeHnd = TypeHandle(); 
+        type = typeHnd.GetNormCorElementType();
+        break;
+
+    default:
+        break;
     }
-    *vcTypeRet = CORINFO_CLASS_HANDLE(typeHnd.AsPtr());
 
-    ret = CorInfoTypeWithMod(ret | toJitType(type));
+    ret = CorInfoTypeWithMod(ret | toJitType(type, typeHnd, vcTypeRet));
 
     COOPERATIVE_TRANSITION_END();
     return(ret);
@@ -3391,8 +4157,9 @@ CORINFO_CLASS_HANDLE __stdcall CEEInfo::getArgClass (
         ptr.GetElemType();
     }
 
-	if (!CorTypeInfo::IsPrimitiveType(type)) {
-        ret = CORINFO_CLASS_HANDLE(ptr.GetTypeHandle(module, &throwable).AsPtr());
+    if (!CorTypeInfo::IsPrimitiveType(type)) {
+        ret = CORINFO_CLASS_HANDLE(ptr.GetTypeHandle(module, &throwable, FALSE, FALSE, FALSE, (TypeHandle*) sig->classInst,
+          (TypeHandle*) sig->methodInst).AsPtr());
 
         if (!ret) {
             // If don't have a throwable, find out who didn't create one,
@@ -3634,8 +4401,12 @@ BOOL __stdcall CEEInfo::canAccessMethod(
 }
 
 /*********************************************************************/
-// Given an object type, method ptr, and  Delegate ctor, check if the object and method signature
-// is Compatible with the Invoke method of the delegate.
+// Given an object type, method ptr, and Delegate ctor, check if
+// the object and method signature are Compatible with the Invoke method
+// of the delegate.
+//
+// objCls should be NULL if the target object is NULL
+//@GENERIVSVER: deprecated
 BOOL __stdcall CEEInfo::isCompatibleDelegate(
             CORINFO_CLASS_HANDLE        objCls,
             CORINFO_METHOD_HANDLE       method,
@@ -3663,6 +4434,66 @@ BOOL __stdcall CEEInfo::isCompatibleDelegate(
     {
         result = COMDelegate::ValidateCtor(pMDFtn, pClsDelegate, 
                 inst.IsNull() ? NULL : inst.GetClass());
+    }
+    COMPLUS_CATCH
+    {
+    }
+    COMPLUS_END_CATCH
+
+    ENDCANNOTTHROWCOMPLUSEXCEPTION();
+
+    END_CHECK_STACK;
+
+    return result;
+}
+
+
+/*********************************************************************/
+// Given an object type, method parent, method ptr, and Delegate ctor, check if
+// the object and method signature are Compatible with the Invoke method
+// of the delegate.
+//
+// objCls should be NULL if the target object is NULL
+//@GENERICSVER: new
+BOOL __stdcall CEEInfo::isCompatibleDelegate(
+            CORINFO_CLASS_HANDLE        objCls,
+            CORINFO_CLASS_HANDLE        methodParentCls,
+            CORINFO_METHOD_HANDLE       method,
+            CORINFO_CLASS_HANDLE        delegateCls,
+            CORINFO_MODULE_HANDLE       moduleHnd,
+            unsigned        methodMemberRef,
+            unsigned        delegateConstructorMemberRef)
+{
+    _ASSERTE(method != NULL);
+    _ASSERTE(delegateCls != NULL);
+
+    BOOL result = FALSE;
+
+    BEGIN_REQUIRES_4K_STACK;
+
+    BEGINCANNOTTHROWCOMPLUSEXCEPTION();
+
+    TypeHandle delegateClsHnd = (TypeHandle) delegateCls;
+
+#ifdef _DEBUG
+    _ASSERTE(delegateClsHnd.GetClass()->IsAnyDelegateClass());
+#endif
+
+    TypeHandle methodParentHnd = (TypeHandle) (methodParentCls);
+    MethodDesc* pMDFtn = (MethodDesc*) method;
+    TypeHandle objClsHnd(objCls);
+    Module* module = GetModule(moduleHnd);
+
+    COMPLUS_TRY
+    {
+      result = COMDelegate::ValidateCtor(
+          objClsHnd,
+          methodParentHnd,
+          pMDFtn,
+          delegateClsHnd,
+          module, 
+          methodMemberRef, 
+          delegateConstructorMemberRef);
     }
     COMPLUS_CATCH
     {
@@ -3979,26 +4810,6 @@ CORINFO_METHOD_HANDLE __stdcall CEEInfo::embedMethodHandle(CORINFO_METHOD_HANDLE
     return handle;
 }
 
-CORINFO_GENERIC_HANDLE __stdcall CEEInfo::embedGenericHandle(
-                    CORINFO_MODULE_HANDLE   module,
-                    unsigned                metaTOK,
-                    CORINFO_METHOD_HANDLE   context,
-                    void                  **ppIndirection,
-                    CORINFO_CLASS_HANDLE& tokenType)
-{
-    REQUIRES_4K_STACK;
-    CORINFO_GENERIC_HANDLE ret;
-
-    COOPERATIVE_TRANSITION_BEGIN();
-
-    if (ppIndirection != NULL)
-        *ppIndirection = NULL;
-
-    ret = findToken(module, metaTOK, context, tokenType);
-    COOPERATIVE_TRANSITION_END();
-    return ret;
-}
-
 /*********************************************************************/
 HCIMPL2(CORINFO_MethodPtr, JIT_EnCResolveVirtual, void * obj, CORINFO_METHOD_HANDLE method)
 {
@@ -4006,6 +4817,57 @@ HCIMPL2(CORINFO_MethodPtr, JIT_EnCResolveVirtual, void * obj, CORINFO_METHOD_HAN
 }
 HCIMPLEND
 
+
+/*********************************************************************/
+
+//@GENERICS:
+// Resolve a generic virtual method at run-time
+// classHnd is the actual run-time type of the object on which the call is made
+// methodHnd is the exact instantiated method descriptor corresponding to the static method signature (i.e. might be for a superclass of classHnd)
+HCIMPL2(CORINFO_MethodPtr, JIT_GenericVirtual, CORINFO_METHOD_HANDLE methodHnd, CORINFO_CLASS_HANDLE classHnd)
+{
+  // The address of the method that's returned.
+  CORINFO_MethodPtr   addr = NULL;
+
+  HELPER_METHOD_FRAME_BEGIN_RET_NOPOLL();    // Set up a frame
+  
+  // Method table of target (might be instantiated)
+  MethodTable *pTargetMT = TypeHandle(classHnd).GetMethodTable();
+
+  // This is the method descriptor from which we obtain generic descriptor
+  // and method instantiation 
+  InstantiatedMethodDesc* pMD = (InstantiatedMethodDesc*) methodHnd;
+
+  // Generic method descriptor
+  MethodDesc* pGenericMD = pMD->StripMethodInstantiation();
+
+  MethodDesc *pTargetGenericMD;
+
+  if (pMD->IsInterface())
+  {
+    // It's an interface call
+    pTargetGenericMD = pTargetMT->GetMethodDescForInterfaceMethod(pGenericMD);
+  }
+  else
+  {
+    // It's an ordinary virtual call
+    pTargetGenericMD = pTargetMT->GetMethodDescForSlot(pGenericMD->GetSlot());   
+  }
+
+  // The method definition may be higher up the inheritance hierarchy.
+  // Make sure we add the instantiation to the correct class.
+  pTargetMT = pTargetGenericMD->GetMethodTable();
+
+  MethodDesc *pResultMD = InstantiatedMethodDesc::CreateGenericInstantiation(pTargetMT, pTargetGenericMD, pMD->GetMethodInstantiation());
+  _ASSERTE(pResultMD->HasMethodInstantiation());
+
+  addr = (CORINFO_MethodPtr) pResultMD->GetUnsafeAddrofCode();
+  _ASSERTE(addr);
+
+  HELPER_METHOD_FRAME_END();
+  return addr;
+}
+HCIMPLEND
 
 /*********************************************************************/
 // Returns the address of the field in the object (This is an interior
@@ -4274,7 +5136,7 @@ void __stdcall CEEJitInfo::setEHinfo (
     LOG((LF_EH, LL_INFO100000, "    TryLength     : 0x%08lx  ->  0x%08lx (endpc)\n",    clause->TryLength,     pEHClause->TryEndPC));
     LOG((LF_EH, LL_INFO100000, "    HandlerOffset : 0x%08lx  ->  0x%08lx\n",            clause->HandlerOffset, pEHClause->HandlerStartPC));
     LOG((LF_EH, LL_INFO100000, "    HandlerLength : 0x%08lx  ->  0x%08lx\n",            clause->HandlerLength, pEHClause->HandlerEndPC));
-    LOG((LF_EH, LL_INFO100000, "    ClassToken    : 0x%08lx  ->  0x%08lx\n",            clause->ClassToken,    pEHClause->pEEClass));
+    LOG((LF_EH, LL_INFO100000, "    ClassToken    : 0x%08lx  ->  0x%08lx\n",            clause->ClassToken,    pEHClause->exnType));
     LOG((LF_EH, LL_INFO100000, "    FilterOffset  : 0x%08lx  ->  0x%08lx\n",            clause->FilterOffset,  pEHClause->FilterOffset));
 
 
@@ -4492,8 +5354,12 @@ Stub* JITFunction(MethodDesc* ftn, COR_ILMETHOD_DECODER* ILHeader, BOOL *fEJit, 
     // Set these up for the LOG() calls
     bool           isOptIl = FALSE;
 
-    LOG((LF_JIT, LL_INFO1000, "{ Jitting method %s::%s  %s\n",cls,name, ftn->m_pszDebugMethodSignature));
+#ifdef _DEBUG
+    char instbuff[200]; // Should be enough for most apps
+    Generics::PrettyInstantiation(instbuff, 200, ftn->GetNumGenericMethodArgs(), ftn->GetMethodInstantiation());
+#endif
 
+    LOG((LF_JIT, LL_INFO1000, "{ Jitting method (%p) %s::%s%s  %s\n", ftn, cls,name, instbuff, ftn->m_pszDebugMethodSignature));
 
 #endif // _DEBUG
 
@@ -4518,16 +5384,30 @@ Stub* JITFunction(MethodDesc* ftn, COR_ILMETHOD_DECODER* ILHeader, BOOL *fEJit, 
     _ASSERTE(CORINFO_OPT_INIT_LOCALS == (CorInfoOptions) CorILMethod_InitLocals);
     methodInfo.options = (CorInfoOptions) ILHeader->GetFlags();
 
+    // If it's generic then we can only enter through an instantiated md (unless we're just verifying it)
+    _ASSERTE((flags & CORJIT_FLG_IMPORT_ONLY) != 0 || !ftn->IsGenericMethodDefinition());
+
+    // If it's an instance method then it must not be entered from a generic class
+    _ASSERTE((flags & CORJIT_FLG_IMPORT_ONLY) != 0 || ftn->IsStatic() || ftn->GetNumGenericClassArgs() == 0 || ftn->HasClassInstantiation());
+
+    // If it's a static method then it must not be entered through an instantiated type 
+    // (in fact, static md's shouldn't be present in vtables of instantiated types)
+    _ASSERTE(!ftn->IsStatic() || !ftn->GetClass()->HasInstantiation());
 
     // fetch the method signature
-    HRESULT hr = ConvToJitSig(ftn->GetSig(), GetScopeHandle(ftn), mdTokenNil, &methodInfo.args, false);
+    HRESULT hr = ConvToJitSig(ftn->GetSig(), GetScopeHandle(ftn), mdTokenNil, &methodInfo.args, (CORINFO_METHOD_HANDLE) ftn, false);
     _ASSERTE(SUCCEEDED(hr));
+
+    //@GENERICS:
+    // Shared generic methods and shared methods on generic structs take an extra argument representing their instantiation
+    if (ftn->HasInstParam())
+      methodInfo.args.callConv = (CorInfoCallConv) (methodInfo.args.callConv | CORINFO_CALLCONV_PARAMTYPE);
 
             // method attributes and signature are consistant
     _ASSERTE( (IsMdStatic(ftn->GetAttrs()) == 0) == ((methodInfo.args.callConv & CORINFO_CALLCONV_HASTHIS) != 0) );
 
     // And its local variables
-    hr = ConvToJitSig(ILHeader->LocalVarSig, GetScopeHandle(ftn), mdTokenNil, &methodInfo.locals, true);
+    hr = ConvToJitSig(ILHeader->LocalVarSig, GetScopeHandle(ftn), mdTokenNil, &methodInfo.locals, (CORINFO_METHOD_HANDLE) ftn, true);
     _ASSERTE(SUCCEEDED(hr));
 
     bool            isStub = ((flags & CORJIT_FLG_IL_STUB) != 0);
@@ -4689,7 +5569,7 @@ Stub* JITFunction(MethodDesc* ftn, COR_ILMETHOD_DECODER* ILHeader, BOOL *fEJit, 
 
     LOG((LF_JIT, LL_INFO1000,
         "%s Jitted Entry %08x method %s::%s %s\n",
-        (isOptIl ? "OptJit" : (*fEJit? "Ejit" : "Jit")), nativeEntry, cls, name, ftn->m_pszDebugMethodSignature));
+        (isOptIl ? "OptJit" : (*fEJit? "Ejit" : "Jit")), nativeEntry,ftn->m_pszDebugClassName, ftn->m_pszDebugMethodName, ftn->m_pszDebugMethodSignature));
 
 #ifdef VTUNE_STATS
     extern LPCUTF8 NameForMethodDesc(UINT_PTR pMD);
@@ -4747,8 +5627,10 @@ HCIMPL2(Object *, JITutil_IsInstanceOfBizarre, CORINFO_CLASS_HANDLE type, Object
     _ASSERTE(obj != NULL);  // this check is done in the ASM helper
 
     TypeHandle clsHnd(type);
+    /*@GENERICS: removed this assertion as we might have an ordinary class type in the case of unbox.any !0
     _ASSERTE(!clsHnd.IsUnsharedMT() ||
-             (clsHnd.IsUnsharedMT() && clsHnd.AsMethodTable()->GetClass()->IsInterface()));
+             (clsHnd.IsUnsharedMT() && clsHnd.IsInterface()));
+    */
 
     VALIDATEOBJECTREF(obj);
     MethodTable *pMT = obj->GetMethodTable();
@@ -4757,7 +5639,8 @@ HCIMPL2(Object *, JITutil_IsInstanceOfBizarre, CORINFO_CLASS_HANDLE type, Object
     _ASSERTE(pMT->GetClass()->IsRestored());
 
     // Since classes are handled in another helper, this can't happen.
-    _ASSERTE(clsHnd != TypeHandle(pMT));
+    //@GENERICS: yes it can now because of unbox.any !0 (see above)
+    //    _ASSERTE(clsHnd != TypeHandle(pMT));
 
     if (pMT->IsThunking())
     {
@@ -4766,8 +5649,7 @@ HCIMPL2(Object *, JITutil_IsInstanceOfBizarre, CORINFO_CLASS_HANDLE type, Object
         // cast to the given type
         HELPER_METHOD_FRAME_BEGIN_RET_ATTRIB_1(Frame::FRAME_ATTR_RETURNOBJ, obj);
         clsHnd.CheckRestore();
-        if (!CRemotingServices::CheckCast(ObjectToOBJECTREF(obj), 
-                clsHnd.AsMethodTable()->GetClass())) {
+        if (!CRemotingServices::CheckCast(ObjectToOBJECTREF(obj), clsHnd)) {
             obj = 0;
         }
         HELPER_METHOD_FRAME_END();
@@ -4779,8 +5661,24 @@ HCIMPL2(Object *, JITutil_IsInstanceOfBizarre, CORINFO_CLASS_HANDLE type, Object
     // create a frame.
     if (clsHnd.IsUnsharedMT())
     {
-        // Since non-interface classes are in another helper, this must be an interface.
-        _ASSERTE(clsHnd.AsMethodTable()->GetClass()->IsInterface());
+        /*@GENERICS: removed this assertion as we might have an ordinary class type in the case of unbox.any !0
+        // Since non-interface classes are in another helper, this must be an interface or instantiated type.
+        _ASSERTE(clsHnd.IsInterface());
+	*/
+
+        if (!clsHnd.IsInterface())
+	{
+              HELPER_METHOD_FRAME_BEGIN_RET_1(obj);
+              TypeHandle objHnd = TypeHandle(pMT);
+              while (!objHnd.IsNull())
+              {
+                if (objHnd == clsHnd) break;
+                objHnd = objHnd.GetParent();
+              }
+              if (objHnd.IsNull())
+                obj = 0;
+              HELPER_METHOD_FRAME_END();
+	}
 
         {
             // If the interface has not been restored then erect a helper frame to handle
@@ -4841,6 +5739,153 @@ HCIMPL2(Object *, JITutil_ChkCastBizarre, CORINFO_CLASS_HANDLE type, Object *obj
 }
 HCIMPLEND
 
+// @GENERICS:
+// Given a token (annotatedMetaTOK) representing a type (typeDef/Ref/Spec) or method (memberRef/methodSpec), 
+// look up the corresponding handle (TypeHandle or MethodDesc) at runtime.
+//
+// Postprocess the handle according to the top two bits of the token (CORINFO_ANNOT_MASK):
+//   CORINFO_ANNOT_ARRAY        return a handle for an SZARRAY whose element type is given by the token
+//   CORINFO_ANNOT_ENTRYPOINT   return a code pointer instead of a MethodDesc (typically its prestub)
+//   CORINFO_ANNOT_ALLOWINSTPARAM return a MethodDesc or code pointer to shared code for generic methods or methods in generic structs 
+//                              (which might require an extra parameter)
+//
+// The instantiation of class and method type parameters is provided by the methodHnd context; if classHnd
+// is non-null then use this for class type parameters instead as methodHnd only provides a *representative*
+// instantiation.
+//
+// If slotPtr is non-null then store then handle there too.
+HCIMPL4(CORINFO_GENERIC_HANDLE, JIT_RuntimeHandle,  CORINFO_METHOD_HANDLE  methodHnd, unsigned annotatedMetaTOK,
+  CORINFO_GENERIC_HANDLE* slotPtr, CORINFO_CLASS_HANDLE classHnd)
+{
+    // Cheap test to see if slot is already filled in
+    // This allows the caller to omit the null test itself
+    // to give a saving in code size at the expense of a helper call every time
+    if (slotPtr != NULL && *slotPtr != NULL)
+        return *slotPtr;
+
+    // Could throw an exception e.g. in the class loader
+    THROWSCOMPLUSEXCEPTION();
+
+    // Result is a generic handle (in fact, a CORINFO_CLASS_HANDLE, CORINFO_METHOD_HANDLE, or a code pointer)
+    CORINFO_GENERIC_HANDLE result = NULL;
+
+    // Set up a frame
+    HELPER_METHOD_FRAME_BEGIN_RET_NOPOLL(); 
+
+    // Method context (this is the code that's requesting the handle)
+    MethodDesc* context = (MethodDesc*)(methodHnd);
+
+    // If this is an instantiated method then get the method instantiation (it will be exact)
+    TypeHandle *methodInst = context->GetMethodInstantiation();
+
+    // Get the class instantiation, using the exact handle passed in if necessary.  Note the
+    // the method may live in some parent class.
+    TypeHandle *classInst = context->GetClassInstantiation(TypeHandle(classHnd));
+
+    // Strip off annotation
+    unsigned metaTOK = annotatedMetaTOK & ~CORINFO_ANNOT_MASK;
+    unsigned annotation = annotatedMetaTOK & CORINFO_ANNOT_MASK;
+
+    // This is where the token lives
+    Module* module = context->GetModule();
+   
+    OBJECTREF pThrowable = NULL;
+    GCPROTECT_BEGIN(pThrowable);       
+
+    // We're expecting a type or method, as nothing else is needed at run-time
+    switch (TypeFromToken(metaTOK))
+    {   
+      case mdtTypeSpec :
+      {
+        NameHandle nh(module, metaTOK);
+        TypeHandle clsHnd = module->GetClassLoader()->LoadTypeHandle(&nh, &pThrowable, classInst, methodInst);
+ 
+        if (clsHnd.IsNull())
+          COMPlusThrow(pThrowable);
+        
+        switch (annotation)
+        {
+          case CORINFO_ANNOT_ARRAY :
+            clsHnd = module->GetClassLoader()->FindArrayForElem(clsHnd, ELEMENT_TYPE_SZARRAY);
+            if (clsHnd.IsNull())
+             COMPlusThrow(pThrowable);
+            break;
+        }
+
+#ifdef _DEBUG
+        char buff[200];
+        clsHnd.GetName(buff, 200);
+        LOG((LF_JIT, LL_INFO10000,
+          "GENERICS: Assigned type 0x%x = %s to slot %p for typeSpec token 0x%x\n", clsHnd.AsPtr(), buff, slotPtr, annotatedMetaTOK));
+        if (slotPtr && *slotPtr) 
+        {
+          TypeHandle clsHnd2 = TypeHandle(*slotPtr);
+          clsHnd2.GetName(buff, 200);
+          LOG((LF_JIT, LL_INFO10000, "GENERICS: slot was already assigned 0x%x = %s\n", clsHnd2.AsPtr(), buff));
+      _ASSERTE(clsHnd == clsHnd2);
+    }
+#endif    
+ 
+        result = CORINFO_GENERIC_HANDLE(clsHnd.AsPtr());
+
+        break;
+      }
+
+      case mdtMemberRef :
+      case mdtMethodSpec :
+      {
+        MethodDesc* md;
+        HRESULT res = EEClass::GetMethodDescFromMemberRef(module, (mdMemberRef) metaTOK, &md, &pThrowable, classInst, methodInst,
+                              (annotation & CORINFO_ANNOT_ALLOWINSTPARAM) != 0);
+        if (SUCCEEDED(res) && md != NULL)
+        {
+          if (annotation & CORINFO_ANNOT_ENTRYPOINT)
+          {
+            void* addr = (void*) (md->GetAddrOfCodeForLdFtn());
+            result = CORINFO_GENERIC_HANDLE(addr);
+          }
+          else 
+            result = CORINFO_GENERIC_HANDLE(md);
+
+#ifdef _DEBUG       
+          LOG((LF_JIT, LL_INFO10000,
+            "GENERICS: Assigned 0x%x to slot %p for method-ref token 0x%x\n", result, slotPtr, annotatedMetaTOK));
+          if (slotPtr && *slotPtr)
+          {
+            LOG((LF_JIT, LL_INFO10000, "GENERICS: slot was already assigned 0x%x\n", *slotPtr));
+          }
+#endif     
+        }
+        else
+          COMPlusThrow(pThrowable);        
+        break;
+      }
+
+      default :
+        _ASSERTE(!"Invalid token type");
+    }
+
+    // Update the slot
+    // No harm is done if another thread has already updated it but we expect it to be the same!
+    if (slotPtr) 
+    {
+#ifdef _DEBUG
+      if (*slotPtr)
+      {
+    //  _ASSERTE(*slotPtr == result);
+      }
+#endif
+      *slotPtr = result;
+    }
+
+    GCPROTECT_END();
+    HELPER_METHOD_FRAME_END();
+
+    // Return the handle
+    return result;
+}
+HCIMPLEND
+
 /*********************************************************************/
 // putting the framed helpers first
 /*********************************************************************/
@@ -4861,7 +5906,7 @@ HCIMPLEND
 HCIMPL1(void, JITutil_MonEnterStatic,  EEClass* pclass)
 {
     HELPER_METHOD_FRAME_BEGIN_NOPOLL();
-    pclass->GetExposedClassObject()->EnterObjMonitor();
+    pclass->GetMethodTable()->GetExposedClassObject()->EnterObjMonitor();
     HELPER_METHOD_FRAME_END_POLL();
 }
 HCIMPLEND
@@ -6019,6 +7064,10 @@ VMHELPDEF hlpFuncTable[] =
     JITHELPER(CORINFO_HELP_MEMSET,              NULL                        )
     JITHELPER(CORINFO_HELP_MEMCPY,              NULL                        )
 
+    // Generics
+    JITHELPER(CORINFO_HELP_RUNTIMEHANDLE,       JIT_RuntimeHandle           )
+    JITHELPER(CORINFO_HELP_GENERICVIRTUAL,      JIT_GenericVirtual          )
+
 #if !CPU_HAS_FP_SUPPORT || defined(_IA64_)
     //
     // Some architectures need helpers for FP support
@@ -6127,7 +7176,7 @@ BOOL ObjIsInstanceOf(Object *pElement, TypeHandle toTypeHnd)
     if(ElemTypeHnd.GetMethodTable()->IsThunking())
     {
         _ASSERTE(CRemotingServices::IsTransparentProxy(pElement));
-        fCast = CRemotingServices::CheckCast(ObjectToOBJECTREF(pElement), toTypeHnd.AsClass());
+        fCast = CRemotingServices::CheckCast(ObjectToOBJECTREF(pElement), toTypeHnd);
         if (fCast)
             return(fCast);
     }
@@ -6474,8 +7523,7 @@ HCIMPL1(UINT64, JIT_Dbl2ULngOvf, double val)
 }
 HCIMPLEND
 
-/*********************************************************************/
-Object* __cdecl JIT_NewObj(CORINFO_MODULE_HANDLE scopeHnd, unsigned constrTok, ...)
+Object* __cdecl JIT_NewObj(CORINFO_MODULE_HANDLE classHnd, CORINFO_METHOD_HANDLE constrMeth, ...)
 {
     THROWSCOMPLUSEXCEPTION();
 
@@ -6486,37 +7534,20 @@ Object* __cdecl JIT_NewObj(CORINFO_MODULE_HANDLE scopeHnd, unsigned constrTok, .
     HELPER_METHOD_FRAME_BEGIN_RET_ATTRIB_1(Frame::FRAME_ATTR_RETURNOBJ, ret);    // Set up a frame
     THROWSCOMPLUSEXCEPTION();
 
-    Module* pModule = GetModule(scopeHnd);
-    MethodDesc *pMethod;
-    if (FAILED(EEClass::GetMethodDescFromMemberRef(pModule, constrTok, &pMethod)))
-    {
-        if (pModule)
-            COMPlusThrowMember(kMissingMethodException, pModule->GetMDImport(), constrTok);
-        else
-            COMPlusThrow(kMissingMethodException);
-    }
+    MethodDesc *pMethod = (MethodDesc*) constrMeth;
+    Module *pModule = pMethod->GetModule();
 
     _ASSERTE(!pMethod->IsStatic());
 
     // Should be using one of the fast new helpers, if you aren't an array
     _ASSERTE(pMethod->GetMethodTable()->IsArray());
 
+    // No instantiation info passed in; number of args is independent of insts
     unsigned dwNumArgs = MetaSig::NumFixedArgs(pModule, pMethod->GetSig());
     _ASSERTE(dwNumArgs > 0);
 
     va_list dims;
-    va_start(dims, constrTok);
-
-    // Load the associated array class.  Can't get this from MethodDesc because
-    // all object array accessors share the same MethodDesc!
-    mdTypeRef cr = pModule->GetMDImport()->GetParentOfMemberRef(constrTok);
-    NameHandle name(pModule, cr);
-    TypeHandle typeHnd = pModule->GetClassLoader()->LoadTypeHandle(&name);
-    if (typeHnd.IsNull())
-    {
-        _ASSERTE(!"Unable to load array class");
-        goto exit;
-    }
+    va_start(dims, constrMeth);
 
     // create an array where fwdArgList[0] == arg[0] ...
 #ifdef _X86_
@@ -6547,13 +7578,11 @@ Object* __cdecl JIT_NewObj(CORINFO_MODULE_HANDLE scopeHnd, unsigned constrTok, .
 #endif
 
     va_end(dims);
+    ret = AllocateArrayEx((TypeHandle) classHnd, fwdArgList, dwNumArgs);
 
-    ret = AllocateArrayEx(typeHnd, fwdArgList, dwNumArgs);
-
-
-exit: ;
+    // exit: ;
     HELPER_METHOD_FRAME_END();
-	return (OBJECTREFToObject(ret));
+    return (OBJECTREFToObject(ret));
 }
 
 /*************************************************************/
@@ -7008,24 +8037,21 @@ LPVOID      __stdcall EECodeInfo::getStartAddress()
 // This is a helper used by IsInstanceOfClass.  This is only called when
 // the instance has already been determined to be a proxy.  Also, the EEClass
 // must refer to a class (not an interface or array).
-Object* __stdcall JIT_IsInstanceOfClassWorker(OBJECTREF objref, EEClass *pClass, BOOL bThrow)
+Object* __stdcall JIT_IsInstanceOfClassWorker(OBJECTREF objref, MethodTable *pTargetMT, BOOL bThrow)
 {
     HCIMPL_PROLOG(JIT_IsInstanceOfClassWorker);   // just make certain we don't do any GC's in here
 
-#ifdef _DEBUG
     MethodTable *pMT = objref->GetMethodTable();
     _ASSERTE(pMT->IsThunking());
-    _ASSERTE(!pClass->IsInterface());
-#endif
+    _ASSERTE(!pTargetMT->IsInterface());
 
     // Check whether the type represented by the proxy can be
-    // cast to the given type
+    // cast to the given type;
     HELPER_METHOD_FRAME_BEGIN_RET_1(objref);
-    pClass->CheckRestore();
-    if (!CRemotingServices::CheckCast(objref, pClass))
-        objref = 0;
+    pMT->GetClass()->CheckRestore();
+    if (!CRemotingServices::CheckCast(objref, pTargetMT))
+	objref = 0;
     HELPER_METHOD_FRAME_END();
-
     if (objref == 0 && bThrow)
         FCThrow(kInvalidCastException);
     return OBJECTREFToObject(objref);
@@ -7207,7 +8233,7 @@ Object* F_CALL_CONV JIT_IsInstanceOfClassHelper(MethodTable* pMT, Object* pObjec
     if (pObject->GetMethodTable()->IsCtxProxyType() || pObject->GetMethodTable()->IsTransparentProxyType())
     {
         ENDFORBIDGC();
-        return JIT_IsInstanceOfClassWorker(ObjectToOBJECTREF(pObject), pCls1, bThrow);
+        return JIT_IsInstanceOfClassWorker(ObjectToOBJECTREF(pObject), pMT, bThrow);
     }
 
     if (bThrow)
@@ -7569,13 +8595,14 @@ FCIMPL1(LPVOID, ObjectNative::FastGetClass, Object* vThisRef)
     if (vThisRef == NULL) {
         FCThrow(kNullReferenceException);
     }
-    EEClass* pClass = vThisRef->GetMethodTable()->GetClass();
+    MethodTable* pMT = vThisRef->GetMethodTable();
+    EEClass* pClass = pMT->GetClass();
 
     if (pClass->IsArrayClass() || pClass->IsContextful() || pClass->IsMarshaledByRef()) {
         return NULL;
     }
     // Get the type object
-    return OBJECTREFToObject(pClass->GetExistingExposedClassObject());
+    return OBJECTREFToObject(pMT->GetExistingExposedClassObject());
 FCIMPLEND
 
 /*********************************************************************/
@@ -7684,7 +8711,7 @@ HCIMPL1(Object*, JIT_NewCrossContext, CORINFO_CLASS_HANDLE typeHnd_)
     //!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     MethodTable *pMT = (MethodTable *)typeHnd_;
     ManagedActivationType ActType;
-    ActType = CRemotingServices::RequiresManagedActivation(pMT->GetClass());
+    ActType = CRemotingServices::RequiresManagedActivation(pMT);
     ENDFORBIDGC();
     if (ActType) {
         // SpecialOrXCtxHelper

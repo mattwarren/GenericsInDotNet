@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -19,16 +24,17 @@
 
 // ExpandSig
 // Constructor
-ExpandSig::ExpandSig(PCCOR_SIGNATURE sig, Module* pModule) : m_MetaSig(sig, pModule)
+ExpandSig::ExpandSig(PCCOR_SIGNATURE sig, Module* pModule, TypeHandle* classInst, TypeHandle *methodInst) : 
+  m_MetaSig(sig, pModule, classInst, methodInst)
 {
 }
 
-ExpandSig* ExpandSig::GetReflectSig(PCCOR_SIGNATURE sig, Module* pModule)
+ExpandSig* ExpandSig::GetReflectSig(PCCOR_SIGNATURE sig, Module* pModule, TypeHandle *classInst, TypeHandle *methodInst)
 {
     THROWSCOMPLUSEXCEPTION();
 
 	int nArgs;
-	MetaSig msig(sig, pModule);
+	MetaSig msig(sig, pModule, classInst, methodInst);
     BYTE callConv = msig.GetCallingConvention();
 
 	if (callConv == IMAGE_CEE_CS_CALLCONV_FIELD)
@@ -62,7 +68,7 @@ ExpandSig* ExpandSig::GetReflectSig(PCCOR_SIGNATURE sig, Module* pModule)
 
 	// Set the flags...
 
-    ExpandSig* pSig = new (retSig) ExpandSig(sig,pModule);
+    ExpandSig* pSig = new (retSig) ExpandSig(sig,pModule,classInst,methodInst);
     _ASSERTE(pSig != NULL);
 
     memcpy(pSig->m_Data,b,(2 + nArgs) * sizeof(TypeHandle));
@@ -74,10 +80,10 @@ ExpandSig* ExpandSig::GetReflectSig(PCCOR_SIGNATURE sig, Module* pModule)
 
 // Similar to GetReflectSig, but uses the static heap for allocation and doesn't
 // throw an exception on allocation failure or on type load failures.
-ExpandSig* ExpandSig::GetSig(PCCOR_SIGNATURE sig, Module* pModule)
+ExpandSig* ExpandSig::GetSig(PCCOR_SIGNATURE sig, Module* pModule,TypeHandle *classInst, TypeHandle *methodInst)
 {
     int nArgs;
-    MetaSig msig(sig, pModule);
+    MetaSig msig(sig, pModule, classInst, methodInst);
     BYTE callConv = msig.GetCallingConvention();
 
     if (callConv == IMAGE_CEE_CS_CALLCONV_FIELD)
@@ -99,7 +105,7 @@ ExpandSig* ExpandSig::GetSig(PCCOR_SIGNATURE sig, Module* pModule)
     if (!retSig)
         return NULL;
 
-    ExpandSig* pSig = new (retSig) ExpandSig(sig,pModule);
+    ExpandSig* pSig = new (retSig) ExpandSig(sig,pModule,classInst,methodInst);
 
     memcpy(pSig->m_Data,b,(2 + nArgs) * sizeof(TypeHandle));
     pSig->m_flags = HEAP_ALLOCATED;

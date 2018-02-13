@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -308,12 +313,12 @@ PTRARRAYREF ReflectUtil::CreateClassArray(ReflectClassType type,ReflectClass* pR
 
 // GetStaticFieldsCount
 // This routine will return the number of Static Final Fields
-int ReflectUtil::GetStaticFieldsCount(EEClass* pVMC)
+int ReflectUtil::GetStaticFieldsCount(TypeHandle th)
 {
     THROWSCOMPLUSEXCEPTION();
 
     REFLECTCLASSBASEREF pRefClass;
-    pRefClass = (REFLECTCLASSBASEREF) pVMC->GetExposedClassObject();
+    pRefClass = (REFLECTCLASSBASEREF) th.AsMethodTable()->GetExposedClassObject();
     ReflectClass* pRC = (ReflectClass*) pRefClass->GetData();
 
     int cnt = pRC->GetStaticFieldCount();
@@ -379,7 +384,7 @@ FieldDesc* ReflectUtil::GetStaticFields(ReflectClass* pRC,int* cnt)
         for (int i=0;i<iCnt;i++)
         {
             REFLECTCLASSBASEREF pRefClass;
-            pRefClass = (REFLECTCLASSBASEREF) pVMC->GetInterfaceMap()[i].m_pMethodTable->GetClass()->GetExposedClassObject();
+            pRefClass = (REFLECTCLASSBASEREF) pVMC->GetMethodTable()->GetInterfaceMap()[i].m_pMethodTable->GetExposedClassObject();
             ReflectClass* pIFaceRC = (ReflectClass*) pRefClass->GetData();
             pIFaceFlds[i] = pIFaceRC->GetFields();
             iTotalCnt += pIFaceFlds[i]->dwFields;

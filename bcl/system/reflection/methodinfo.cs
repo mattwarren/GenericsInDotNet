@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -53,6 +58,21 @@ namespace System.Reflection {
     		get; 
     	}
 
+        public bool HasGenericParameters {
+                get { return HasGenericParametersImpl(); }
+        }
+
+        public bool HasGenericArguments {
+                get { return HasGenericArgumentsImpl(); }
+        }
+
+        public virtual Type[] GetGenericArguments() { throw new NotSupportedException(Environment.GetResourceString("NotSupported_SubclassOverride")); }
+        public virtual MethodInfo GetGenericMethodDefinition() { throw new NotSupportedException(Environment.GetResourceString("NotSupported_SubclassOverride")); }
+
+        protected virtual bool HasGenericArgumentsImpl() { return false; }
+        protected virtual bool HasGenericParametersImpl() { return false; }
+        public virtual MethodInfo BindGenericParameters(Type[] typeArgs) { throw new NotSupportedException(Environment.GetResourceString("NotSupported_SubclassOverride")); }
+    
 		// This method will return an object that represents the 
 		//	custom attributes for the return type.
 		/// <include file='doc\MethodInfo.uex' path='docs/doc[@for="MethodInfo.ReturnTypeCustomAttributes"]/*' />

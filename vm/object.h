@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -150,6 +155,7 @@ class Object
     }
     EEClass        *GetTrueClass();
     TypeHandle      GetTypeHandle();
+    TypeHandle      GetTrueTypeHandle();
 
     inline DWORD    GetNumComponents();
     inline DWORD    GetSize();
@@ -741,7 +747,7 @@ public:
 };
 
 /* a TypedByRef is a structure that is used to implement VB's BYREF variants.  
-   it is basically a tuple of an address of some data along with a EEClass
+   it is basically a tuple of an address of some data along with a TypeHandle
    that indicates the type of the address */
 class TypedByRef 
 {

@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -98,8 +103,9 @@ enum DebuggerShellModes
     DSM_DUMP_MEMORY_IN_BYTES            = 0x02000000,
     DSM_SHOW_SUPERCLASS_ON_PRINT        = 0x04000000,
     DSM_SHOW_STATICS_ON_PRINT           = 0x08000000,
+    DSM_SHOW_TYARGS_IN_STACK_TRACE      = 0x20000000,
 
-    DSM_MAXIMUM_MODE             = 24, // count of all modes, not a mask.
+    DSM_MAXIMUM_MODE             = 25, // count of all modes, not a mask.
     DSM_INVALID_MODE             = 0x00000000,
     DSM_DEFAULT_MODES            = DSM_DISPLAY_REGISTERS_AS_HEX |
                                    DSM_SHOW_ARGS_IN_STACK_TRACE |
@@ -526,6 +532,8 @@ public:
                                  bool* unavailable);
     void PrintVariable(const WCHAR* name, ICorDebugValue* value,
                        unsigned int indent, BOOL expandObjects);
+    void PrintType(const WCHAR* name, ICorDebugType* value,
+                           unsigned int indent);
     void PrintArrayVar(ICorDebugArrayValue *iarray,
                        const WCHAR* name,
                        unsigned int indent, BOOL expandObjects);
@@ -546,6 +554,9 @@ public:
                     ULONG32 iMaxOnOneLine, 
                     BOOL showAddr);
     
+    static DebuggerModule* ModuleOfType(ICorDebugType* type);
+    static mdTypeDef TokenOfType(ICorDebugType* type);
+
     HRESULT ResolveClassName(const WCHAR *className,
                              DebuggerModule **pDM, mdTypeDef *pTD);
     HRESULT FindTypeDefByName(DebuggerModule *m,
@@ -553,12 +564,9 @@ public:
                               mdTypeDef *pTD);
     HRESULT ResolveTypeRef(DebuggerModule *currentDM, mdTypeRef tr,
                            DebuggerModule **pDM, mdTypeDef *pTD);
-    HRESULT ResolveQualifiedFieldName(DebuggerModule *currentDM,
-                                      mdTypeDef currentTD,
-                                      WCHAR *fieldName,
-                                      DebuggerModule **pDM,
-                                      mdTypeDef *pTD,
-                                      ICorDebugClass **pIClass,
+    HRESULT ResolveQualifiedFieldName(ICorDebugType *itype,
+									  WCHAR *fieldName,
+                                      ICorDebugType **pIClass,
                                       mdFieldDef *pFD,
                                       bool *pbIsStatic);
     HRESULT ResolveFullyQualifiedMethodName(const WCHAR *methodName,
@@ -684,6 +692,9 @@ public:
 
     HRESULT HandleSpecificException(const WCHAR *exType, bool shouldCatch);
     bool ShouldHandleSpecificException(ICorDebugValue *pException);
+    HRESULT GetTypeName(ICorDebugClass *iclass,ULONG bufLength,WCHAR* nameBuf,ULONG *nameSize);
+    HRESULT GetTypeName(ICorDebugType *iclass,ULONG ufLength,WCHAR* nameBuf,ULONG *nameSize);
+	HRESULT AddString(CHAR* s,ULONG bufLength, WCHAR* nameBuf,ULONG *nameSize) ;
     
 private:
     FILE*                  m_in;
@@ -857,13 +868,13 @@ private:
 //
 // DebuggerVarInfo
 //
-// Holds basic information about local variables, method arguments,
+// Holds basic information about type variables, local variables, method arguments,
 // and class static and instance variables.
 //
 struct DebuggerVarInfo
 {
     LPCSTR                 name;
-    PCCOR_SIGNATURE        sig;
+    PCCOR_SIGNATURE        sig;  // GENERICS: null for type variables
     unsigned long          varNumber;  // placement info for IL code
 
     DebuggerVarInfo() : name(NULL), sig(NULL), varNumber(0)
@@ -1156,6 +1167,18 @@ public:
         return NULL;
     }
 
+    unsigned int GetTypeArgumentCount(void)
+    {
+        return(m_typeArgCount);
+    }
+    DebuggerVarInfo* GetTypeArgumentAt(unsigned int index)
+    {
+        if (m_typeArguments)
+            if (index < m_typeArgCount)
+                return(&m_typeArguments[index]);
+
+        return NULL;
+    }
     PCCOR_SIGNATURE GetReturnType()
     {
         return(m_returnType);
@@ -1245,6 +1268,8 @@ public:
                               
     DebuggerVarInfo*          m_arguments;
     unsigned int              m_argCount;
+    DebuggerVarInfo*          m_typeArguments;
+    unsigned int              m_typeArgCount;
     PCCOR_SIGNATURE           m_returnType;    
 
     void CountActiveLocalVars(ISymUnmanagedScope* head,

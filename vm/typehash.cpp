@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -19,10 +24,11 @@
 #include "excep.h"
 #include "typehash.h"
 #include "wsperf.h"
-
+#include "eeconfig.h"
+#include "generics.h"
 
 // ============================================================================
-// Constructed type hash table methods
+// Class hash table methods
 // ============================================================================
 void *EETypeHashTable::operator new(size_t size, LoaderHeap *pHeap, DWORD dwNumBuckets)
 {
@@ -147,13 +153,35 @@ void EETypeHashTable::GrowHashTable()
 }
 
 
-  // Calculate a hash value for a constructed type key
+// Calculate a hash value for a type key
+// Most constructed types are easy (just hash the bits)
+//@GENERICS:
+// For instantiated types we combine the type handle for the generic type
+// with the *sizes* for the parameter types.
+// This ensures that compatible instantiations hash to the same value.
+// We could refine this slightly (e.g. use the GC info instead of the crude size)
+// to reduce collisions.
 DWORD EETypeHashTable::Hash(NameHandle* pName)
 {
     INT_PTR dwHash = 5381;
-
+    
     dwHash = ((dwHash << 5) + dwHash) ^ pName->Key1;
-    dwHash = ((dwHash << 5) + dwHash) ^ pName->Key2;
+    if (pName->GetKind() == ELEMENT_TYPE_WITH)
+      {
+        TypeHandle genericType = pName->GetGenericTypeDefinition();
+        TypeHandle* inst = pName->GetInstantiation();
+        _ASSERTE(inst != NULL);
+        dwHash = ((dwHash << 5) + dwHash) ^ (INT_PTR) genericType.AsPtr();       
+        DWORD ntypars = genericType.GetNumGenericArgs();
+
+        // Hash n type parameters
+        for (DWORD i = 0; i < ntypars; i++)
+        {
+          dwHash = ((dwHash << 5) + dwHash) ^ inst[i].GetSize();
+        }
+      }
+    else
+        dwHash = ((dwHash << 5) + dwHash) ^ pName->Key2;
 
     return  (DWORD)dwHash;
 }
@@ -163,6 +191,7 @@ EETypeHashEntry_t *EETypeHashTable::InsertValue(NameHandle* pName, HashDatum Dat
 {
     _ASSERTE(m_dwNumBuckets != 0);
     _ASSERTE(pName->IsConstructed());
+
 
     DWORD           dwHash = Hash(pName);
     DWORD           dwBucket = dwHash % m_dwNumBuckets;
@@ -195,16 +224,36 @@ EETypeHashEntry_t *EETypeHashTable::FindItem(NameHandle* pName)
     DWORD           dwBucket = dwHash % m_dwNumBuckets;
     EETypeHashEntry_t * pSearch;
 
-    for (pSearch = m_pBuckets[dwBucket]; pSearch; pSearch = pSearch->pNext)
-    {
-        if (pSearch->dwHashValue == dwHash && pSearch->m_Key1 == pName->Key1 && pSearch->m_Key2 == pName->Key2) {
-                    return pSearch;
+    if (pName->GetKind() == ELEMENT_TYPE_WITH) {
+      TypeHandle *inst1 = pName->GetInstantiation();     
+      TypeHandle genericType = pName->GetGenericTypeDefinition();
+      DWORD ntypars = genericType.GetNumGenericArgs();
+      for (pSearch = m_pBuckets[dwBucket]; pSearch; pSearch = pSearch->pNext) {
+        if (pSearch->dwHashValue == dwHash && pSearch->m_Key1 == pName->Key1) {
+          if (pSearch->m_Key2 == pName->Key2) 
+            return pSearch;
+          else {
+            TypeHandle *inst2 = (TypeHandle*) pSearch->m_Key2;
+            for (DWORD i = 0; i < ntypars; i++) {
+              if (inst1[i] != inst2[i]) goto NotEq;
             }
+            return pSearch;
+          }
+        NotEq: ;
+        }
+      }
+    }
+    else
+    {
+      for (pSearch = m_pBuckets[dwBucket]; pSearch; pSearch = pSearch->pNext)
+      {
+        if (pSearch->dwHashValue == dwHash && pSearch->m_Key1 == pName->Key1 && pSearch->m_Key2 == pName->Key2)
+          return pSearch;
+      }
     }
 
     return NULL;
 }
-
 
 EETypeHashEntry_t * EETypeHashTable::GetValue(NameHandle *pName, HashDatum *pData)
 {

@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -69,6 +74,7 @@
 
 
 #include "listlock.inl"
+#include "generics.h"
 
 
 
@@ -133,7 +139,8 @@ BOOL ParamTypeDesc::Verify() {
 }
 
 BOOL ArrayTypeDesc::Verify() {
-    _ASSERTE(m_TemplateMT->IsArray());
+    // m_TemplateMT == 0 may be null when building types involving TypeVarTypeDesc's
+    _ASSERTE(m_TemplateMT == 0 || m_TemplateMT->IsArray());
     _ASSERTE(CorTypeInfo::IsArray(u.m_Type));
     ParamTypeDesc::Verify();
     return(true);
@@ -164,6 +171,141 @@ BOOL TypeHandle::IsArray() {
     return(IsTypeDesc() && CorTypeInfo::IsArray(AsTypeDesc()->GetNormCorElementType()));
 }
 
+BOOL TypeHandle::IsGenericVariable() { 
+    return(IsTypeDesc() && CorTypeInfo::IsGenericVariable(AsTypeDesc()->GetNormCorElementType()));
+}
+
+// Return the number of type parameters in the instantiation of an instantiated type
+// or the number of type parameters to a generic type
+// Return 0 otherwise.
+DWORD TypeHandle::GetNumGenericArgs() {
+      return GetClass()->GetNumGenericArgs();
+}
+
+// Obtain underlying generic type from an instantiated type
+// Return Null if not instantiated.                                     
+TypeHandle TypeHandle::GetGenericTypeDefinition()
+{ 
+  if (!IsTypeDesc()) return AsMethodTable()->GetGenericTypeDefinition();
+  else return TypeHandle();
+}
+
+// Obtain instantiation from an instantiated type.                     
+// Return NULL if it's not one.                                         
+TypeHandle* TypeHandle::GetInstantiation()
+{
+  if (!IsTypeDesc()) return AsMethodTable()->GetInstantiation();
+  else return NULL;
+}
+
+// Obtain instantiation from an instantiated type or a pointer to the
+// element type of an array or pointer type                     
+TypeHandle* TypeHandle::GetClassOrArrayInstantiation()
+{
+  if (IsTypeDesc())
+    return AsTypeDesc()->GetClassOrArrayInstantiation();
+  else 
+    return GetInstantiation();
+}
+
+// Obtain element type from an array or pointer type            
+TypeHandle TypeHandle::GetTypeParam()
+{
+  if (IsTypeDesc())
+    return AsTypeDesc()->GetTypeParam();
+  else 
+    return TypeHandle();
+}
+
+// Given the current ShareGenericCode and ShareVal settings, is the specified type representation-sharable as a type parameter to a generic type or method ?
+/* static */ BOOL TypeHandle::IsSharableInstantiation(DWORD ntypars, TypeHandle *inst)
+{
+    if (!g_pConfig->ShareGenericCode())
+        return false;
+
+    for (DWORD i = 0; i < ntypars; i++)
+    {
+        if (inst[i].IsSharableRep())
+            return true;
+    }
+    return false;
+}
+
+#ifdef _DEBUG
+BOOL TypeHandle::CheckInstantiationIsCanonical(DWORD ntypars, TypeHandle *inst)
+{
+    for (unsigned int i = 0; i < ntypars; i++) 
+    {
+        _ASSERTE(inst[i] == inst[i].GetCanonicalFormAsGenericArgument());
+        if (inst[i] != inst[i].GetCanonicalFormAsGenericArgument()) 
+            return false;
+    }
+    return true;
+}
+#endif
+
+// Given the current ShareGenericCode and ShareVal settings, is the specified type representation-sharable as a type parameter to a generic type or method ?
+BOOL TypeHandle::IsSharableRep()
+{
+  if (g_pConfig->ShareGenericCode())
+  {
+    CorElementType t = GetNormCorElementType();
+
+    // References are always sharable
+    if (CorTypeInfo::IsObjRef(t))
+      return TRUE;
+
+    if (CorTypeInfo::IsGenericVariable(t))
+      return FALSE;
+
+    switch(t)
+    {
+      // Pointer types and generic structs are parametric in other types so sharability must be "preserved" through it
+      case ELEMENT_TYPE_PTR :
+      case ELEMENT_TYPE_FNPTR :
+        return (GetTypeParam().IsSharableRep());
+
+      case ELEMENT_TYPE_VALUETYPE :
+        return HasInstantiation() && IsSharableInstantiation(GetNumGenericArgs(),GetInstantiation());
+
+	// With value-type instantiation sharing turned on we share these with enums having the same underlying type
+      case ELEMENT_TYPE_I :
+      case ELEMENT_TYPE_I1 :
+      case ELEMENT_TYPE_I2 :
+      case ELEMENT_TYPE_I4 :
+      case ELEMENT_TYPE_I8 :
+      case ELEMENT_TYPE_U :
+      case ELEMENT_TYPE_U1 :
+      case ELEMENT_TYPE_U2 :
+      case ELEMENT_TYPE_U4 :
+      case ELEMENT_TYPE_U8 :
+        return g_pConfig->ShareValInsts();
+
+      default:
+        break;
+    }
+  }
+
+  return FALSE;
+}
+
+// Helper functions that just delegate through GetClass()
+BOOL TypeHandle::IsValueType() {
+      return GetClass()->IsValueClass();
+}
+
+BOOL TypeHandle::IsInterface() {
+      return GetClass()->IsInterface(); 
+}
+
+WORD TypeHandle::GetNumVtableSlots() {
+      return GetClass()->GetNumVtableSlots(); 
+}
+
+WORD TypeHandle::GetNumMethodSlots() {
+      return GetClass()->GetNumMethodSlots(); 
+}
+
 BOOL TypeHandle::CanCastTo(TypeHandle type) {
     if (*this == type)
         return(true);
@@ -173,7 +315,7 @@ BOOL TypeHandle::CanCastTo(TypeHandle type) {
                 
     if (!type.IsUnsharedMT())
         return(false);
-    return ClassLoader::StaticCanCastToClassOrInterface(AsClass(), type.AsClass()) != 0;
+    return ClassLoader::StaticCanCastToClassOrInterface(AsMethodTable(), type.AsMethodTable()) != 0;
 }
 
 unsigned TypeHandle::GetName(char* buff, unsigned buffLen) {
@@ -181,20 +323,68 @@ unsigned TypeHandle::GetName(char* buff, unsigned buffLen) {
         return(AsTypeDesc()->GetName(buff, buffLen));
 
     AsMethodTable()->GetClass()->_GetFullyQualifiedNameForClass(buff, buffLen);
-    _ASSERTE(strlen(buff) < buffLen-1);
+
+    // Tack the instantiation on the end
+    TypeHandle *inst = GetInstantiation();
+    if (inst != NULL)
+      Generics::PrettyInstantiation(buff + strlen(buff), buffLen - strlen(buff), GetNumGenericArgs(), inst);
+    
+    _ASSERTE(strlen(buff) < buffLen);
     return((unsigned)strlen(buff));
+}
+
+// Strip off array & pointer qualifiers and instantiation
+TypeHandle TypeHandle::GetTypeWithDef()
+{
+    TypeHandle t = *this;
+    while (t.IsArray() || t.IsTypeDesc()) {
+        t = t.GetTypeParam();
+    }
+    if (t.HasInstantiation()) {
+        t = t.GetGenericTypeDefinition();
+    }
+    return t;
 }
 
 TypeHandle TypeHandle::GetParent() {
     if (IsTypeDesc())
         return(AsTypeDesc()->GetParent());
+    else
+        return TypeHandle(AsMethodTable()->m_pParentMethodTable);
+}
 
-    EEClass* parentClass = AsMethodTable()->GetClass()->GetParentClass();
-    if (parentClass == 0) {
-	    TypeHandle typeHandle;
-        return typeHandle;
-	}
-    return TypeHandle(parentClass->GetMethodTable());
+CorElementType TypeHandle::GetSigCorElementType()
+{
+    if (IsEnum())
+        return(ELEMENT_TYPE_VALUETYPE);
+ 
+    return GetVerifierCorElementType();
+}
+
+CorElementType TypeHandle::GetVerifierCorElementType()
+{
+    CorElementType type = GetNormCorElementType();
+
+    if (type != ELEMENT_TYPE_FNPTR)
+    {
+        EEClass* pClass = GetClass();
+        if (IsUnsharedMT() &&
+            pClass->IsValueClass() &&
+            !IsEnum() &&
+            !pClass->IsTruePrimitive() )
+        {
+            return(ELEMENT_TYPE_VALUETYPE);
+        }   
+    }
+
+    return type;
+}
+
+BOOL TypeHandle::HasInstantiation() 
+{
+    if (IsTypeDesc()) return false;
+    if (IsNull()) return false;
+    return AsMethodTable()->HasInstantiation();
 }
 
 Module* TypeDesc::GetModule() {
@@ -205,6 +395,20 @@ Module* TypeDesc::GetModule() {
         TypeHandle param = GetTypeParam();
         _ASSERTE(!param.IsNull());
         return(param.GetModule());
+    }
+
+    if (u.m_Type == ELEMENT_TYPE_VAR)
+    {
+        TypeVarTypeDesc* asVar = (TypeVarTypeDesc*) this;
+        _ASSERTE(asVar->GetGenericClass());
+        return (asVar->GetGenericClass()->GetModule());
+    }
+
+    if (u.m_Type == ELEMENT_TYPE_MVAR)
+    {
+        TypeVarTypeDesc* asVar = (TypeVarTypeDesc*) this;
+        _ASSERTE(asVar->GetGenericMethod());
+        return (asVar->GetGenericMethod()->GetModule());
     }
 
     _ASSERTE(u.m_Type == ELEMENT_TYPE_FNPTR);
@@ -221,13 +425,80 @@ Assembly* TypeDesc::GetAssembly() {
     return(param.GetAssembly());
 }
 
+TypeHandle TypeHandle::GetCanonicalFormAsGenericArgument()
+{
+    if (!g_pConfig->ShareGenericCode())
+        return *this;
+
+    CorElementType et = GetNormCorElementType();
+    if (CorTypeInfo::IsObjRef(et))
+        return TypeHandle(g_pObjectClass);
+
+    if (CorTypeInfo::IsGenericVariable(et))
+        return *this;
+            
+    switch(et)
+    {
+      // Don't share structs. But sharability must be propagated through 
+      // them (i.e. struct<object> * shares with struct<string> *)
+      case ELEMENT_TYPE_VALUETYPE :
+          if (HasInstantiation())
+          {
+              TypeHandle* inst  = GetInstantiation();
+              TypeHandle *repInst = (TypeHandle*) _alloca(GetNumGenericArgs() * sizeof(TypeHandle));
+              for (DWORD i = 0; i < GetNumGenericArgs(); i++)
+              {
+                  repInst[i] = inst[i].GetCanonicalFormAsGenericArgument();
+              }
+              return ClassLoader::LoadGenericInstantiation(GetGenericTypeDefinition(), repInst, GetNumGenericArgs());
+          }
+          else 
+                  return *this;
+
+        // With value-type instantiation sharing turned on we share these 
+        // with enums having the same underlying type
+      case ELEMENT_TYPE_I :
+      case ELEMENT_TYPE_I1 :
+      case ELEMENT_TYPE_I2 :
+      case ELEMENT_TYPE_I4 :
+      case ELEMENT_TYPE_I8 :
+      case ELEMENT_TYPE_U :
+      case ELEMENT_TYPE_U1 :
+      case ELEMENT_TYPE_U2 :
+      case ELEMENT_TYPE_U4 :
+      case ELEMENT_TYPE_U8 :
+        if (g_pConfig->ShareValInsts())
+            return TypeHandle(g_Mscorlib.GetElementType(et));
+        else
+            return *this;
+
+      // Don't share pointer types, but sharability must be propagated through 
+      // them (i.e. struct<object> * shares with struct<string> *)
+      case ELEMENT_TYPE_PTR :
+          {
+              TypeHandle th = GetTypeParam().GetCanonicalFormAsGenericArgument();
+              return ClassLoader::GetPointerOrByrefType(et, th);
+          }
+
+      case ELEMENT_TYPE_FNPTR :
+          _ASSERTE(!"TODO");
+          return *this;
+
+    default:
+        return *this;
+    }
+}
+
 unsigned TypeDesc::GetName(char* buff, unsigned buffLen)
 {
     CorElementType kind = GetNormCorElementType();
-
-    return ConstructName(kind, 
-                         CorTypeInfo::IsModifier(kind) ? GetTypeParam() : TypeHandle(),
-                         kind == ELEMENT_TYPE_ARRAY ? ((ArrayTypeDesc*) this)->GetRank() : 0, 
+    return ConstructName(kind,
+                         CorTypeInfo::IsModifier(kind) ? GetTypeParam() : TypeHandle(this),
+                         (kind == ELEMENT_TYPE_ARRAY)
+                         ? ((ArrayTypeDesc*) this)->GetRank() 
+                         : ((kind == ELEMENT_TYPE_VAR || kind == ELEMENT_TYPE_MVAR) 
+                            ? ((TypeVarTypeDesc*) this)->GetIndex() 
+                            : 0), 
                          buff, buffLen);
 }
 
@@ -273,6 +544,27 @@ unsigned TypeDesc::ConstructName(CorElementType kind, TypeHandle param, int rank
         }
         break;
     }
+    case ELEMENT_TYPE_VAR:
+    case ELEMENT_TYPE_MVAR: 
+    {
+        char name[10];
+        if (kind == ELEMENT_TYPE_VAR) 
+        { 
+            _snprintf(name,10,"!%d", rank);
+        }
+        else 
+        { 
+            _snprintf(name,10,"!!%d",rank);
+        };					
+        unsigned len = (unsigned)strlen(name);
+        if (buff + len < endBuff) 
+        {
+            strcpy(buff, name);
+            buff += len;
+        }
+        break;
+    }
+
     case ELEMENT_TYPE_FNPTR:
     default: 
         const char* name = CorTypeInfo::GetFullName(kind);
@@ -291,13 +583,31 @@ unsigned TypeDesc::ConstructName(CorElementType kind, TypeHandle param, int rank
 }
 
 BOOL TypeDesc::CanCastTo(TypeHandle toType) {
+    if (TypeHandle(this) == toType) 
+        return true;
 
-    if (!toType.IsTypeDesc()) {
-        if (GetMethodTable() == 0)      // I don't have an underlying method table, I am not an object.  
+    // If we're not casting to a TypeDesc (i.e. not to a reference array type, variable type etc.)
+    // then we must be trying to cast to a class or interface type.
+    if (!toType.IsTypeDesc()) 
+    {
+
+        //A boxed variable type can be cast to object.  
+        if (GetNormCorElementType() == ELEMENT_TYPE_VAR || 
+            GetNormCorElementType() == ELEMENT_TYPE_MVAR) {
+            return (toType == g_pObjectClass);
+        };
+        
+        MethodTable *pMT = GetMethodTable();
+        if (pMT == 0) {
+            // I don't have an underlying method table, therefore I'm 
+            // a variable type, pointer type, function pointer type 
+            // etc.  I am not an object or value type.  Therefore
+            // I can't be cast to an object or value type.
             return(false);
+        }
 
-            // This does the right thing if 'type' == System.Array or System.Object, System.Clonable ...
-        return(ClassLoader::StaticCanCastToClassOrInterface(GetMethodTable()->GetClass(), toType.AsClass()) != 0);
+        // This does the right thing if 'type' == System.Array or System.Object, System.Clonable ...
+        return(ClassLoader::StaticCanCastToClassOrInterface(pMT, toType.AsMethodTable()) != 0);
     }
 
     TypeDesc* toTypeDesc = toType.AsTypeDesc();
@@ -329,15 +639,14 @@ BOOL TypeDesc::CanCastTo(TypeHandle toType) {
             return(true);
         
             // Object parameters dont need an exact match but only inheritance, check for that
-        CorElementType fromParamCorType = fromParam.GetNormCorElementType();
+        CorElementType fromParamCorType = fromParam.GetVerifierCorElementType();
         if (CorTypeInfo::IsObjRef(fromParamCorType))
             return(fromParam.CanCastTo(toParam));
 
         
             // Enums with the same underlying type are interchangable 
         if (CorTypeInfo::IsPrimitiveType(fromParamCorType) &&
-            fromParamCorType == toParam.GetNormCorElementType()) {
-
+            fromParamCorType == toParam.GetVerifierCorElementType()) {
             EEClass* pFromClass = fromParam.GetClass();
             EEClass* pToClass = toParam.GetClass();
             if (pFromClass && (pFromClass->IsEnum() || pFromClass->IsTruePrimitive()) &&
@@ -349,6 +658,14 @@ BOOL TypeDesc::CanCastTo(TypeHandle toType) {
             // Anything else is not a match.
         return(false);
     }
+
+
+    if (toKind == ELEMENT_TYPE_VAR || toKind == ELEMENT_TYPE_MVAR || 
+        toKind == ELEMENT_TYPE_FNPTR)
+    {
+        return false; 
+    };
+    
 
     _ASSERTE(toKind == ELEMENT_TYPE_TYPEDBYREF || CorTypeInfo::IsPrimitiveType(toKind));
     return(true);
@@ -607,6 +924,17 @@ void MethodTable::SetTransparentProxyType()
     m_pInterfaceVTableMap = GetThread()->GetDomain()->GetInterfaceVTableMapMgr().GetAddrOfGlobalTableForComWrappers();
 }
 
+BOOL MethodTable::IsCanonicalMethodTable()
+{
+    return (GetCanonicalMethodTable() == this);
+}
+
+MethodTable *MethodTable::GetCanonicalMethodTable()
+{
+    _ASSERTE(GetClass());
+    return (GetClass()->GetMethodTable());
+}
+
 
 
 BOOL MethodTable::IsInterface()
@@ -633,8 +961,7 @@ MethodDesc* MethodTable::GetUnboxingMethodDescForValueClassMethod(MethodDesc *pM
 
 MethodTable * MethodTable::GetParentMethodTable()
 {
-    EEClass* pClass = GetClass()->GetParentClass();
-    return (pClass != NULL) ? pClass->GetMethodTable() : NULL;
+    return m_pParentMethodTable;
 }
 
 
@@ -863,7 +1190,7 @@ void *EEClass::operator new(size_t size, ClassLoader *pLoader)
 }
 
 MethodTable *MethodTable::AllocateNewMT(DWORD dwVtableSlots, DWORD dwStaticFieldBytes
-        , DWORD dwGCSize, DWORD dwNumInterfaces, ClassLoader *pLoader, BOOL isInterface
+        , DWORD dwGCSize, DWORD dwNumInterfaces, DWORD dwNumDicts, DWORD cbDict, ClassLoader *pLoader, BOOL isInterface
     )
 {
     size_t size = sizeof(MethodTable);
@@ -887,18 +1214,19 @@ MethodTable *MethodTable::AllocateNewMT(DWORD dwVtableSlots, DWORD dwStaticField
 #endif
 
     // size without the interface map
-    DWORD cbTotalSize = (DWORD)size + dwVtableSlots * sizeof(SLOT) + dwStaticFieldBytes + dwGCSize;
-
+    //@GENERICS: reserve space for the dictionary pointers
+    DWORD cbTotalSize = (DWORD)size + dwVtableSlots * sizeof(SLOT) + dwNumDicts * sizeof(TypeHandle*) + dwStaticFieldBytes + dwGCSize;
+       
     //
     // the pointer to the interface map must be pointer-size aligned
     //
     cbTotalSize = (DWORD)ALIGN_UP(cbTotalSize, sizeof(void*));
 
-    // size with the interface map. DynamicInterfaceMap have an extra DWORD added to the end of the normal interface
+    // size with the interface map and fixed-size dictionary. DynamicInterfaceMap have an extra DWORD added to the end of the normal interface
         // map. This will be used to store the count of dynamically added interfaces (the ones that are not in 
         // the metadata but are QI'ed for at runtime).
     DWORD newSize = (DWORD)(cbTotalSize + 
-        dwNumInterfaces * sizeof(InterfaceInfo_t));
+      dwNumInterfaces * sizeof(InterfaceInfo_t) + cbDict); 
 
     WS_PERF_SET_HEAP(HIGH_FREQ_HEAP);    
     BYTE *pData = (BYTE *) pLoader->GetHighFrequencyHeap()->AllocMem(newSize);
@@ -925,6 +1253,20 @@ MethodTable *MethodTable::AllocateNewMT(DWORD dwVtableSlots, DWORD dwStaticField
     // interface map is at the end of the vtable
     pMT->m_pIMap = (InterfaceInfo_t *)(pData+cbTotalSize);                    // pointer interface map
     _ASSERTE(IS_ALIGNED(pMT->m_pIMap, sizeof(void*)));
+
+    // ...not quite...the dictionary pointers precede
+    if (dwNumDicts)
+    {
+      pMT->m_pPerInstInfo = ((TypeHandle**) (pData + cbTotalSize)) - dwNumDicts;
+
+      // Fill in the dictionary for this type, if it's instantiated
+      if (cbDict)
+      {
+        pMT->m_pPerInstInfo[dwNumDicts-1] = (TypeHandle*) (pData + newSize - cbDict);
+        memset(pData + newSize - cbDict, 0, cbDict);
+      }
+    }
+    else pMT->m_pPerInstInfo = NULL;
 
     pMT->m_pInterfaceVTableMap = NULL;
 
@@ -1487,7 +1829,14 @@ void EEClass::GetGuid(GUID *pGuid, BOOL bGenerateIfNotFound)
 
 
 //==========================================================================
-HRESULT EEClass::CreateClass(Module *pModule, mdTypeDef cl, BOOL fHasLayout, BOOL fDelegate, BOOL fIsEnum, LPEEClass* ppEEClass)
+HRESULT EEClass::CreateClass(Module *pModule, 
+                            mdTypeDef cl, 
+                            BOOL fHasLayout, 
+                            BOOL fDelegate, 
+                            BOOL fIsEnum, 
+                            TypeHandle genericType, 
+                            BOOL bIsSharedInst,
+                            LPEEClass* ppEEClass)
 {
     _ASSERTE(!(fHasLayout && fDelegate));
 
@@ -1506,19 +1855,19 @@ HRESULT EEClass::CreateClass(Module *pModule, mdTypeDef cl, BOOL fHasLayout, BOO
 
     if (fHasLayout)
     {
-        pEEClass = new (pLoader) LayoutEEClass(pLoader);
+        pEEClass = new (pLoader) LayoutEEClass(pLoader, genericType, bIsSharedInst);
     }
     else if (fDelegate)
     {
-        pEEClass = new (pLoader) DelegateEEClass(pLoader);
+        pEEClass = new (pLoader) DelegateEEClass(pLoader, genericType, bIsSharedInst);
     }
     else if (fIsEnum)
     {
-        pEEClass = new (pLoader) EnumEEClass(pLoader);
+        pEEClass = new (pLoader) EnumEEClass(pLoader, genericType, bIsSharedInst);
     }
     else
     {
-        pEEClass = new (pLoader) EEClass(pLoader);
+        pEEClass = new (pLoader) EEClass(pLoader, genericType, bIsSharedInst);
     }
 
     DWORD dwAttrClass = 0;
@@ -1744,6 +2093,16 @@ void EEClass::AddChunk(MethodDescChunk *chunk)
     m_pChunks = chunk;
 }
 
+void EEClass::LockChunks()
+{
+  EnterCriticalSection(&GetLoader()->m_ChunksLock);
+}
+
+void EEClass::UnlockChunks()
+{
+  LeaveCriticalSection(&GetLoader()->m_ChunksLock);
+}
+
 
 //
 // Find a method in this class hierarchy - used ONLY by the loader during layout.  Do not use at runtime.
@@ -1810,12 +2169,42 @@ HRESULT EEClass::LoaderFindMethodInClass(
     {
         PCCOR_SIGNATURE pHashMethodSig;
         DWORD       cHashMethodSig;
+        Substitution* pSubst = NULL;
+        MethodTable *entryMT = pEntry->m_pDesc->GetMethodTable();
+        EEClass *entryEEClass = entryMT->GetClass();
+
+        // If entry is in a parameterized type, its signature may need to be instantiated all the way down the chain
+        // To understand why consider the following example: 
+        //   class C<T> { void m(T) { ...body... } }
+        //   class D<T> : C<T[]> { /* inherits m with signature void m(T[]) */ }
+        //   class E<T> : C<List<T>> { void m(List<T>[]) { ... body... } }
+        // Now suppose that we've got the signature of E::m in our hand and are comparing it with the methoddesc for C.m
+        // They're not syntactically the same but are if you instantiate "all the way up"
+        // Possible optimization: don't bother constructing the substitution if the signature of pEntry is closed
+        if (entryEEClass->GetNumGenericArgs() > 0)
+        {
+          EEClass *here = this;
+          Module *hereModule = pModule;
+          do
+          {
+            Substitution *newSubst = (Substitution *) _alloca(sizeof(Substitution));
+            newSubst->inst = here->GetParentInst();
+            newSubst->pModule = hereModule;
+            newSubst->rest = pSubst;
+            pSubst = newSubst;
+            here = here->m_pParentClass;   
+            _ASSERT(here != NULL);    
+            hereModule = here->GetModule();      
+          } 
+          while (entryEEClass != here);   
+        }
 
         // Get sig of entry in hash chain
         pEntry->m_pDesc->GetSig(&pHashMethodSig, &cHashMethodSig);
 
-        if (MetaSig::CompareMethodSigs(*ppMemberSignature, *pcMemberSignature, pModule,
-                                       pHashMethodSig, cHashMethodSig, pEntry->m_pDesc->GetModule()))
+        // Note instantiation info
+        if (MetaSig::CompareMethodSigs(*ppMemberSignature, *pcMemberSignature, pModule, NULL,
+                                       pHashMethodSig, cHashMethodSig, pEntry->m_pDesc->GetModule(), pSubst))
         {
             // Found a match
             *ppMethodDesc = pEntry->m_pDesc;
@@ -1841,7 +2230,11 @@ HRESULT EEClass::LoaderFindMethodInClass(
 // pdwInterfaceListSize as appropriate, and avoiding duplicates.
 //
 BOOL EEClass::ExpandInterface(InterfaceInfo_t *pInterfaceMap, 
-                              EEClass *pNewInterface, 
+                              Substitution *pInsts,
+                              MethodTable *pNewInterface, 
+                              Module *instModule,
+                              PCCOR_SIGNATURE inst,
+                              Substitution *pSubst,                          
                               DWORD *pdwInterfaceListSize, 
                               DWORD *pdwMaxInterfaceMethods,
                               BOOL fDirect)
@@ -1856,30 +2249,43 @@ BOOL EEClass::ExpandInterface(InterfaceInfo_t *pInterfaceMap,
     // Is it already present in the list?
     for (i = 0; i < (*pdwInterfaceListSize); i++)
     {
-        if (pInterfaceMap[i].m_pMethodTable == pNewInterface->m_pMethodTable) {
+        //@GENERICS: this relies on all instantiations of a particular interface being the same
+        // This should be checked elsewhere
+        if (pInterfaceMap[i].m_pMethodTable->GetClass()->StripInstantiation() == pNewInterface->GetClass()->StripInstantiation()) {
             if(fDirect)
                 pInterfaceMap[i].m_wFlags |= InterfaceInfo_t::interface_declared_on_class;
             return TRUE; // found it, don't add it again
         }
     }
 
-    if (pNewInterface->GetNumVtableSlots() > *pdwMaxInterfaceMethods)
-        *pdwMaxInterfaceMethods = pNewInterface->GetNumVtableSlots();
+    if (pNewInterface->GetClass()->GetNumVtableSlots() > *pdwMaxInterfaceMethods)
+        *pdwMaxInterfaceMethods = pNewInterface->GetClass()->GetNumVtableSlots();
 
     // Add it and each sub-interface
-    pInterfaceMap[*pdwInterfaceListSize].m_pMethodTable = pNewInterface->m_pMethodTable;
+    pInterfaceMap[*pdwInterfaceListSize].m_pMethodTable = pNewInterface;
     pInterfaceMap[*pdwInterfaceListSize].m_wStartSlot = (WORD) -1;
     pInterfaceMap[*pdwInterfaceListSize].m_wFlags = 0;
+
+    if (pInsts) 
+    {
+      pInsts[*pdwInterfaceListSize].pModule = instModule;
+      pInsts[*pdwInterfaceListSize].inst = inst;
+      pInsts[*pdwInterfaceListSize].rest = pSubst;
+      pSubst = &pInsts[*pdwInterfaceListSize];
+    }
 
     if(fDirect)
         pInterfaceMap[*pdwInterfaceListSize].m_wFlags |= InterfaceInfo_t::interface_declared_on_class;
 
     (*pdwInterfaceListSize)++;
 
-    InterfaceInfo_t* pNewIPMap = pNewInterface->m_pMethodTable->GetInterfaceMap();
-    for (i = 0; i < pNewInterface->m_wNumInterfaces; i++)
-    {
-        if (ExpandInterface(pInterfaceMap, pNewIPMap[i].m_pMethodTable->GetClass(), pdwInterfaceListSize, pdwMaxInterfaceMethods, FALSE) == FALSE)
+    InterfaceInfo_t* pNewIPMap = pNewInterface->GetInterfaceMap();
+    Substitution* insts = pNewInterface->GetClass()->GetBaseTypeSubstitutions();
+    for (i = 0; i < pNewInterface->GetClass()->m_wNumInterfaces; i++)
+    {        
+      if (ExpandInterface(pInterfaceMap, pInsts, pNewIPMap[i].m_pMethodTable, 
+          insts == NULL ? NULL : (insts[i].pModule), 
+          insts == NULL ? NULL : (insts[i].inst), pSubst, pdwInterfaceListSize, pdwMaxInterfaceMethods, FALSE) == FALSE)
             return FALSE;
     }
 
@@ -1894,19 +2300,22 @@ BOOL EEClass::ExpandInterface(InterfaceInfo_t *pInterfaceMap,
 //
 // Returns FALSE for failure.                                                                               
 //
-BOOL EEClass::CreateInterfaceMap(BuildingInterfaceInfo_t *pBuildingInterfaceList, InterfaceInfo_t *pInterfaceMap, DWORD *pdwInterfaceListSize, DWORD *pdwMaxInterfaceMethods)
+BOOL EEClass::CreateInterfaceMap(BuildingInterfaceInfo_t *pBuildingInterfaceList, Module *pModule, InterfaceInfo_t *pInterfaceMap, Substitution *pInsts, DWORD *pdwInterfaceListSize, DWORD *pdwMaxInterfaceMethods, MethodTable *pParentMethodTable)
 {
     WORD    i;
 
     *pdwInterfaceListSize = 0;
     // First inherit all the parent's interfaces.  This is important, because our interface map must
     // list the interfaces in identical order to our parent.
-    if (GetParentClass() != NULL)
+    if (pParentMethodTable != NULL)
     {
-        InterfaceInfo_t *pParentInterfaceMap = GetParentClass()->GetInterfaceMap();
+        InterfaceInfo_t *pParentInterfaceMap = pParentMethodTable->GetInterfaceMap();
+        EEClass *pParentClass = pParentMethodTable->GetClass();
+
+        Substitution *pParentInsts = pParentClass->GetBaseTypeSubstitutions();
 
         // The parent's interface list is known to be fully expanded
-        for (i = 0; i < GetParentClass()->m_wNumInterfaces; i++)
+        for (i = 0; i < pParentClass->m_wNumInterfaces; i++)
         {
             // Need to keep track of the interface with the largest number of methods
             if (pParentInterfaceMap[i].m_pMethodTable->GetClass()->GetNumVtableSlots() > *pdwMaxInterfaceMethods)
@@ -1915,6 +2324,12 @@ BOOL EEClass::CreateInterfaceMap(BuildingInterfaceInfo_t *pBuildingInterfaceList
             pInterfaceMap[*pdwInterfaceListSize].m_pMethodTable = pParentInterfaceMap[i].m_pMethodTable;
             pInterfaceMap[*pdwInterfaceListSize].m_wStartSlot = (WORD) -1;
             pInterfaceMap[*pdwInterfaceListSize].m_wFlags = 0;
+            if (pInsts)
+            {
+              pInsts[*pdwInterfaceListSize].inst = pParentInsts == NULL ? NULL : pParentInsts[i].inst;
+              pInsts[*pdwInterfaceListSize].rest = GetParentInst() ? &pInsts[-1] : NULL;
+              pInsts[*pdwInterfaceListSize].pModule = pParentInsts == NULL ? NULL : pParentInsts[i].pModule;
+            }
             (*pdwInterfaceListSize)++;
         }
     }
@@ -1922,9 +2337,11 @@ BOOL EEClass::CreateInterfaceMap(BuildingInterfaceInfo_t *pBuildingInterfaceList
     // Go through each interface we explicitly implement (if a class), or extend (if an interface)
     for (i = 0; i < m_wNumInterfaces; i++)
     {
-        EEClass *pDeclaredInterface = pBuildingInterfaceList[i].m_pClass;
+        MethodTable *pDeclaredInterface = pBuildingInterfaceList[i].m_pMethodTable;
+        PCCOR_SIGNATURE inst = pBuildingInterfaceList[i].inst;
 
-        if (ExpandInterface(pInterfaceMap, pDeclaredInterface, pdwInterfaceListSize, pdwMaxInterfaceMethods, TRUE) == FALSE)
+        if (ExpandInterface(pInterfaceMap, pInsts, pDeclaredInterface, 
+            pModule, inst, NULL, pdwInterfaceListSize, pdwMaxInterfaceMethods, TRUE) == FALSE)
             return FALSE;
     }
 
@@ -2043,13 +2460,17 @@ BOOL EEClass::TestThrowable(OBJECTREF* pThrowable)
     bottom of this file for reference purposes. It has been commented out. 
 *****************************************************************************************/
 HRESULT EEClass::BuildMethodTable(Module *pModule,
-                                  mdToken cl,
+                                  mdToken /* cl */,
                                   BuildingInterfaceInfo_t *pBuildingInterfaceList,
                                   const LayoutRawFieldInfo *pLayoutRawFieldInfos,
-                                  OBJECTREF *pThrowable)
+                                  OBJECTREF *pThrowable,
+                                  MethodTable *pParentMethodTable,
+                                  TypeHandle *inst, 
+                                  PCCOR_SIGNATURE parentInst, 
+                                  Pending *pending)
 {
     HRESULT hr = S_OK;
-    
+
     // The following structs, defined as private members of EEClass, contain the necessary local
     // parameters needed for BuildMethodTable
 
@@ -2076,7 +2497,18 @@ HRESULT EEClass::BuildMethodTable(Module *pModule,
 
     bmtInternal.pInternalImport = pModule->GetMDImport();
     bmtInternal.pModule = pModule;
-    bmtInternal.cl = cl;
+    bmtInternal.cl = GetCl();
+    bmtInternal.inst = inst;
+    
+    bmtParent.parentInst = parentInst;
+    DWORD dwAttrClass;
+    bmtInternal.pInternalImport->GetTypeDefProps(
+        bmtInternal.cl, 
+        &dwAttrClass, 
+        &(bmtParent.token)
+    );
+
+    
 
     // If not NULL, it means there are some by-value fields, and this contains an entry for each instance or static field,
     // which is NULL if not a by value field, and points to the EEClass of the field if a by value field.  Instance fields
@@ -2088,7 +2520,7 @@ HRESULT EEClass::BuildMethodTable(Module *pModule,
 #ifdef _DEBUG
     LPCUTF8 className;
     LPCUTF8 nameSpace;
-    bmtInternal.pInternalImport->GetNameOfTypeDef(cl, &className, &nameSpace);
+    bmtInternal.pInternalImport->GetNameOfTypeDef(bmtInternal.cl, &className, &nameSpace);
 
     unsigned fileNameSize = 0;
     LPCWSTR fileName = NULL;
@@ -2129,17 +2561,58 @@ HRESULT EEClass::BuildMethodTable(Module *pModule,
         Thread *pThread = GetThread();
         void* checkPointMarker = pThread->m_MarshalAlloc.GetCheckpoint();
 
-        
         // this class must not already be resolved
         _ASSERTE(IsResolved() == FALSE);
+
+#ifdef _DEBUG
+        LPCUTF8 pszDebugName,pszDebugNamespace;
+        
+        pModule->GetMDImport()->GetNameOfTypeDef(bmtInternal.cl, &pszDebugName, &pszDebugNamespace);
+#endif
+
+        //GCC complains about gotos that cross initialisations, so we
+        //put this initialisation before the first "IfFailGoto"
+        unsigned totalDeclaredFieldSize=0;
+
+        // Enumerate the formal type parameters
+        HENUMInternal   hEnumTyPars;
+        hr = bmtInternal.pInternalImport->EnumInit(mdtGenericPar, bmtInternal.cl, &hEnumTyPars);
+        IfFailGoto(hr, exit);
+
+        m_wNumTyPars = (WORD) bmtInternal.pInternalImport->EnumGetCount(&hEnumTyPars);
+        if (m_wNumTyPars) 
+        {
+          if (bmtInternal.inst)
+          {
+            m_VMFlags |= VMFLAG_ISINSTANTIATED;
+#ifdef _DEBUG
+            static char buff[400];
+            strcpy(buff, m_szDebugClassName);
+            Generics::PrettyInstantiation(buff+strlen(buff), 400U-strlen(buff), m_wNumTyPars, bmtInternal.inst);
+            char* psz = (char*) GetClassLoader()->GetLowFrequencyHeap()->AllocMem(sizeof(char) * (strlen(buff) + 1));
+            strcpy(psz, buff);
+            m_szDebugClassName = psz;
+#endif
+          }
+        }
+        else if (IsGenericTypeDefinition())
+        { 
+            InitializeTypicalInst(); 
+        }
 
         // If this is mscorlib, then don't perform some sanity checks on the layout
         bmtProp.fNoSanityChecks = ((g_pObjectClass != NULL) && pModule == g_pObjectClass->GetModule());
 
 #ifdef _DEBUG
-        LPCUTF8 pszDebugName,pszDebugNamespace;
-        
-        pModule->GetMDImport()->GetNameOfTypeDef(GetCl(), &pszDebugName, &pszDebugNamespace);
+        if (HasInstantiation())
+        {
+          static char buff[8192];
+          strcpy(buff, pszDebugName);
+          Generics::PrettyInstantiation(buff + strlen(buff), 8192U - strlen(buff), GetNumGenericArgs(), inst);
+          char* psz = (char*) GetClassLoader()->GetLowFrequencyHeap()->AllocMem(sizeof(char) * (strlen(buff) + 1));
+          strcpy(psz, buff);
+          pszDebugName = psz;
+        }       
 
         LOG((LF_CLASSLOADER, LL_INFO1000, "Loading class \"%s%s%s\" from module \"%ws\" in domain 0x%x %s\n",
             *pszDebugNamespace ? pszDebugNamespace : "",
@@ -2156,10 +2629,10 @@ HRESULT EEClass::BuildMethodTable(Module *pModule,
         // function we reset GetParentClass()
         if (IsInterface())
         {
-            SetParentClass (NULL);
+            pParentMethodTable = NULL;
         }
 
-        unsigned totalDeclaredFieldSize=0;
+        bmtParent.pParentMethodTable = pParentMethodTable;
 
         // Check to see if the class is an valuetype
         hr = CheckForValueType(&bmtError);
@@ -2170,11 +2643,18 @@ HRESULT EEClass::BuildMethodTable(Module *pModule,
         IfFailGoto(hr, exit);
         
 
+        bmtParent.pParentMethodTable = pParentMethodTable;
+        SetParentClass(pParentMethodTable != NULL ? pParentMethodTable->GetClass() : NULL);
 
-        if (GetParentClass())
-        {
+        if (!IsGenericTypeDefinition())
+            m_wNumDicts = (GetNumGenericArgs() > 0) ? 1 : 0;
+        if (pParentMethodTable)
+        {         
             // parent class must already be resolved
-            _ASSERTE(GetParentClass()->IsResolved());
+            _ASSERTE(pParentMethodTable->GetClass()->IsResolved());
+
+            if (!IsGenericTypeDefinition())
+                m_wNumDicts += pParentMethodTable->GetClass()->GetNumDicts();
         }
         else if (! (IsInterface() ) ) {
 
@@ -2200,7 +2680,7 @@ HRESULT EEClass::BuildMethodTable(Module *pModule,
 
         // resolve unresolved interfaces, determine an upper bound on the size of the interface map,
         // and determine the size of the largest interface (in # slots)
-        hr = ResolveInterfaces(pBuildingInterfaceList, &bmtInterface, &bmtProp, &bmtVT, &bmtParent);
+        hr = ResolveInterfaces(pBuildingInterfaceList, &bmtInternal, &bmtInterface, &bmtProp, &bmtVT, &bmtParent);
         IfFailGoto(hr, exit);
         
         // Enumerate this class's members
@@ -2243,7 +2723,7 @@ HRESULT EEClass::BuildMethodTable(Module *pModule,
         // the interfaces will be listed in the identical order).
         if (bmtParent.dwNumParentInterfaces > 0)
         {
-            InterfaceInfo_t *pParentInterfaceList = GetParentClass()->GetInterfaceMap();
+            InterfaceInfo_t *pParentInterfaceList = pParentMethodTable->GetInterfaceMap();
 
 #ifdef _DEBUG
             // Check that the parent's interface map is identical to the beginning of this 
@@ -2256,7 +2736,6 @@ HRESULT EEClass::BuildMethodTable(Module *pModule,
             {
 #ifdef _DEBUG
                 MethodTable *pMT = pParentInterfaceList[i].m_pMethodTable;
-                EEClass* pClass = pMT->GetClass();
 
                 // If the interface resides entirely inside the parent's class methods (i.e. no duplicate
                 // slots), then we can place this interface in an identical spot to in the parent.
@@ -2266,8 +2745,8 @@ HRESULT EEClass::BuildMethodTable(Module *pModule,
                 // this interface, so check that the end of the interface vtable is before
                 // GetParentClass()->GetNumVtableSlots().
 
-                _ASSERTE(pParentInterfaceList[i].m_wStartSlot + pClass->GetNumVtableSlots() <= 
-                         GetParentClass()->GetNumVtableSlots());
+                _ASSERTE(pParentInterfaceList[i].m_wStartSlot + pMT->GetClass()->GetNumVtableSlots() <= 
+                         pParentMethodTable->GetClass()->GetNumVtableSlots());
 #endif
                 // Interface lies inside parent's methods, so we can place it
                 bmtInterface.pInterfaceMap[i].m_wStartSlot = pParentInterfaceList[i].m_wStartSlot;
@@ -2287,7 +2766,7 @@ HRESULT EEClass::BuildMethodTable(Module *pModule,
         //
         if (!IsInterface())
         {
-            hr = PlaceVtableMethods(&bmtInterface, &bmtVT, &bmtMetaData, &bmtInternal, &bmtError, &bmtProp, &bmtMFDescs);
+            hr = PlaceVtableMethods(&bmtInterface, pBuildingInterfaceList, &bmtVT, &bmtMetaData, &bmtInternal, &bmtError, &bmtProp, &bmtMFDescs);
             IfFailGoto(hr, exit);
 
             hr = PlaceMethodImpls(&bmtInternal, &bmtMethodImpl, &bmtError, &bmtInterface, &bmtVT);
@@ -2337,6 +2816,29 @@ HRESULT EEClass::BuildMethodTable(Module *pModule,
 
         m_wNumMethodSlots = (WORD) bmtVT.dwCurrentNonVtableSlot;
 
+        // Allocate dictionary layout used by all compatible instantiations
+        if (IsSharedByGenericInstantiations())
+        {
+          // We use the number of instance methods as a heuristic for the number of type slots in the first (fixed) bucket
+          DWORD numTypeSlots = bmtEnumMF.dwNumILInstanceMethods;
+          m_pDictLayout = (DictionaryLayout*) GetClassLoader()->GetLowFrequencyHeap()->AllocMem(sizeof(DictionaryLayout) + sizeof(void*) * (numTypeSlots-1));
+          if (m_pDictLayout == NULL) {
+            hr = E_OUTOFMEMORY;
+            IfFailRet(hr);
+          }
+
+	  // When bucket spills we'll allocate another layout structure
+          m_pDictLayout->next = NULL;
+
+	  // This is the number of slots excluding the type parameters and spill pointer
+          m_pDictLayout->numSlots = numTypeSlots;
+	  
+	  // The first bucket has a spill pointer
+	  m_pDictLayout->hasSpillPointer = TRUE;
+
+          memset(m_pDictLayout->slots, 0, sizeof(void*) * numTypeSlots);
+        }
+
 
         // Place static fields
         hr = PlaceStaticFields(&bmtVT, &bmtFP, &bmtEnumMF);
@@ -2377,7 +2879,7 @@ HRESULT EEClass::BuildMethodTable(Module *pModule,
             else
             {
                 // Place instance fields
-                hr = PlaceInstanceFields(&bmtFP, &bmtEnumMF, &bmtParent, &bmtError, &pByValueClassCache);
+                hr = PlaceInstanceFields(&bmtFP, &bmtEnumMF, &bmtParent, &bmtError, &pByValueClassCache, inst);
             }
             IfFailGoto(hr, exit);
         }
@@ -2398,23 +2900,32 @@ HRESULT EEClass::BuildMethodTable(Module *pModule,
                               &bmtEnumMF,  
                               &bmtError,  
                               &bmtMetaData,  
-                              &bmtParent);
+                              &bmtParent,
+                              pending);
         IfFailGoto(hr, exit);
 
-        if (IsValueClass() && (m_dwNumInstanceFieldBytes != totalDeclaredFieldSize || HasOverLayedField()))
+        if (!IsGenericTypeDefinition() && IsValueClass() && (m_dwNumInstanceFieldBytes != totalDeclaredFieldSize || HasOverLayedField()))
         {
             GetMethodTable()->SetNotTightlyPacked();
         }
+#ifdef _DEBUG
+	GetMethodTable()->m_szDebugClassName = m_szDebugClassName;
+#endif
 
-        // If this is an interface then assign the interface ID.
         if (IsInterface())
         {
             // Assign the interface ID.
-            AssignInterfaceId();
+            if (inst != NULL) 
+            {
+                SetInterfaceId(GetGenericTypeDefinition().GetClass()->GetInterfaceId());
+            }
+            else 
+            { 
+                AssignInterfaceId();
 
 #ifdef _DEBUG
             LPCUTF8 pszDebugName,pszDebugNamespace;
-            pModule->GetMDImport()->GetNameOfTypeDef(cl, &pszDebugName, &pszDebugNamespace);
+            pModule->GetMDImport()->GetNameOfTypeDef(bmtInternal.cl, &pszDebugName, &pszDebugNamespace);
     
             LOG((LF_CLASSLOADER, LL_INFO1000, "Interface class \"%s%s%s\" given Interface ID 0x%x by AppDomain 0x%x %s\n",
                 *pszDebugNamespace ? pszDebugNamespace : "",
@@ -2425,6 +2936,7 @@ HRESULT EEClass::BuildMethodTable(Module *pModule,
                 (pModule->IsSystem()) ? "System Domain" : ""
                 ));
 #endif
+            }
         }
 
         if (IsSharedInterface())
@@ -2523,6 +3035,7 @@ exit:
             {
                 // Reset parent class
                 SetParentClass (g_pObjectClass->GetClass());
+                GetMethodTable()->m_pParentMethodTable = g_pObjectClass;                
             }
 
             SetResolved();
@@ -2530,14 +3043,17 @@ exit:
             // NOTE. NOTE!! the EEclass can now be accessed by other threads.
             // Do NOT place any initialization after this pointer
 
+            //@GENERICS: only do this for generic types, not in instantiations
+            if (inst == NULL)
+	    {
 #ifdef _DEBUG
-            NameHandle name(pModule, cl);
+            NameHandle name(pModule, bmtInternal.cl);
             _ASSERTE (pModule->GetClassLoader()->LookupInModule(&name).IsNull()
                       && "RID map already has this MethodTable");
 #endif
             // !!! JIT can get to a MT through FieldDesc.
             // !!! We need to publish MT before FieldDesc's.
-            if (!pModule->StoreTypeDef(cl, TypeHandle(GetMethodTable())))
+            if (!pModule->StoreTypeDef(bmtInternal.cl, TypeHandle(GetMethodTable())))
                 hr = E_OUTOFMEMORY;
             else
             {
@@ -2559,6 +3075,7 @@ exit:
                 #endif
                 GetClassLoader()->InsertClassForCLSID(this);
             }
+           }
         } else {
 
             LPCUTF8 pszClassName, pszNameSpace;
@@ -2593,7 +3110,7 @@ exit:
             LOG((LF_ALWAYS, LL_ALWAYS, "Number of static obj ref fields: %d\n", bmtEnumMF.dwNumStaticObjRefFields));
             LOG((LF_ALWAYS, LL_ALWAYS, "Number of declared fields: %d\n", bmtEnumMF.dwNumDeclaredFields));
             LOG((LF_ALWAYS, LL_ALWAYS, "Number of declared methods: %d\n", bmtEnumMF.dwNumDeclaredMethods));
-            DebugDumpVtable(pszDebugName, false);
+            GetMethodTable()->DebugDumpVtable(pszDebugName, false);
             DebugDumpFieldLayout(pszDebugName, false);
             DebugDumpGCDesc(pszDebugName, false);
         }
@@ -2669,7 +3186,7 @@ HRESULT EEClass::MapSystemInterfacesToDomain(AppDomain* pDomain)
             _ASSERTE(GetMethodTable());
             MapInterfaceFromSystem(pDomain, GetMethodTable());
         }
-        InterfaceInfo_t *pMap = GetInterfaceMap();
+        InterfaceInfo_t *pMap = GetMethodTable()->GetInterfaceMap();
         DWORD size = GetMethodTable()->GetNumInterfaces();
         for(DWORD i = 0; i < size; i ++) {
             MethodTable* pTable = pMap[i].m_pMethodTable;
@@ -2706,12 +3223,13 @@ HRESULT EEClass::MapInterfaceFromSystem(AppDomain* pDomain, MethodTable* pTable)
 // Resolve unresolved interfaces, determine an upper bound on the size of the interface map,
 // and determine the size of the largest interface (in # slots)
 //
-
-HRESULT EEClass::ResolveInterfaces(BuildingInterfaceInfo_t *pBuildingInterfaceList, bmtInterfaceInfo* bmtInterface, bmtProperties* bmtProp, bmtVtable* bmtVT, bmtParentInfo* bmtParent)
+//<NICE>GENERICS: don't repeat all this work for every instantiation - it only needs to be done once for the generic class</NICE>
+HRESULT EEClass::ResolveInterfaces(BuildingInterfaceInfo_t *pBuildingInterfaceList, bmtInternalInfo* bmtInternal, bmtInterfaceInfo* bmtInterface, bmtProperties* bmtProp, bmtVtable* bmtVT, bmtParentInfo* bmtParent)
 {
     HRESULT hr = S_OK;
     DWORD i;
     Thread *pThread = GetThread();
+    BOOL someInstantiated = bmtParent->parentInst != NULL;
 
     // resolve unresolved interfaces, determine an upper bound on the size of the interface map,
     // and determine the size of the largest interface (in # slots)
@@ -2720,19 +3238,30 @@ HRESULT EEClass::ResolveInterfaces(BuildingInterfaceInfo_t *pBuildingInterfaceLi
     // First look through the interfaces explicitly declared by this class
     for (i = 0; i < m_wNumInterfaces; i++)
     {
-        EEClass *pInterface = pBuildingInterfaceList[i].m_pClass;
+        EEClass *pInterface = pBuildingInterfaceList[i].m_pMethodTable->GetClass();
 
         _ASSERTE(pInterface->IsResolved());
+
+        if (pBuildingInterfaceList[i].inst != NULL || pInterface->GetBaseTypeSubstitutions() != NULL) 
+        {
+          someInstantiated = TRUE;
+        }
 
         bmtInterface->dwMaxExpandedInterfaces += (1+ pInterface->m_wNumInterfaces);
     }
 
     // Now look at interfaces inherited from the parent
-    if (GetParentClass() != NULL)
+    if (bmtParent->pParentMethodTable != NULL)
     {
-        InterfaceInfo_t *pParentInterfaceMap = GetParentClass()->GetInterfaceMap();
+        //@GENERICS: for our purposes here we use the generic parent because all its interfaces will be preloaded
+        EEClass *pParentClass = bmtParent->pParentMethodTable->GetClass()->StripInstantiation();
+        InterfaceInfo_t *pParentInterfaceMap = bmtParent->pParentMethodTable->GetInterfaceMap();
 
-        for (i = 0; i < GetParentClass()->m_wNumInterfaces; i++)
+        if (pParentClass->GetBaseTypeSubstitutions() != NULL)
+        {
+          someInstantiated = TRUE;
+        }
+        for (i = 0; i < pParentClass->m_wNumInterfaces; i++)
         {
             MethodTable *pMT = pParentInterfaceMap[i].m_pMethodTable;
             EEClass *pClass = pMT->GetClass();
@@ -2748,10 +3277,32 @@ HRESULT EEClass::ResolveInterfaces(BuildingInterfaceInfo_t *pBuildingInterfaceLi
         IfFailRet(E_OUTOFMEMORY);
     }
 
+    // If any of the interfaces are instantiated or the parent class is 
+    // instantiated or has interface instantiations then create a list of instantiations 
+    // Only do this for the generic type definitions or non-generic types; 
+    // for instantiated types we go through the generic type
+    if (someInstantiated && (IsGenericTypeDefinition() || GetNumGenericArgs() == 0))
+    {
+      u_inst.m_BaseTypeSubstitutions = (Substitution *) 
+        GetClassLoader()->GetLowFrequencyHeap()->AllocMem(sizeof(Substitution) * (bmtInterface->dwMaxExpandedInterfaces+1));
+      if (u_inst.m_BaseTypeSubstitutions == NULL)
+        {
+          hr = E_OUTOFMEMORY;
+          IfFailRet(hr);
+        }
+
+      // The entry at position -1 is for the parent instantiation
+      u_inst.m_BaseTypeSubstitutions->inst = bmtParent->parentInst;
+      u_inst.m_BaseTypeSubstitutions->pModule = bmtInternal->pModule;
+      u_inst.m_BaseTypeSubstitutions->rest = NULL;
+      u_inst.m_BaseTypeSubstitutions++;
+      
+    }
+
     // # slots of largest interface
     bmtInterface->dwLargestInterfaceSize = 0;
 
-    if (CreateInterfaceMap(pBuildingInterfaceList, bmtInterface->pInterfaceMap, &bmtInterface->dwInterfaceMapSize, &bmtInterface->dwLargestInterfaceSize) == FALSE)
+    if (CreateInterfaceMap(pBuildingInterfaceList, bmtInternal->pModule, bmtInterface->pInterfaceMap, GetBaseTypeSubstitutions(), &bmtInterface->dwInterfaceMapSize, &bmtInterface->dwLargestInterfaceSize, bmtParent->pParentMethodTable) == FALSE)
     {
         IfFailRet(COR_E_TYPELOAD);
     }
@@ -2771,11 +3322,13 @@ HRESULT EEClass::ResolveInterfaces(BuildingInterfaceInfo_t *pBuildingInterfaceLi
         }
     }
 
+    EEClass *pParentClass = (IsInterface() || bmtParent->pParentMethodTable == NULL) ? NULL : bmtParent->pParentMethodTable->GetClass();
+
     // For all the new interfaces we bring in, sum the methods
     bmtInterface->dwTotalNewInterfaceMethods = 0;
-    if (GetParentClass() != NULL)
+    if (pParentClass != NULL)
     {
-        for (i = GetParentClass()->m_wNumInterfaces; i < (bmtInterface->dwInterfaceMapSize); i++)
+        for (i = pParentClass->m_wNumInterfaces; i < (bmtInterface->dwInterfaceMapSize); i++)
             bmtInterface->dwTotalNewInterfaceMethods += 
                 bmtInterface->pInterfaceMap[i].m_pMethodTable->GetClass()->GetNumVtableSlots();
     }
@@ -2787,13 +3340,13 @@ HRESULT EEClass::ResolveInterfaces(BuildingInterfaceInfo_t *pBuildingInterfaceLi
     m_wNumInterfaces = (WORD) bmtInterface->dwInterfaceMapSize;
 
     // Inherit parental slot counts
-    if (GetParentClass() != NULL)
+    if (pParentClass != NULL)
     {
-        bmtVT->dwCurrentVtableSlot      = GetParentClass()->GetNumVtableSlots();
-        bmtParent->dwNumParentInterfaces   = GetParentClass()->m_wNumInterfaces;
-        bmtParent->NumParentPointerSeries  = GetParentClass()->m_wNumGCPointerSeries;
+        bmtVT->dwCurrentVtableSlot      = pParentClass->GetNumVtableSlots();
+        bmtParent->dwNumParentInterfaces   = pParentClass->m_wNumInterfaces;
+        bmtParent->NumParentPointerSeries  = pParentClass->m_wNumGCPointerSeries;
 
-        if (GetParentClass()->HasFieldsWhichMustBeInited())
+        if (pParentClass->HasFieldsWhichMustBeInited())
             m_VMFlags |= VMFLAG_HAS_FIELDS_WHICH_MUST_BE_INITED;
     }
     else
@@ -2830,7 +3383,8 @@ HRESULT EEClass::EnumerateMethodImpls(bmtInternalInfo* bmtInternal,
     mdToken tkParent, tkGrandparent;
     PCCOR_SIGNATURE pSigDecl=NULL,pSigBody = NULL;
     ULONG           cbSigDecl, cbSigBody;
-    hr = pMDInternalImport->EnumMethodImplInit(m_cl, 
+    Substitution *pSubstDecl = NULL;
+    hr = pMDInternalImport->EnumMethodImplInit(GetCl(), 
                                                &(bmtEnumMF->hEnumBody),
                                                &(bmtEnumMF->hEnumDecl));
     if (SUCCEEDED(hr)) {
@@ -2843,16 +3397,20 @@ HRESULT EEClass::EnumerateMethodImpls(bmtInternalInfo* bmtInternal,
                                                                                     sizeof(mdToken));
             bmtMetaData->pMethodDecl = (mdToken*) GetThread()->m_MarshalAlloc.Alloc(bmtEnumMF->dwNumberMethodImpls *
                                                                                     sizeof(mdToken));
+            bmtMetaData->pMethodDeclInstSig = (PCCOR_SIGNATURE*) GetThread()->m_MarshalAlloc.Alloc(bmtEnumMF->dwNumberMethodImpls *
+                                                                                               sizeof(PCCOR_SIGNATURE));
             bmtMethodImpl->pBodyDesc = (MethodDesc**) GetThread()->m_MarshalAlloc.Alloc(bmtEnumMF->dwNumberMethodImpls *
                                                                                         sizeof(MethodDesc*));
             bmtMethodImpl->pDeclDesc = (MethodDesc**) GetThread()->m_MarshalAlloc.Alloc(bmtEnumMF->dwNumberMethodImpls *
                                                                                         sizeof(MethodDesc*));
             bmtMethodImpl->pDeclToken = (mdToken*) GetThread()->m_MarshalAlloc.Alloc(bmtEnumMF->dwNumberMethodImpls *
                                                                                      sizeof(mdToken));
+            bmtMethodImpl->pDeclInstSig = (PCCOR_SIGNATURE*) GetThread()->m_MarshalAlloc.Alloc(bmtEnumMF->dwNumberMethodImpls *
+                                                                                           sizeof(PCCOR_SIGNATURE));
             mdToken theBody,theDecl;
             mdToken* pBody = bmtMetaData->pMethodBody;
             mdToken* pDecl = bmtMetaData->pMethodDecl;
-            
+            PCCOR_SIGNATURE* pDeclInstSig = bmtMetaData->pMethodDeclInstSig;            
             maxRidMD = pMDInternalImport->GetCountWithTokenKind(mdtMethodDef);
             maxRidMR = pMDInternalImport->GetCountWithTokenKind(mdtMemberRef);
             for(DWORD i = 0; i < bmtEnumMF->dwNumberMethodImpls; i++) {
@@ -2862,7 +3420,8 @@ HRESULT EEClass::EnumerateMethodImpls(bmtInternalInfo* bmtInternal,
                                                           &theBody,
                                                           pDecl))
                 break;
-                
+
+                *pDeclInstSig = NULL;               
                 if(TypeFromToken(theBody) != mdtMethodDef) {
                     Module* pModule;
                     hr = FindMethodDeclaration(bmtInternal,
@@ -2942,6 +3501,37 @@ HRESULT EEClass::EnumerateMethodImpls(bmtInternalInfo* bmtInternal,
                     }
                     // Get signature and length
                     pMDInternalImport->GetNameAndSigOfMemberRef(theDecl,&pSigDecl,&cbSigDecl);
+
+                    // Get parent
+                    hr = pMDInternalImport->GetParentToken(theDecl,&tkParent);
+                    IfFailRet(hr);
+
+                    // Extract signature instantiation from type spec
+                    if (TypeFromToken(tkParent) == mdtTypeSpec)
+                    {
+                        ULONG cSig;
+                        PCCOR_SIGNATURE pSig;         
+                        pMDInternalImport->GetTypeSpecFromToken(tkParent, &pSig, &cSig);
+                        SigPointer sigptr = SigPointer(pSig);
+                        CorElementType type = sigptr.GetElemType();
+
+                        // The only kind of type specs that we recognise are instantiated types
+                        if (type != ELEMENT_TYPE_WITH) {
+                            IfFailRet(COR_E_TYPELOAD);
+                        }
+
+                        // Of these, we outlaw instantiated value classes
+                        type = sigptr.GetElemType();
+                        if (type != ELEMENT_TYPE_CLASS) {
+                            IfFailRet(COR_E_TYPELOAD);
+                        }
+
+                        /* mdToken genericTok = */ sigptr.GetToken();
+                        /* DWORD ntypars = */ sigptr.GetData();
+                        *pDeclInstSig = sigptr.GetPtr();
+                        pSubstDecl = (Substitution*) _alloca(sizeof(Substitution));
+                        *pSubstDecl = Substitution(bmtInternal->pModule, *pDeclInstSig);
+                    }
                 }
                 // Body must be valid token
                 rid = RidFromToken(theBody);
@@ -2972,13 +3562,22 @@ HRESULT EEClass::EnumerateMethodImpls(bmtInternalInfo* bmtInternal,
                 // Decl's and Body's signatures must match
                 if(pSigDecl && cbSigDecl)
                 {
-                    if((pSigBody = pMDInternalImport->GetSigOfMethodDef(theBody,&cbSigBody)) != NULL && cbSigBody)
-                    {
-                        if((cbSigDecl!=cbSigBody) || memcmp(pSigDecl+1,pSigBody+1,cbSigDecl-1)) // skip the call conv
+                if((pSigBody = pMDInternalImport->GetSigOfMethodDef(theBody,&cbSigBody)) != NULL && cbSigBody)
+                {
+                    // Can't use memcmp because there may be two AssemblyRefs
+                    // in this scope, pointing to the same assembly, etc.).
+                    if (!MetaSig::CompareMethodSigs(pSigDecl,
+                                                    cbSigDecl,
+                                                    bmtInternal->pModule,
+                                                    pSubstDecl,
+                                                    pSigBody,
+                                                    cbSigBody,
+                                                    bmtInternal->pModule,
+                                                    NULL)) 
                         {
                             //_ASSERTE(!"MethodImpl Decl's and Body's signatures mismatch");
-                            bmtError->resIDWhy = IDS_CLASSLOAD_MI_BODY_DECL_MISMATCH;
-                            IfFailRet(COR_E_TYPELOAD);
+                           bmtError->resIDWhy = IDS_CLASSLOAD_MI_BODY_DECL_MISMATCH;
+                           IfFailRet(COR_E_TYPELOAD);
                         }
                     }
                     else
@@ -2997,6 +3596,7 @@ HRESULT EEClass::EnumerateMethodImpls(bmtInternalInfo* bmtInternal,
 
                 pBody++;
                 pDecl++;
+                pDeclInstSig++;
             }
         }
     }
@@ -3072,6 +3672,7 @@ HRESULT EEClass::FindMethodDeclaration(bmtInternalInfo* bmtInternal,
     if(TypeFromToken(pToken) == mdtMemberRef) {
         // Get the parent
         mdToken typeref = pMDInternalImport->GetParentOfMemberRef(pToken);
+        GOTPARENT:
         // If parent is a method def then this is a varags method
         if (TypeFromToken(typeref) == mdtMethodDef) {
             mdTypeDef typeDef;
@@ -3087,8 +3688,16 @@ HRESULT EEClass::FindMethodDeclaration(bmtInternalInfo* bmtInternal,
             *pDeclaration = mdtMethodDef; 
         }
         else if (TypeFromToken(typeref) == mdtTypeSpec) {
-            _ASSERTE(!"Method impls cannot override a member parented to a TypeSpec");
-            IfFailRet(COR_E_TYPELOAD);
+          // Added so that method impls can refer to instantiated interfaces or classes
+          pSig = pMDInternalImport->GetSigFromToken(typeref, &cSig);
+          CorElementType elemType = (CorElementType) *pSig++;
+          _ASSERTE(elemType == ELEMENT_TYPE_WITH);
+          elemType = (CorElementType) *pSig++;
+
+          // Can't implement or extend a value class
+          _ASSERTE(elemType == ELEMENT_TYPE_CLASS);
+          CorSigUncompressToken(pSig, &typeref);
+          goto GOTPARENT;
         }
         else {
             // Verify that the ref points back to us
@@ -3188,7 +3797,7 @@ HRESULT EEClass::EnumerateClassMembers(bmtInternalInfo* bmtInternal,
     bmtVT->dwMaxVtableSize     = 0; // we'll fix this later to be the real upper bound on vtable size
     bmtMetaData->cMethods = 0;
 
-    hr = pMDInternalImport->EnumInit(mdtMethodDef, m_cl, &(bmtEnumMF->hEnumMethod));
+    hr = pMDInternalImport->EnumInit(mdtMethodDef, GetCl(), &(bmtEnumMF->hEnumMethod));
     if (FAILED(hr))
     {
         _ASSERTE(!"Cannot count memberdefs");
@@ -3241,13 +3850,23 @@ HRESULT EEClass::EnumerateClassMembers(bmtInternalInfo* bmtInternal,
         else
             strMethodName = NULL;
 
+        HENUMInternal hEnumTyPars;
+        hr = pMDInternalImport->EnumInit(mdtGenericPar, tok, &hEnumTyPars);
+        if (FAILED(hr)) return hr;
+
+        WORD numTyPars = (WORD) pMDInternalImport->EnumGetCount(&hEnumTyPars);
+
+        //@GENERICS:
+        // Static methods belong to the generic class itself, not to its instantiations.
+        if (IsMdStatic(dwMemberAttrs) && bmtInternal->inst != NULL)
+          continue;
+ 
         //
         // We need to check if there are any gaps in the vtable. These are
         // represented by methods with the mdSpecial flag and a name of the form
         // _VTblGap_nnn (to represent nnn empty slots) or _VTblGap (to represent a
         // single empty slot).
         //
-
         if (IsMdRTSpecialName(dwMemberAttrs))
         {
             // The slot is special, but it might not be a vtable spacer. To
@@ -3405,7 +4024,7 @@ HRESULT EEClass::EnumerateClassMembers(bmtInternalInfo* bmtInternal,
         }
 
         // Global methods:
-        if(m_cl == COR_GLOBAL_PARENT_TOKEN)
+        if(GetCl() == COR_GLOBAL_PARENT_TOKEN)
         {
             if(!IsMdStatic(dwMemberAttrs))
             {
@@ -3421,6 +4040,26 @@ HRESULT EEClass::EnumerateClassMembers(bmtInternalInfo* bmtInternal,
                 }
             }
         }
+        //@GENERICS:
+        // Generic methods or methods in generic classes 
+        // may not be part of a COM Import class, PInvoke, internal call.
+        if ((GetNumGenericArgs() != 0 || numTyPars != 0) && (
+             IsMdPinvokeImpl(dwMemberAttrs) || 
+             IsMiInternalCall(dwImplFlags)))
+        {
+            BAD_FORMAT_ASSERT(!"Generic method or method in generic class is internal-call or PInvoke, or in COM Import");
+            IfFailRet(COR_E_TYPELOAD);
+        }
+
+        // Generic methods may not be marked "runtime".  However note that 
+        // methods in generic delegate classes are, hence we don't apply this to
+        // methods in generic classes in general.
+        if (numTyPars != 0 && IsMiRuntime(dwImplFlags))
+        {
+            BAD_FORMAT_ASSERT(!"Generic method is marked runtime-implemented");
+            IfFailRet(COR_E_TYPELOAD);
+        }
+
         // Signature validation
         pMemberSignature = pMDInternalImport->GetSigOfMethodDef(tok,&cMemberSignature);
         hr = validateTokenSig(tok,pMemberSignature,cMemberSignature,dwMemberAttrs,pMDInternalImport);
@@ -3499,7 +4138,8 @@ HRESULT EEClass::EnumerateClassMembers(bmtInternalInfo* bmtInternal,
             }
             else
             {
-                Classification = mcIL;
+                //We use an instantiated method desc to represent a generic method 
+                Classification = ((numTyPars == 0) ? mcIL : mcInstantiated);
             }
         }
 
@@ -3527,6 +4167,12 @@ HRESULT EEClass::EnumerateClassMembers(bmtInternalInfo* bmtInternal,
             }
         }
 #endif
+
+
+        // Generic methods (the uninstantiated ones) should really be mcIL
+        // but right now those in interfaces are marked mcECall
+        _ASSERTE ((numTyPars == 0) || ((Classification & mdcClassification) == mcInstantiated)
+          || ((Classification & mdcClassification) == mcECall && fIsClassInterface));
 
         // count how many overrides this method does All methods bodies are defined
         // on this type so we can just compare the tok with the body token found
@@ -3559,6 +4205,10 @@ HRESULT EEClass::EnumerateClassMembers(bmtInternalInfo* bmtInternal,
         {
             type = METHOD_TYPE_ECALL;
         }
+        else if ((Classification & mdcClassification) == mcInstantiated)
+        {
+            type = METHOD_TYPE_INSTANTIATED;
+        }
         else
         {
             type = METHOD_TYPE_NORMAL;
@@ -3583,6 +4233,8 @@ HRESULT EEClass::EnumerateClassMembers(bmtInternalInfo* bmtInternal,
         
         bmtVT->dwMaxVtableSize++;
         bmtEnumMF->dwNumDeclaredMethods++;
+        if (type == METHOD_TYPE_NORMAL && !IsMdStatic(dwMemberAttrs)) 
+          bmtEnumMF->dwNumILInstanceMethods++;
 
         BOOL hasUnboxing = (IsValueClass()
                             && !IsMdStatic(dwMemberAttrs) 
@@ -3626,7 +4278,7 @@ HRESULT EEClass::EnumerateClassMembers(bmtInternalInfo* bmtInternal,
     bmtEnumMF->dwNumStaticObjRefFields  = 0;
     bmtEnumMF->dwNumInstanceFields      = 0;
 
-    hr = pMDInternalImport->EnumInit(mdtFieldDef, m_cl, &(bmtEnumMF->hEnumField));
+    hr = pMDInternalImport->EnumInit(mdtFieldDef, GetCl(), &(bmtEnumMF->hEnumField));
     if (FAILED(hr))
     {
         _ASSERTE(!"Cannot count memberdefs");
@@ -3675,7 +4327,7 @@ HRESULT EEClass::EnumerateClassMembers(bmtInternalInfo* bmtInternal,
         }
 
             // can only have static global fields
-        if(m_cl == COR_GLOBAL_PARENT_TOKEN)
+        if(GetCl() == COR_GLOBAL_PARENT_TOKEN)
         {
             if(!IsMdStatic(dwMemberAttrs))
             {
@@ -3690,7 +4342,7 @@ HRESULT EEClass::EnumerateClassMembers(bmtInternalInfo* bmtInternal,
 
         if (IsFdStatic(dwMemberAttrs))
         {
-            if (!IsFdLiteral(dwMemberAttrs))
+            if (!IsFdLiteral(dwMemberAttrs) && bmtInternal->inst == NULL)
             {
                 bmtEnumMF->dwNumStaticFields++;
             }
@@ -3734,6 +4386,7 @@ HRESULT EEClass::AllocateMDChunks(bmtTokenRangeNode *pTokenRanges, DWORD type, D
         { mcIL, mcIL | mdcMethodImpl },
         { mcECall, mcECall | mdcMethodImpl },
         { mcNDirect, mcNDirect | mdcMethodImpl },
+        { mcInstantiated, mcInstantiated | mdcMethodImpl } 
     };
     static const CounterTypeEnum dataStructureTypes[METHOD_TYPE_COUNT] = 
     {
@@ -3855,7 +4508,7 @@ HRESULT EEClass::AllocateMethodFieldDescs(bmtProperties* bmtProp,
 
     // sanity check
 
-    _ASSERTE(!GetParentClass() || (bmtInterface->dwInterfaceMapSize - GetParentClass()->m_wNumInterfaces) >= 0);
+    _ASSERTE(bmtParent->pParentMethodTable == NULL || (bmtInterface->dwInterfaceMapSize - bmtParent->pParentMethodTable->GetClass()->m_wNumInterfaces) >= 0);
     // add parent vtable size 
     bmtVT->dwMaxVtableSize += bmtVT->dwCurrentVtableSlot;
 
@@ -3880,24 +4533,24 @@ HRESULT EEClass::AllocateMethodFieldDescs(bmtProperties* bmtProp,
     bmtVT->pNonVtable = (SLOT *) pThread->m_MarshalAlloc.Alloc(sizeof(SLOT)*bmtMetaData->cMethods);
     memset(bmtVT->pNonVtable, 0, sizeof(SLOT)*bmtMetaData->cMethods);
 
-    if (GetParentClass() != NULL)
+    if (bmtParent->pParentMethodTable != NULL)
     {
-        if (GetParentClass()->GetModule()->IsPreload())
+        if (bmtParent->pParentMethodTable->GetModule()->IsPreload())
         {
             //
             // Make sure all parent slots are fixed up before we copy the vtable,
             // since the fixup rules don't work if we copy down fixup addresses.
             //
 
-            for (int i=0; i<GetParentClass()->GetNumVtableSlots(); i++)
-                GetParentClass()->GetFixedUpSlot(i);
+            for (int i=0; i<bmtParent->pParentMethodTable->GetClass()->GetNumVtableSlots(); i++)
+                bmtParent->pParentMethodTable->GetClass()->GetFixedUpSlot(i);
         }
 
         // Copy parent's vtable into our "temp" vtable
         memcpy(
             bmtVT->pVtable,
-            GetParentClass()->GetVtable(),
-            GetParentClass()->GetNumVtableSlots() * sizeof(SLOT)
+            bmtParent->pParentMethodTable->GetVtable(),
+            bmtParent->pParentMethodTable->GetClass()->GetNumVtableSlots() * sizeof(SLOT)
         );
 
     }
@@ -4050,8 +4703,8 @@ HRESULT EEClass::InitializeFieldDescs(FieldDesc *pFieldDescList,
         dwMemberAttrs = bmtMetaData->pFieldAttrs[i];
         
         // We don't store static final primitive fields in the class layout
-        
-        if (IsFdLiteral(dwMemberAttrs))
+        // Also skip static fields for instantiated classes
+        if (IsFdLiteral(dwMemberAttrs) || (IsFdStatic(dwMemberAttrs) && bmtInternal->inst != NULL))
             continue;
         
         if(!IsFdPublic(dwMemberAttrs)) m_VMFlags |= VMFLAG_HASNONPUBLICFIELDS;
@@ -4182,13 +4835,89 @@ HRESULT EEClass::InitializeFieldDescs(FieldDesc *pFieldDescList,
                 dwLog2FieldSize = LOG2_PTRSIZE;
                 break;
             }
-            
+         
+        // Class type variable (method type variables aren't allowed in fields)
+        case ELEMENT_TYPE_VAR: 
+          if (bmtInternal->inst)
+          {
+            // Extract the index and check that it's in range
+            unsigned index = CorSigUncompressData(pFieldSig);
+
+            ElementType = bmtInternal->inst[index].GetNormCorElementType();
+            if (ElementType == ELEMENT_TYPE_VALUETYPE)
+              {
+                fIsByValue = TRUE;
+                pByValueClass = bmtInternal->inst[index].GetClass();
+                FieldDescElementType = ElementType;
+                goto GOT_VALUETYPE;
+              }
+	    //@GENERICSVER: we may be loading an open type, in which case we treat variables in the range of inst as objects
+	    else if (ElementType == ELEMENT_TYPE_VAR ||
+   		     ElementType == ELEMENT_TYPE_MVAR)
+	      { ElementType = ELEMENT_TYPE_OBJECT;
+  	        goto GOT_ELEMENT_TYPE;
+	      }
+            else goto GOT_ELEMENT_TYPE;
+          }
+          else
+          {
+	      //@GENERICS: we must be loading a generic type, so the field descriptor is present only
+              // for the purposes of reflection. Still, we go through the motions of laying out the
+              // fields so pretend that we've got a reference type here.
+              //<NICE>GENERICS: do something better with generic types, perhaps omit the field layout stage
+            // of class loading.</NICE>
+            ElementType = ELEMENT_TYPE_OBJECT;
+            goto GOT_ELEMENT_TYPE;
+          }
+          break;
+
+        case ELEMENT_TYPE_WITH:
+            //@GENERICS: this is an approximation to prevent looping in the loader
+            //<NICE>GENERICS: avoid this:
+	    // Much better would be to separate off the determination of representation (i.e. field layout) from loading itself
+            // But InitializeFieldDescs etc is so involved that I haven't done this.</NICE>
+          if (*pFieldSig == ELEMENT_TYPE_VALUETYPE) {
+	        SigPointer sigptr(pFieldSig+1);
+		    mdToken genericTok = sigptr.GetToken();
+
+            // Try to load the generic type itself
+            _ASSERTE(TypeFromToken(genericTok) == mdtTypeRef || TypeFromToken(genericTok) == mdtTypeDef);
+            NameHandle genericName(bmtInternal->pModule, genericTok);
+            TypeHandle genericType = GetClassLoader()->LoadTypeHandle(&genericName, bmtError->pThrowable);
+            if(genericType.IsNull()) {
+                IfFailRet(COR_E_TYPELOAD);
+            }
+
+            DWORD ntypars = sigptr.GetData();
+            TypeHandle *inst = (TypeHandle*) _alloca(ntypars * sizeof(TypeHandle));
+
+            for (DWORD i = 0; i < ntypars; i++)
+            {
+                inst[i] = sigptr.GetTypeHandle(bmtInternal->pModule, bmtError->pThrowable, FALSE, FALSE, TRUE, bmtInternal->inst);
+                sigptr.Skip();
+                if (inst[i].IsNull()) {
+                    IfFailRet(COR_E_TYPELOAD);
+                }
+            }
+            TypeHandle th = ClassLoader::LoadGenericInstantiation(genericType, inst, ntypars, bmtError->pThrowable);
+            if (th.IsNull()) {
+                IfFailRet(COR_E_TYPELOAD);
+            }
+
+            fIsByValue = TRUE;
+            pByValueClass = th.GetClass();
+            FieldDescElementType = th.GetNormCorElementType();
+            goto GOT_VALUETYPE;
+          }
+
+          // drop through for generic classes
+          _ASSERTE(*pFieldSig == ELEMENT_TYPE_CLASS);
+          
         case ELEMENT_TYPE_STRING:
         case ELEMENT_TYPE_SZARRAY:      // single dim, zero
         case ELEMENT_TYPE_ARRAY:        // all other arrays
         case ELEMENT_TYPE_CLASS: // objectrefs
         case ELEMENT_TYPE_OBJECT:
-        case ELEMENT_TYPE_VAR:
             {
                 dwLog2FieldSize = LOG2_PTRSIZE;
                 bCurrentFieldIsGCPointer = TRUE;
@@ -4287,7 +5016,7 @@ HRESULT EEClass::InitializeFieldDescs(FieldDesc *pFieldDescList,
                         IfFailRet(COR_E_TYPELOAD);
                     }
                 }
-
+            GOT_VALUETYPE:
                 
                 // IF it is an enum, strip it down to its underlying type
 
@@ -4864,9 +5593,10 @@ HRESULT EEClass::PlaceMembers(bmtInternalInfo* bmtInternal,
                             if(FAILED(gsig_SM_RetVoid.GetBinaryForm(&pbBinarySig, &cbBinarySig)))
                                 hr = COR_E_EXECUTIONENGINE;
                             else {
+			      // No substitutions for type parameters as the method is static
                                 if (MetaSig::CompareMethodSigs(pbBinarySig, cbBinarySig, 
-                                                               SystemDomain::SystemModule(), 
-                                                               pMemberSignature, cMemberSignature, bmtInternal->pModule)) 
+                                                               SystemDomain::SystemModule(), NULL,
+                                                               pMemberSignature, cMemberSignature, bmtInternal->pModule, NULL)) 
                                     fIsCCtor = TRUE;
                                 else
                                     hr = COR_E_TYPELOAD;
@@ -4886,6 +5616,9 @@ HRESULT EEClass::PlaceMembers(bmtInternalInfo* bmtInternal,
                         pMemberSignature = bmtInternal->pInternalImport->GetSigOfMethodDef(bmtMetaData->pMethods[i],
                                                                                            &cMemberSignature
                                                                                            );
+                        pMemberSignature = bmtInternal->pInternalImport->GetSigOfMethodDef(bmtMetaData->pMethods[i],
+                                                                                           &cMemberSignature
+                                                                                           );
                         PCCOR_SIGNATURE pbBinarySig;
                         ULONG           cbBinarySig;
                         // .ctor must return void
@@ -4900,8 +5633,8 @@ HRESULT EEClass::PlaceMembers(bmtInternalInfo* bmtInternal,
                                 hr = COR_E_EXECUTIONENGINE;
                             else {
                                 if (MetaSig::CompareMethodSigs(pbBinarySig, cbBinarySig, 
-                                                               SystemDomain::SystemModule(), 
-                                                               pMemberSignature, cMemberSignature, bmtInternal->pModule)) 
+                                                               SystemDomain::SystemModule(), NULL,
+                                                               pMemberSignature, cMemberSignature, bmtInternal->pModule, NULL)) 
                                     fIsDefaultCtor = TRUE;
                             }
                         }
@@ -5017,6 +5750,7 @@ HRESULT EEClass::PlaceMembers(bmtInternalInfo* bmtInternal,
                     EEClass *pInterface;
                     
                     pInterface = bmtInterface->pInterfaceMap[j].m_pMethodTable->GetClass();
+                    Substitution *pSubst = GetInterfaceSubst(j);
                     
                     if (CouldMethodExistInClass(pInterface, szMemberName, 0) == 0)
                         continue;
@@ -5032,9 +5766,8 @@ HRESULT EEClass::PlaceMembers(bmtInternalInfo* bmtInternal,
                 
                     DWORD slotNum = (DWORD) -1;
                     if (pInterface->InterfaceFindMethod(szMemberName,
-                                                        pMemberSignature, cMemberSignature,
-                                                        bmtInternal->pModule, &slotNum)) {
-
+                                                        pMemberSignature, cMemberSignature,                    
+                                                        bmtInternal->pModule, &slotNum, TRUE, pSubst)) {
                         // This method implements an interface - don't place it
                         fMethodImplementsInterface = TRUE;
 
@@ -5293,12 +6026,13 @@ HRESULT EEClass::PlaceMembers(bmtInternalInfo* bmtInternal,
                     MethodDesc* desc = NULL;
                     BOOL fIsMethod;
                     mdToken mdDecl = bmtMetaData->pMethodDecl[m];
+                    PCCOR_SIGNATURE declInstSig = bmtMetaData->pMethodDeclInstSig[m];
                     hr = GetDescFromMemberRef(bmtInternal->pModule,
                                               mdDecl,
-                                              m_cl,
+                                              GetCl(),
                                               (void**) &desc,
                                               &fIsMethod,
-                                              bmtError->pThrowable);
+                                              bmtError->pThrowable, bmtInternal->inst);
                     if(SUCCEEDED(hr) && desc != NULL && !TestThrowable(bmtError->pThrowable)) {
                         // We found an external member reference
                         _ASSERTE(fIsMethod);
@@ -5336,9 +6070,11 @@ HRESULT EEClass::PlaceMembers(bmtInternalInfo* bmtInternal,
                             }
                         }
                     }
+
                     bmtMethodImpl->AddMethod(pNewMD,
                                              desc,
-                                             mdDecl);
+                                             mdDecl,
+                                             declInstSig);
                 }
             }
         }
@@ -5534,6 +6270,40 @@ HRESULT EEClass::InitMethodDesc(MethodDesc *pNewMD, // This is should actually b
 
         break;
 
+    case mcInstantiated:
+        // Zero init the method desc. Should go away once all the fields are
+        // initialized manually.
+        // Initialize the typical instantiation.
+        if(Classification & mdcMethodImpl) 
+            memset(pNewMD, 0, sizeof(MI_MethodDesc));
+        else
+        {
+            memset(pNewMD, 0, sizeof(InstantiatedMethodDesc));
+            
+            // Enumerate the formal type parameters
+            HENUMInternal   hEnumTyPars;
+            hr = pIMDII->EnumInit(mdtGenericPar, tok, &hEnumTyPars);
+            
+            // Initialize the typical instantiation
+            if (!FAILED(hr)) 
+            {
+                DWORD numTyPars = pIMDII->EnumGetCount(&hEnumTyPars);
+                if (numTyPars > 0)
+                {
+                    InstantiatedMethodDesc *pNewIMD = (InstantiatedMethodDesc *) pNewMD;
+                    pNewIMD->SetupGenericMethodDefinition();
+                    hr = pNewIMD->InitTypicalMethodInstantiation(GetClassLoader()->GetLowFrequencyHeap(), numTyPars);
+                }
+            }
+        }
+
+#ifndef TOKEN_IN_PREPAD
+        pNewMD->m_dwToken = dwTempToken;
+#endif
+
+        break;
+
+
 
     default:
         _ASSERTE(!"Failed to set a method desc classification");
@@ -5642,6 +6412,7 @@ HRESULT EEClass::PlaceMethodImpls(bmtInternalInfo* bmtInternal,
                 if(pDecl->GetClass()->IsInterface()) {
                     hr = PlaceInterfaceDeclaration(pDecl,
                                                    body,
+                                                   bmtMethodImpl->GetDeclarationInstSig(pIndex),
                                                    bmtInternal,
                                                    bmtInterface,
                                                    bmtError,
@@ -5654,7 +6425,9 @@ HRESULT EEClass::PlaceMethodImpls(bmtInternalInfo* bmtInternal,
                     IfFailRet(hr);
                 }
                 else {
-                    hr = PlaceParentDeclaration(pDecl,                                                body,
+                    hr = PlaceParentDeclaration(pDecl,                                                
+                                                body,
+                                                bmtMethodImpl->GetDeclarationInstSig(pIndex),
                                                 bmtInternal,
                                                 bmtError,
                                                 bmtVT,
@@ -5786,11 +6559,12 @@ HRESULT EEClass::PlaceLocalDeclaration(mdMethodDef      mdef,
                 // a method with a body where the signatures do not match
                 if(!MetaSig::CompareMethodSigs(*ppBodySignature,
                                                *pcBodySignature,
-                                               bmtInternal->pModule,
+                                               bmtInternal->pModule, NULL,
                                                pMethodDefSignature,
                                                cMethodDefSignature,
-                                               bmtInternal->pModule))
+                                               bmtInternal->pModule, NULL))
                 {
+		    LOG((LF_CLASSLOADER, LL_INFO1000, "BADSIG in PlaceLocalDeclaration: %x\n", mdef));
                     bmtError->resIDWhy = IDS_CLASSLOAD_MI_BADSIGNATURE;
                     bmtError->dMethodDefInError = mdef; 
                     bmtError->szMethodNameForError = NULL;
@@ -5824,6 +6598,7 @@ HRESULT EEClass::PlaceLocalDeclaration(mdMethodDef      mdef,
 
 HRESULT EEClass::PlaceInterfaceDeclaration(MethodDesc*       pDecl,
                                            MethodDesc*       pImplBody,
+                                           PCCOR_SIGNATURE   declInstSig,
                                            bmtInternalInfo*  bmtInternal,
                                            bmtInterfaceInfo* bmtInterface, 
                                            bmtErrorInfo*     bmtError, 
@@ -5861,7 +6636,7 @@ HRESULT EEClass::PlaceInterfaceDeclaration(MethodDesc*       pDecl,
         pInterface = pMT->GetClass();
         
         // If this is the same interface
-        if(pInterface == declClass) 
+        if(pInterface->StripInstantiation() == declClass->StripInstantiation()) 
         {
 
             // We found an interface so no error
@@ -5960,13 +6735,15 @@ HRESULT EEClass::PlaceInterfaceDeclaration(MethodDesc*       pDecl,
             
             // If they do not match then we are trying to implement
             // a method with a body where the signatures do not match
+            Substitution subst(bmtInternal->pModule, declInstSig);
             if(!MetaSig::CompareMethodSigs(*ppBodySignature,
                                            *pcBodySignature,
-                                           bmtInternal->pModule,
+                                           bmtInternal->pModule, NULL,
                                            pDeclarationSignature,
                                            cDeclarationSignature,
-                                           pRealDesc->GetModule()))
+                                           pRealDesc->GetModule(), &subst))
             {
+	        LOG((LF_CLASSLOADER, LL_INFO1000, "BADSIG in PlaceInterfaceDeclaration: %x\n", pImplBody->GetMemberDef()));
                 bmtError->resIDWhy = IDS_CLASSLOAD_MI_BADSIGNATURE;
                 bmtError->dMethodDefInError = pImplBody->GetMemberDef(); 
                 bmtError->szMethodNameForError = NULL;
@@ -6014,6 +6791,7 @@ HRESULT EEClass::PlaceInterfaceDeclaration(MethodDesc*       pDecl,
 
 HRESULT EEClass::PlaceParentDeclaration(MethodDesc*       pDecl,
                                         MethodDesc*       pImplBody,
+                                        PCCOR_SIGNATURE   declInstSig,
                                         bmtInternalInfo*  bmtInternal,
                                         bmtErrorInfo*     bmtError, 
                                         bmtVtable*        bmtVT,
@@ -6029,7 +6807,7 @@ HRESULT EEClass::PlaceParentDeclaration(MethodDesc*       pDecl,
     EEClass* declType = pDecl->GetClass();
     EEClass* pParent = GetParentClass();
     while(pParent != NULL) {
-        if(declType == pParent) 
+        if(declType->StripInstantiation() == pParent->StripInstantiation()) 
             break;
         pParent = pParent->GetParentClass();
     }
@@ -6050,18 +6828,23 @@ HRESULT EEClass::PlaceParentDeclaration(MethodDesc*       pDecl,
     
     PCCOR_SIGNATURE pDeclarationSignature = NULL;
     DWORD           cDeclarationSignature = 0;
+
     pDecl->GetSig(&pDeclarationSignature,
                   &cDeclarationSignature);
     
     // If they do not match then we are trying to implement
     // a method with a body where the signatures do not match
+
+    Substitution declSubst(bmtInternal->pModule, declInstSig);
     if(!MetaSig::CompareMethodSigs(*ppBodySignature,
                                    *pcBodySignature,
-                                   bmtInternal->pModule,
+                                   bmtInternal->pModule, NULL,
                                    pDeclarationSignature,
                                    cDeclarationSignature,
-                                   pDecl->GetModule()))
+                                   pDecl->GetModule(),
+                                   &declSubst))
     {
+	LOG((LF_CLASSLOADER, LL_INFO1000, "BADSIG in PlaceParentDeclaration: %x\n", pImplBody->GetMemberDef()));
         bmtError->resIDWhy = IDS_CLASSLOAD_MI_BADSIGNATURE;
         bmtError->dMethodDefInError = pImplBody->GetMemberDef(); 
         bmtError->szMethodNameForError = NULL;
@@ -6275,6 +7058,7 @@ HRESULT EEClass::DuplicateValueClassSlots(bmtMetaDataInfo* bmtMetaData, bmtMethA
 //
 
 HRESULT EEClass::PlaceVtableMethods(bmtInterfaceInfo* bmtInterface, 
+                                    BuildingInterfaceInfo_t *pBuildingInterfaceList,                
                                     bmtVtable* bmtVT, 
                                     bmtMetaDataInfo* bmtMetaData, 
                                     bmtInternalInfo* bmtInternal, 
@@ -6297,6 +7081,8 @@ HRESULT EEClass::PlaceVtableMethods(bmtInterfaceInfo* bmtInterface,
         fParentInterface = FALSE;
         // The interface we are attempting to place
         pMT = bmtInterface->pInterfaceMap[bmtInterface->dwCurInterface].m_pMethodTable;
+        // Its instantiation, if present
+        Substitution* pSubst = GetInterfaceSubst(bmtInterface->dwCurInterface);
         pInterface = pMT->GetClass();
 
         if((bmtInterface->pInterfaceMap[bmtInterface->dwCurInterface].m_wFlags & 
@@ -6401,10 +7187,10 @@ HRESULT EEClass::PlaceVtableMethods(bmtInterfaceInfo* bmtInterface,
                         if (MetaSig::CompareMethodSigs(
                             pMemberSignature,
                             cMemberSignature,
-                            bmtInternal->pModule,
+                            bmtInternal->pModule, NULL,
                             pInterfaceMethodSig,
                             cInterfaceMethodSig,
-                            pInterfaceMD->GetModule()))
+                            pInterfaceMD->GetModule(), pSubst))
                         {
                             break;
                         }
@@ -6437,11 +7223,13 @@ HRESULT EEClass::PlaceVtableMethods(bmtInterfaceInfo* bmtInterface,
                         if (CouldMethodExistInClass(GetParentClass(), pszInterfaceMethodName, dwHashName))
                             pParentMD = 
                                 GetParentClass()->FindMethod(pszInterfaceMethodName,
-                                                           pInterfaceMethodSig,
-                                                           cInterfaceMethodSig,
-                                                           pInterfaceMD->GetModule()
-                                                           );
-                        
+                                                             pInterfaceMethodSig,
+                                                             cInterfaceMethodSig,
+							     pInterfaceMD->GetModule(), 
+                                                             pSubst,
+                                                             NULL, 
+                                                             TRUE, 
+                                                             GetParentSubst());    
                     }
                     // make sure we do a better back patching for these methods
                     if(pParentMD && IsMdVirtual(pParentMD->GetAttrs())) {
@@ -6634,7 +7422,7 @@ HRESULT EEClass::PlaceStaticFields(bmtVtable* bmtVT, bmtFieldPlacement* bmtFP, b
 
 HRESULT EEClass::PlaceInstanceFields(bmtFieldPlacement* bmtFP, bmtEnumMethAndFields* bmtEnumMF,
                                      bmtParentInfo* bmtParent, bmtErrorInfo *bmtError,
-                                     EEClass*** pByValueClassCache)
+                                     EEClass*** pByValueClassCache, TypeHandle *inst)
 {
     HRESULT hr = S_OK;
     DWORD i;
@@ -7140,11 +7928,136 @@ HRESULT EEClass::HandleGCForExplicitLayout(bmtGCSeries *pGCSeries)
     return S_OK;
 }
 
+//@GENERICS:
+// Given a method table for a non-generic class, fill in
+// * the exact parent, if the parent class has an instantiation
+// * exact interfaces, for interfaces with instantiations
+// * inherited per-instantiation dictionaries
+// If the type is an instantiated type then the instantiation must already be present in the
+// per-inst info.
+// This method is used by the loader when loading a new (possibly-instantiated) class,
+// and when creating a new instantiation of an existing compatible instantiation.
+HRESULT EEClass::LoadInstantiatedInfo(MethodTable *pMT, Pending *pending, OBJECTREF *pThrowable)
+{
+  HRESULT hr = S_OK;
+
+  // Don't call this method for generic types
+  _ASSERTE(!IsGenericTypeDefinition());
+
+  TypeHandle *inst = pMT->GetInstantiation();
+  Substitution *pInsts = GetBaseTypeSubstitutions();
+
+  //@GENERICS:
+  // If we need to load exact parent or interfaces then add the handle to the pending list
+  if (pInsts != NULL)
+  {
+    NameHandle *name = (NameHandle *) _alloca(sizeof(NameHandle));
+    Pending *newpending = (Pending *) _alloca(sizeof(Pending));
+
+    if (inst)
+      *name = NameHandle(GetGenericTypeDefinition(), inst);
+    else 
+      *name = NameHandle(GetModule(), GetCl());
+    *newpending = Pending(name, TypeHandle(pMT), pending);
+
+    pending = newpending;
+  }
+
+  //@GENERICS: 
+  // Fill in exact parent if it's instantiated
+  // Don't bother if we're loading a generic type as we just want the generic parent
+  if (GetParentInst())
+  {
+    IMDInternalImport* pInternalImport = GetModule()->GetMDImport();
+    mdToken crExtends;
+    pInternalImport->GetTypeDefProps(
+        GetCl(), 
+        NULL,   
+        &crExtends
+    );
+    NameHandle parentname(GetModule(), crExtends);
+    TypeHandle parent = GetModule()->GetClassLoader()->LoadTypeHandle(&parentname, pThrowable, 
+                                                           inst, NULL, pending);
+    if (parent.IsNull())
+    {
+      //@nice GENERICS: more precision please
+      IfFailRet(COR_E_TYPELOAD);
+    }
+#ifdef _DEBUG
+    char buff[200];
+    parent.GetName(buff, 200);
+    char buff2[200];
+    Generics::PrettyInstantiation(buff2, 200, GetNumGenericArgs(), inst);
+    LOG((LF_CLASSLOADER, LL_INFO1000, "GENERICS: Loaded exact parent %s from token %x with instantiation %s\n", buff, crExtends, buff2));
+#endif
+    pMT->m_pParentMethodTable = parent.AsMethodTable();
+    m_pParentClass = parent.GetClass();
+  }
+
+  //@GENERICS:
+  // Fill in exact interfaces if any are instantiated
+  if (pInsts != NULL)
+  {
+    for (DWORD i = 0; i < pMT->m_wNumInterface; i++)
+    {  
+      TypeHandle genericType = TypeHandle((*(pMT->GetInterfaceMap() + i)).m_pMethodTable);
+      if (genericType.HasInstantiation())
+          genericType = genericType.GetGenericTypeDefinition();
+      DWORD ntypars = genericType.GetNumGenericArgs();
+      if (ntypars)
+      {
+        PCCOR_SIGNATURE intInst = pInsts[i].inst;
+        _ASSERTE(intInst != NULL);
+
+        // Allocate space for the interface instantiation
+        TypeHandle *pIntInst = (TypeHandle*) _alloca(ntypars * sizeof(TypeHandle));
+
+        // Convert type signatures into type handles
+        SigPointer psig(intInst);
+        for (DWORD j = 0; j < ntypars; j++)
+        {
+          pIntInst[j] = psig.GetTypeHandle(pInsts[i].pModule, pThrowable, FALSE, FALSE, FALSE, inst, 
+                                           NULL, pending, pInsts[i].rest);
+          if (pIntInst[j].IsNull())
+          {
+            //<NICE>GENERICS: more precision please</NICE>
+            IfFailRet(COR_E_TYPELOAD);
+          }
+          psig.SkipExactlyOne();
+        }
+
+        TypeHandle exactInt = ClassLoader::LoadGenericInstantiation(genericType, pIntInst, ntypars, pThrowable, pending);
+        if (exactInt.IsNull())
+        {
+          //@nice GENERICS: more precision please
+          IfFailRet(COR_E_TYPELOAD);
+        }
+
+        pMT->m_pIMap[i].m_pMethodTable = exactInt.AsMethodTable();
+#ifdef _DEBUG
+        char buff[200];
+        exactInt.GetName(buff, 200);
+        LOG((LF_CLASSLOADER, LL_INFO1000, "GENERICS: Loaded exact interface %s\n", buff));
+#endif
+      }
+    }
+  }
+
+  // Copy down inherited dictionary pointers
+  if (pMT->m_pPerInstInfo && pMT->m_pParentMethodTable && pMT->m_pParentMethodTable->m_pPerInstInfo)
+    memcpy(pMT->m_pPerInstInfo, pMT->m_pParentMethodTable->m_pPerInstInfo, 
+                sizeof(TypeHandle*) * pMT->m_pParentMethodTable->GetClass()->GetNumDicts());
+
+  return hr;
+}
+
+
 //
 // Used by BuildMethodTable
 //
 // Setup the method table
 //
+
 
 HRESULT EEClass::SetupMethodTable(bmtVtable* bmtVT, 
                                   bmtInterfaceInfo* bmtInterface, 
@@ -7154,11 +8067,22 @@ HRESULT EEClass::SetupMethodTable(bmtVtable* bmtVT,
                                   bmtEnumMethAndFields* bmtEnumMF, 
                                   bmtErrorInfo* bmtError, 
                                   bmtMetaDataInfo* bmtMetaData, 
-                                  bmtParentInfo* bmtParent)
+                                  bmtParentInfo* bmtParent,
+                                  Pending *pending)
 {
     HRESULT hr = S_OK;
     DWORD i;
 
+
+    DWORD numDicts = GetNumDicts();
+    DWORD cbDict = 0;
+    if (bmtInternal->inst)
+    {
+      cbDict += GetNumGenericArgs() * sizeof(TypeHandle*);
+      DictionaryLayout* dictLayout = GetDictionaryLayout();
+      if (dictLayout)
+        cbDict += (1+dictLayout->numSlots) * sizeof(void*);
+    }
 
     // Now setup the method table
     // interface map is allocated along with the method table
@@ -7167,6 +8091,8 @@ HRESULT EEClass::SetupMethodTable(bmtVtable* bmtVT,
         bmtVT->dwStaticFieldBytes,
         m_wNumGCPointerSeries ? (DWORD)CGCDesc::ComputeSize(m_wNumGCPointerSeries) : 0,
         bmtInterface->dwInterfaceMapSize,
+        numDicts,       
+        cbDict,
         GetClassLoader(),
         IsInterface()
     );
@@ -7290,45 +8216,6 @@ HRESULT EEClass::SetupMethodTable(bmtVtable* bmtVT,
         m_pMethodTable->SetNativeSize(GetLayoutInfo()->GetNativeSize());
     }
 
-    // copy onto the real vtable (methods only)
-    memcpy(GetVtable(), bmtVT->pVtable, bmtVT->dwCurrentNonVtableSlot * sizeof(SLOT));
-
-    BOOL fCheckForMissingMethod = (
-         !IsAbstract() && !IsInterface());
-
-    // Propagate inheritance
-    for (i = 0; i < bmtVT->dwCurrentVtableSlot; i++)
-    {
-        // For now only propagate inheritance for method desc that are not interface MD's. 
-		// This is not sufficient but InterfaceImpl's will complete the picture.
-		MethodDesc* pMD = GetUnknownMethodDescForSlot(i);
-		if (pMD == NULL) 
-		{
-			_ASSERTE(!"Could not resolve MethodDesc Slot!");
-			IfFailRet(COR_E_TYPELOAD);
-		}
-
-		if(!pMD->IsInterface() && pMD->GetSlot() != i) 
-		{
-			GetVtable()[i] = GetVtable()[ pMD->GetSlot() ];
-            pMD = GetUnknownMethodDescForSlot(i);
-		}
-
-		if (fCheckForMissingMethod)
-		{
-			if (pMD->IsInterface() || pMD->IsAbstract())
-			{
-				bmtError->resIDWhy = IDS_CLASSLOAD_NOTIMPLEMENTED;
-				bmtError->dMethodDefInError = pMD->GetMemberDef();
-				bmtError->szMethodNameForError = pMD->GetNameOnNonArrayClass();
-				IfFailRet(COR_E_TYPELOAD);
-			}
-				// we check earlier to make certain only abstract methods have RVA != 0
-			_ASSERTE(!(pMD->GetModule()->IsPEFile() && pMD->IsIL() && pMD->GetRVA() == 0));
-		}
-	} 
-
-
 #ifdef _DEBUG
     for (i = 0; i < bmtVT->dwCurrentNonVtableSlot; i++)
     {
@@ -7371,6 +8258,99 @@ HRESULT EEClass::SetupMethodTable(bmtVtable* bmtVT,
 
     }
 
+    //@GENERICS:
+    // Fill in type parameters before looking up exact parent!
+    if (bmtInternal->inst)
+    {
+	  // Space has already been allocated for the instantiation but the parameters haven't been filled in
+      TypeHandle *pInst = m_pMethodTable->GetInstantiation();
+      
+	  // So fill them in...
+      for (DWORD i = 0; i < GetNumGenericArgs(); i++)
+        pInst[i] = bmtInternal->inst[i];     
+    }
+
+    // copy onto the real vtable (methods only)
+	//@GENERICS: Because we sometimes load an inexact parent (see ClassLoader::LoadParent) the inherited slots might 
+	// come from the wrong place and need fixing up once we know the exact parent
+    memcpy(GetVtable(), bmtVT->pVtable, bmtVT->dwCurrentNonVtableSlot * sizeof(SLOT));
+
+    BOOL fCheckForMissingMethod = 
+      !IsAbstract() && !IsInterface();
+
+    m_pMethodTable->m_pParentMethodTable = bmtParent->pParentMethodTable;
+
+    BOOL parentChanged = FALSE;
+
+    // For non-generic types we care about the exact instantiation of the parent and interfaces
+    if (!IsGenericTypeDefinition())
+    {
+      hr = LoadInstantiatedInfo(m_pMethodTable, pending, bmtError->pThrowable);
+      IfFailRet(hr);
+
+      parentChanged = bmtParent->pParentMethodTable != m_pMethodTable->m_pParentMethodTable;
+      
+      //<REVIEW>akenn: need to fix up wrongly-inherited method descriptors</REVIEW>
+      if (parentChanged)
+      {
+        for (i = 0; i < bmtVT->dwCurrentVtableSlot; i++)
+        {
+          MethodDesc* pMD = GetUnknownMethodDescForSlot(i);
+
+          // Not all method descriptors that were not created for this class
+          // are inherited and live in the same position in the parent.
+          if (pMD->GetMethodTable() != m_pMethodTable &&
+              i < m_pMethodTable->GetParentMethodTable()->GetClass()->GetNumVtableSlots())
+          {
+            GetVtable()[i] = m_pMethodTable->m_pParentMethodTable->GetVtable()[i];
+          }
+        }
+
+        bmtParent->pParentMethodTable = m_pMethodTable->m_pParentMethodTable;
+      }
+    }
+
+    // Propagate inheritance
+    for (i = 0; i < bmtVT->dwCurrentVtableSlot; i++)
+    {
+        // For now only propagate inheritance for method desc that are not interface MD's. 
+        // This is not sufficient but InterfaceImpl's will complete the picture.
+        MethodDesc* pMD = GetUnknownMethodDescForSlot(i);
+        if (pMD == NULL) 
+        {
+            _ASSERTE(!"Could not resolve MethodDesc Slot!");
+            IfFailRet(COR_E_TYPELOAD);
+        }
+
+        if(!pMD->IsInterface() && pMD->GetSlot() != i) 
+        {
+            GetVtable()[i] = GetVtable()[ pMD->GetSlot() ];
+            pMD = GetUnknownMethodDescForSlot(i);
+        }
+
+        if (fCheckForMissingMethod)
+        {
+            if (pMD->IsInterface() || pMD->IsAbstract())
+            {
+                bmtError->resIDWhy = IDS_CLASSLOAD_NOTIMPLEMENTED;
+                bmtError->dMethodDefInError = pMD->GetMemberDef();
+                bmtError->szMethodNameForError = pMD->GetNameOnNonArrayClass();
+                IfFailRet(COR_E_TYPELOAD);
+            }
+                // we check earlier to make certain only abstract methods have RVA != 0
+            _ASSERTE(!(pMD->GetModule()->IsPEFile() && pMD->IsIL() && pMD->GetRVA() == 0));
+        }
+    } 
+
+
+#ifdef _DEBUG
+    for (i = 0; i < bmtVT->dwCurrentNonVtableSlot; i++)
+    {
+        _ASSERTE(bmtVT->pVtable[i] != NULL);
+    }
+#endif
+
+    
 
     return hr;
 }
@@ -7392,7 +8372,7 @@ HRESULT EEClass::CheckForRemotingProxyAttrib(bmtInternalInfo *bmtInternal, bmtPr
         // Set the flag is the type has a non-default proxy attribute
         if (COMCustomAttribute::IsDefined(
             bmtInternal->pModule,
-            m_cl,
+            GetCl(),
             TypeHandle(CRemotingServices::GetProxyAttributeClass())))
         {
             m_VMFlags |= VMFLAG_REMOTING_PROXY_ATTRIBUTE;
@@ -7719,7 +8699,7 @@ HRESULT EEClass::SetAppDomainAgileAttribute(BOOL fForceSet)
     // See if we need agile checking in the class
     //
 
-    GetPredefinedAgility(GetModule(), m_cl,
+    GetPredefinedAgility(GetModule(), GetCl(),
                          &fAgile, &fCheckAgile);
 
     if (m_pMethodTable->HasFinalizer())
@@ -7802,13 +8782,9 @@ HRESULT EEClass::SetAppDomainAgileAttribute(BOOL fForceSet)
                     // the forced agile types listed above.
                     //
 
-                    PCCOR_SIGNATURE pSig;
-                    DWORD           cSig;
-                    pFD->GetSig(&pSig, &cSig);
-
-                    FieldSig sig(pSig, GetModule());
-                    SigPointer sigPtr = sig.GetProps();
-                    CorElementType type = sigPtr.GetElemType();
+                    MetaSig sig(pFD);
+		    CorElementType type = sig.NextArg();
+                    SigPointer sigPtr = sig.GetArgProps();
 
                     //
                     // Don't worry about strings
@@ -7950,7 +8926,7 @@ void EEClass::NotifyDebuggerLoad()
 BOOL EEClass::NotifyDebuggerAttach(AppDomain *pDomain, BOOL attaching)
 {
     return g_pDebugInterface->LoadClass(
-        this, m_cl, GetModule(), pDomain, GetAssembly()->IsSystem(), attaching);
+        this, GetCl(), GetModule(), pDomain, GetAssembly()->IsSystem(), attaching);
 }
 
 void EEClass::NotifyDebuggerDetach(AppDomain *pDomain)
@@ -7958,7 +8934,7 @@ void EEClass::NotifyDebuggerDetach(AppDomain *pDomain)
     if (!pDomain->IsDebuggerAttached())
         return;
 
-    g_pDebugInterface->UnloadClass(m_cl, GetModule(), pDomain, FALSE);
+    g_pDebugInterface->UnloadClass(GetCl(), GetModule(), pDomain, FALSE);
 }
 #endif // DEBUGGING_SUPPORTED
 
@@ -8315,7 +9291,8 @@ HRESULT EEClass::VerifyInheritanceSecurity(bmtInternalInfo* bmtInternal, bmtErro
                                     szName,
                                     pSignature,
                                     cSignature,
-                                    bmtInternal->pModule));
+                                    bmtInternal->pModule,
+				    NULL));
 #endif
                             }
                         }
@@ -8395,12 +9372,12 @@ MethodDesc* EEClass::GetMethodDescForSlot(DWORD slot)
 MethodDesc* EEClass::GetUnboxingMethodDescForValueClassMethod(MethodDesc *pMD)
 {
     _ASSERTE(IsValueClass());
-    _ASSERTE(!pMD->IsUnboxingStub());
+    _ASSERTE(!pMD->IsSpecialStub());
 
     for (int i = GetNumVtableSlots() - 1; i >= 0; i--) {
         // Get the MethodDesc for current method
         MethodDesc* pCurMethod = GetUnknownMethodDescForSlot(i);
-        if (pCurMethod && pCurMethod->IsUnboxingStub()) {
+        if (pCurMethod && pCurMethod->IsSpecialStub()) {
             if ((pCurMethod->GetMemberDef() == pMD->GetMemberDef())  &&
                 (pCurMethod->GetModule() == pMD->GetModule())) {
                 return pCurMethod;
@@ -8415,12 +9392,12 @@ MethodDesc* EEClass::GetUnboxingMethodDescForValueClassMethod(MethodDesc *pMD)
 MethodDesc* EEClass::GetMethodDescForUnboxingValueClassMethod(MethodDesc *pMD)
 {
     _ASSERTE(IsValueClass());
-    _ASSERTE(pMD->IsUnboxingStub());
+    _ASSERTE(pMD->IsSpecialStub());
 
     for (int i = m_wNumMethodSlots - 1; i >= GetNumVtableSlots(); i--) {
         // Get the MethodDesc for current method
         MethodDesc* pCurMethod = GetUnknownMethodDescForSlot(i);
-        if (pCurMethod && !pCurMethod->IsUnboxingStub()) {
+        if (pCurMethod && !pCurMethod->IsSpecialStub()) {
             if ((pCurMethod->GetMemberDef() == pMD->GetMemberDef())  &&
                 (pCurMethod->GetModule() == pMD->GetModule())) {
                 return pCurMethod;
@@ -8429,6 +9406,16 @@ MethodDesc* EEClass::GetMethodDescForUnboxingValueClassMethod(MethodDesc *pMD)
     }
 
     return NULL;
+}
+
+MethodDesc* EEClass::GetUnknownMethodDescForSlot(DWORD slot)
+{
+    _ASSERTE(slot >= 0);
+        // DO: Removed because reflection can reflect on this
+    //_ASSERTE(!IsThunking());
+
+    MethodDesc *pMD = EEClass::GetUnknownMethodDescForSlotAddress(GetFixedUpSlot(slot));
+    return pMD;
 }
 
 SLOT EEClass::GetFixedUpSlot(DWORD slot)
@@ -8441,15 +9428,6 @@ SLOT EEClass::GetFixedUpSlot(DWORD slot)
 
 
     return addr;
-}
-
-MethodDesc* EEClass::GetUnknownMethodDescForSlot(DWORD slot)
-{
-    _ASSERTE(slot >= 0);
-        // DO: Removed because reflection can reflect on this
-    //_ASSERTE(!IsThunking());
-
-    return GetUnknownMethodDescForSlotAddress(GetFixedUpSlot(slot));
 }
 
 
@@ -8583,10 +9561,12 @@ void MethodTable::InitForFinalization()
 // Release resources associated with supporting finalization
 
 
+
 //
 // Finds a method by name and signature, where scope is the scope in which the signature is defined.
 //
-MethodDesc *EEClass::FindMethod(LPCUTF8 pszName, PCCOR_SIGNATURE pSignature, DWORD cSignature, Module* pModule, MethodTable *pDefMT, BOOL bCaseSensitive, TypeHandle typeHnd)
+MethodDesc *EEClass::FindMethod(LPCUTF8 pszName, PCCOR_SIGNATURE pSignature, DWORD cSignature, Module* pModule, Substitution *pSigSubst,
+  MethodTable *pDefMT, BOOL bCaseSensitive, Substitution *pDefSubst)
 {
     signed long i;
 
@@ -8594,14 +9574,6 @@ MethodDesc *EEClass::FindMethod(LPCUTF8 pszName, PCCOR_SIGNATURE pSignature, DWO
 
     // Retrive the right comparition function to use.
     UTF8StringCompareFuncPtr StrCompFunc = bCaseSensitive ? strcmp : _stricmp;
-
-        // shared method tables (arrays) need to pass instantiation information too
-    TypeHandle  typeVarsBuff;
-    TypeHandle* typeVars = 0;
-    if (IsArrayClass() && !typeHnd.IsNull()) {
-        typeVarsBuff = typeHnd.AsTypeDesc()->GetTypeParam();
-        typeVars = &typeVarsBuff;
-    }
 
     // Statistically it's most likely for a method to be found in non-vtable portion of this class's members, then in the
     // vtable of this class's declared members, then in the inherited portion of the vtable, so we search backwards.
@@ -8643,8 +9615,8 @@ MethodDesc *EEClass::FindMethod(LPCUTF8 pszName, PCCOR_SIGNATURE pSignature, DWO
                         DWORD       cCurMethodSig;
 
                         pCurImplMD->GetSig(&pCurMethodSig, &cCurMethodSig);
-                        
-                        if (MetaSig::CompareMethodSigs(pSignature, cSignature, pModule, pCurMethodSig, cCurMethodSig, pCurImplMD->GetModule(), typeVars))
+
+                        if (MetaSig::CompareMethodSigs(pSignature, cSignature, pModule, pSigSubst, pCurMethodSig, cCurMethodSig, pCurMethod->GetModule(), pDefSubst))
                             return pCurMethod;
                     }
                 }
@@ -8659,7 +9631,7 @@ MethodDesc *EEClass::FindMethod(LPCUTF8 pszName, PCCOR_SIGNATURE pSignature, DWO
                     pCurMethod->GetSig(&pCurMethodSig, &cCurMethodSig);
 
                     // Not in vtable section, so don't worry about value classes
-                    if (MetaSig::CompareMethodSigs(pSignature, cSignature, pModule, pCurMethodSig, cCurMethodSig, pCurMethod->GetModule(), typeVars))
+                    if (MetaSig::CompareMethodSigs(pSignature, cSignature, pModule, pSigSubst, pCurMethodSig, cCurMethodSig, pCurMethod->GetModule(), pDefSubst))
                         return pCurMethod;
                 }
             }
@@ -8678,8 +9650,7 @@ MethodDesc *EEClass::FindMethod(LPCUTF8 pszName, PCCOR_SIGNATURE pSignature, DWO
 
                 pCurMethod->GetSig(&pCurMethodSig, &cCurMethodSig);
 
-                // Not in vtable section, so don't worry about value classes
-                if (MetaSig::CompareMethodSigs(pSignature, cSignature, pModule, pCurMethodSig, cCurMethodSig, pCurMethod->GetModule(), typeVars))
+                if (MetaSig::CompareMethodSigs(pSignature, cSignature, pModule, pSigSubst, pCurMethodSig, cCurMethodSig, pCurMethod->GetModule(), pDefSubst))
                     return pCurMethod;
             }
         }
@@ -8696,8 +9667,9 @@ MethodDesc *EEClass::FindMethod(LPCUTF8 pszName, PCCOR_SIGNATURE pSignature, DWO
 
     if (GetParentClass() != NULL)
     {
-        MethodDesc *md = GetParentClass()->FindMethod(pszName, pSignature, cSignature, pModule);
-        
+        Substitution subst2(GetModule(), GetParentInst(), pDefSubst);
+        MethodDesc *md = GetParentClass()->FindMethod(pszName, pSignature, cSignature, pModule, pSigSubst, NULL, TRUE, &subst2);
+
         // Don't inherit constructors from parent classes.  It is important to forbid this,
         // because the JIT needs to get the class handle from the memberRef, and when the
         // constructor is inherited, the JIT will get the class handle for the parent class
@@ -8721,7 +9693,7 @@ MethodDesc *EEClass::FindMethod(LPCUTF8 pszName, PCCOR_SIGNATURE pSignature, DWO
 // Are more optimised case if we are an interface - we know that the vtable won't be pointing to JITd code
 // EXCEPT when it's a <clinit>
 //
-MethodDesc *EEClass::InterfaceFindMethod(LPCUTF8 pszName, PCCOR_SIGNATURE pSignature, DWORD cSignature, Module* pModule, DWORD *slotNum, BOOL bCaseSensitive)
+MethodDesc *EEClass::InterfaceFindMethod(LPCUTF8 pszName, PCCOR_SIGNATURE pSignature, DWORD cSignature, Module* pModule, DWORD *slotNum, BOOL bCaseSensitive, Substitution *subst)
 {
     DWORD i;
     SLOT* s = m_pMethodTable->GetVtable();
@@ -8745,7 +9717,7 @@ MethodDesc *EEClass::InterfaceFindMethod(LPCUTF8 pszName, PCCOR_SIGNATURE pSigna
 
             pCurMethod->GetSig(&pCurMethodSig, &cCurMethodSig);
 
-            if (MetaSig::CompareMethodSigs(pSignature, cSignature, pModule, pCurMethodSig, cCurMethodSig, pCurMethod->GetModule()))
+            if (MetaSig::CompareMethodSigs(pSignature, cSignature, pModule, NULL, pCurMethodSig, cCurMethodSig, pCurMethod->GetModule(), subst))
             {
                 *slotNum = i;
                 return pCurMethod;
@@ -8767,7 +9739,7 @@ MethodDesc *EEClass::InterfaceFindMethod(LPCUTF8 pszName, PCCOR_SIGNATURE pSigna
 
             pCurMethod->GetSig(&pCurMethodSig, &cCurMethodSig);
 
-            if (MetaSig::CompareMethodSigs(pSignature, cSignature, pModule, pCurMethodSig, cCurMethodSig, pCurMethod->GetModule()))
+            if (MetaSig::CompareMethodSigs(pSignature, cSignature, pModule, NULL, pCurMethodSig, cCurMethodSig, pCurMethod->GetModule(), subst))
             {
                 *slotNum = i;
                 return pCurMethod;
@@ -8791,7 +9763,7 @@ MethodDesc *EEClass::FindMethod(LPCUTF8 pwzName, LPHARDCODEDMETASIG pwzSignature
         return NULL;
     }
 
-    return FindMethod(pwzName, pBinarySig, cbBinarySigLength, SystemDomain::SystemModule(), pDefMT, bCaseSensitive);
+    return FindMethod(pwzName, pBinarySig, cbBinarySigLength, SystemDomain::SystemModule(), NULL, pDefMT, bCaseSensitive);
 }
 
 
@@ -9109,7 +10081,7 @@ MethodDesc *EEClass::FindConstructor(PCCOR_SIGNATURE pSignature,DWORD cSignature
         _ASSERTE(pCurMethod->GetMethodTable() == this->GetMethodTable());
 
         pCurMethod->GetSig(&pCurMethodSig, &cCurMethodSig);
-        if (MetaSig::CompareMethodSigs(pSignature, cSignature, pModule, pCurMethodSig, cCurMethodSig, pCurMethod->GetModule()))
+        if (MetaSig::CompareMethodSigs(pSignature, cSignature, pModule, NULL, pCurMethodSig, cCurMethodSig, pCurMethod->GetModule(), NULL))
             return pCurMethod;
     }
 
@@ -9134,7 +10106,7 @@ EEClass *EEClass::AdjustForThunking(OBJECTREF objRef)
     {
         if(GetMethodTable()->IsTransparentProxyType())
         {
-            pClass = CTPMethodTable::GetClassBeingProxied(objRef);
+            pClass = CTPMethodTable::GetClassBeingProxied(objRef).GetClass();
         }
         else
         {
@@ -9155,7 +10127,7 @@ MethodTable *MethodTable::AdjustForThunking(OBJECTREF objRef)
     {
         if(IsTransparentProxyType())
         {
-            pMT = CTPMethodTable::GetClassBeingProxied(objRef)->GetMethodTable();
+            pMT = CTPMethodTable::GetClassBeingProxied(objRef).GetMethodTable();
         }
         else
         {
@@ -9240,11 +10212,11 @@ LPUTF8 EEClass::_GetFullyQualifiedNameForClass(LPUTF8 buf, DWORD dwBuffer)
         
         return buf;
     }
-    else if (!IsNilToken(m_cl))
+    else if (!IsNilToken(GetCl()))
     {
         LPCUTF8 szNamespace;
         LPCUTF8 szName;
-        GetMDImport()->GetNameOfTypeDef(m_cl, &szName, &szNamespace);
+        GetMDImport()->GetNameOfTypeDef(GetCl(), &szName, &szNamespace);
 
         if (FAILED(StoreFullyQualifiedName(buf, dwBuffer, szNamespace, szName)))
             return NULL;
@@ -9289,7 +10261,7 @@ LPCUTF8 EEClass::GetFullyQualifiedNameInfo(LPCUTF8 *ppszNamespace)
     else
     {   
         LPCUTF8 szName; 
-        GetMDImport()->GetNameOfTypeDef(m_cl, &szName, ppszNamespace);  
+        GetMDImport()->GetNameOfTypeDef(GetCl(), &szName, ppszNamespace);  
         return szName;  
     }   
 }
@@ -9327,7 +10299,7 @@ HRESULT EEClass::StoreFullyQualifiedName(
 //
 // Used for static analysis - therefore, "this" can be an interface
 //
-BOOL EEClass::StaticSupportsInterface(MethodTable *pInterfaceMT)
+BOOL MethodTable::StaticSupportsInterface(MethodTable *pInterfaceMT)
 {
     _ASSERTE(pInterfaceMT->GetClass()->IsInterface());
     _ASSERTE(!IsThunking());
@@ -9335,12 +10307,12 @@ BOOL EEClass::StaticSupportsInterface(MethodTable *pInterfaceMT)
     _ASSERTE(IsRestored());
 
     // Check to see if the current class is for the interface passed in.
-    if (GetMethodTable() == pInterfaceMT)
+    if (this == pInterfaceMT)
         return TRUE;
 
     // Check to see if the static class definition indicates we implement the interface.
     InterfaceInfo_t *pInterfaces = GetInterfaceMap();
-    for (WORD i = 0; i < GetMethodTable()->m_wNumInterface; i++)
+    for (WORD i = 0; i < m_wNumInterface; i++)
     {
         if (pInterfaces[i].m_pMethodTable == pInterfaceMT)
             return TRUE;
@@ -9358,7 +10330,7 @@ BOOL EEClass::SupportsInterface(OBJECTREF pObj, MethodTable* pInterfaceMT)
     _ASSERTE(IsRestored());
 
     // Check to see if the static class definition indicates we implement the interface.
-    InterfaceInfo_t* pIntf = FindInterface(pInterfaceMT);
+    InterfaceInfo_t* pIntf = pObj->GetMethodTable()->FindInterface(pInterfaceMT);
     if (pIntf != NULL)
         return TRUE;
 
@@ -9376,7 +10348,8 @@ BOOL EEClass::SupportsInterface(OBJECTREF pObj, MethodTable* pInterfaceMT)
 void EEClass::DebugRecursivelyDumpInstanceFields(LPCUTF8 pszClassName, BOOL debug)
 {
     CQuickBytes qb;
-    LPWSTR buff = (LPWSTR) qb.Alloc((MAX_CLASSNAME_LENGTH) * sizeof(WCHAR));
+    const int nLen = MAX_CLASSNAME_LENGTH + 20;
+    LPWSTR buff = debug ? (LPWSTR) qb.Alloc( nLen * sizeof(WCHAR)) : NULL;
     DWORD cParentInstanceFields;
     DWORD i;
 
@@ -9424,7 +10397,8 @@ void EEClass::DebugRecursivelyDumpInstanceFields(LPCUTF8 pszClassName, BOOL debu
 void EEClass::DebugDumpFieldLayout(LPCUTF8 pszClassName, BOOL debug)
 {
     CQuickBytes qb;
-    LPWSTR buff = (LPWSTR) qb.Alloc(MAX_CLASSNAME_LENGTH * sizeof(WCHAR));
+    const int nLen = MAX_CLASSNAME_LENGTH + 40;    
+    LPWSTR buff = debug ? (LPWSTR) qb.Alloc(nLen * sizeof(WCHAR)) : NULL;
     DWORD   i;
     DWORD   cParentInstanceFields;
 
@@ -9501,8 +10475,9 @@ void EEClass::DebugDumpFieldLayout(LPCUTF8 pszClassName, BOOL debug)
     }
 }
 
-void EEClass::DebugDumpVtable(LPCUTF8 pszClassName, BOOL debug)
+void MethodTable::DebugDumpVtable(LPCUTF8 pszClassName, BOOL debug)
 {
+    EEClass *pClass = GetClass();
     DWORD   i;
     CQuickBytes qb;
     LPWSTR buff = (LPWSTR) qb.Alloc(MAX_CLASSNAME_LENGTH * sizeof(WCHAR));
@@ -9520,9 +10495,9 @@ void EEClass::DebugDumpVtable(LPCUTF8 pszClassName, BOOL debug)
     }
 
 
-    for (i = 0; i < m_wNumMethodSlots; i++)
+    for (i = 0; i < GetTotalSlots(); i++)
     {
-        MethodDesc *pMD = GetUnknownMethodDescForSlot(i);
+        MethodDesc *pMD = GetClass()->GetUnknownMethodDescForSlot(i);
         {
             LPCUTF8      pszName = pMD->GetName((USHORT) i);
 
@@ -9537,7 +10512,7 @@ void EEClass::DebugDumpVtable(LPCUTF8 pszClassName, BOOL debug)
                          name,
                          pszName,
                          IsMdFinal(dwAttrs) ? " (final)" : "",
-                         pMD->GetAddrofCode(),
+                         pMD->IsGenericMethodDefinition() ? 0: pMD->GetAddrofCode(),
                          pMD->GetSlot()
                          );
                 WszOutputDebugString(buff);
@@ -9549,12 +10524,12 @@ void EEClass::DebugDumpVtable(LPCUTF8 pszClassName, BOOL debug)
                      pMD->GetClass()->m_szDebugClassName,
                      pszName,
                      IsMdFinal(dwAttrs) ? " (final)" : "",
-                     pMD->GetAddrofCode(),
+                                         pMD->IsGenericMethodDefinition() ? 0: pMD->GetAddrofCode(),
                      pMD->GetSlot()
                      ));
     }
         }
-        if (i == (DWORD)(GetNumVtableSlots()-1)) {
+        if (i == (DWORD)(pClass->GetNumVtableSlots()-1)) {
             if(debug) {
                 WszOutputDebugString(L"<-- vtable ends here\n");
             } else {
@@ -9564,7 +10539,7 @@ void EEClass::DebugDumpVtable(LPCUTF8 pszClassName, BOOL debug)
 
     }
 
-    if (m_wNumInterfaces > 0)
+    if (pClass->GetNumInterfaces() > 0)
     {
         if(debug) {
             WszOutputDebugString(L"Interface map:\n");
@@ -9573,28 +10548,41 @@ void EEClass::DebugDumpVtable(LPCUTF8 pszClassName, BOOL debug)
         }
         if (!IsInterface())
         {
-            for (i = 0; i < m_wNumInterfaces; i++)
+            for (i = 0; i < pClass->GetNumInterfaces(); i++)
             {
                 _ASSERTE(GetInterfaceMap()[i].m_wStartSlot != (WORD) -1);
                 
                 if(debug) {
-                    DefineFullyQualifiedNameForClass();
-                    LPCUTF8 name =  GetFullyQualifiedNameForClass(GetInterfaceMap()[i].m_pMethodTable->GetClass());  
+                  //                    DefineFullyQualifiedNameForClass();
+                    //<NICE>GENERICS: make this unbounded</NICE>
+                    char name[1024];
+                    TypeHandle ty(GetInterfaceMap()[i].m_pMethodTable);
+                    ty.GetName(name,1024);
+                    // LPCUTF8 name =  GetFullyQualifiedNameForClass(GetInterfaceMap()[i].m_pMethodTable->GetClass());  
                     swprintf(buff, 
-                             L"slot %2d %S %d\n",
+                             L"slot %2d %s %d\n",
                              GetInterfaceMap()[i].m_wStartSlot,
-                             name,
+                             name,                             
                              GetInterfaceMap()[i].m_pMethodTable->GetInterfaceMethodSlots()
                              );
                     WszOutputDebugString(buff);
                 }
                 else {
-                    LOG((LF_ALWAYS, LL_ALWAYS, 
+                    MethodTable *pMT = GetInterfaceMap()[i].m_pMethodTable;
+                    if (pMT)
+                    {
+                      char name[1024];
+                      TypeHandle ty(pMT);
+                      ty.GetName(name,1024);
+                      LOG((LF_ALWAYS, LL_ALWAYS, 
                        "slot %2d %s %d\n",
                        GetInterfaceMap()[i].m_wStartSlot,
-                       GetInterfaceMap()[i].m_pMethodTable->GetClass()->m_szDebugClassName,
+                       name,
                        GetInterfaceMap()[i].m_pMethodTable->GetInterfaceMethodSlots()
                          ));
+                    }
+                    else LOG((LF_ALWAYS, LL_ALWAYS, "slot %2d NO MT\n", GetInterfaceMap()[i].m_wStartSlot));
+
                 }
             }
         }
@@ -9610,7 +10598,8 @@ void EEClass::DebugDumpVtable(LPCUTF8 pszClassName, BOOL debug)
 void EEClass::DebugDumpGCDesc(LPCUTF8 pszClassName, BOOL debug)
 {
     CQuickBytes qb;
-    LPWSTR buff = (LPWSTR) qb.Alloc(MAX_CLASSNAME_LENGTH * sizeof(WCHAR));
+    const int nLen = MAX_CLASSNAME_LENGTH *2 + 100;        
+    LPWSTR buff = debug ? (LPWSTR) qb.Alloc(nLen * sizeof(WCHAR)) : NULL;
 
     if(debug) {
         swprintf(buff, L"GC description for '%s':\n\n", pszClassName);
@@ -9663,15 +10652,6 @@ void EEClass::DebugDumpGCDesc(LPCUTF8 pszClassName, BOOL debug)
             LOG((LF_ALWAYS, LL_ALWAYS, "\n"));
         }
     }
-}
-
-InterfaceInfo_t* EEClass::FindInterface(MethodTable *pInterface)
-{
-    // verify the interface map is valid
-    _ASSERTE(GetInterfaceMap() == m_pMethodTable->GetInterfaceMap());
-    _ASSERTE(!IsThunking());
-
-    return m_pMethodTable->FindInterface(pInterface);
 }
 
 InterfaceInfo_t* MethodTable::FindInterface(MethodTable *pInterface)
@@ -9808,7 +10788,7 @@ BOOL EEClass::CheckRestore()
         OBJECTREF pThrowable = NULL;
         GCPROTECT_BEGIN(pThrowable);
 
-        NameHandle name(GetModule(), m_cl);
+        NameHandle name(GetModule(), GetCl());
         TypeHandle th = GetClassLoader()->LoadTypeHandle(&name, &pThrowable);
         if (th.IsNull())
             COMPlusThrow(pThrowable);
@@ -9901,7 +10881,7 @@ BOOL MethodTable::CheckRunClassInit(OBJECTREF *pThrowable,
     // To find GC hole easier...
     TRIGGERSGC();
 
-    if (IsShared())
+    if (IsShared() && GetInstantiation() == NULL)
     {    
         if (pDomain==NULL)
             pDomain = SystemDomain::GetCurrentDomain();
@@ -9965,6 +10945,40 @@ OBJECTREF MethodTable::Box(void *data, BOOL mayContainRefs)
 }
 
 
+PCCOR_SIGNATURE EEClass::GetParentInst()
+{
+    return GetBaseTypeSubstitutions() == NULL ? NULL :  GetBaseTypeSubstitutions()[-1].inst;
+}
+
+Substitution* EEClass::GetParentSubst()
+{
+    return GetBaseTypeSubstitutions() == NULL ? NULL : &GetBaseTypeSubstitutions()[-1];
+}
+
+Substitution* EEClass::GetInterfaceSubst(DWORD i)
+{
+    return GetBaseTypeSubstitutions() == NULL ? NULL : &GetBaseTypeSubstitutions()[i];
+}
+
+void EEClass::InitializeTypicalInst()
+{ 
+    
+    DWORD n = GetNumGenericArgs();
+    _ASSERTE(IsGenericTypeDefinition());
+    if (n > 0)
+    {
+        LOG((LF_VERIFIER, LL_INFO1000, "GENERICSVER: Initializing typical class instantiation with type handles\n")); 
+        TypeHandle *inst = (TypeHandle *)GetClassLoader()->GetLowFrequencyHeap()->AllocMem(n * sizeof(TypeHandle));
+        for(unsigned int i = 0; i < n; i++)
+        { 
+            void *mem = (void*)GetClassLoader()->GetLowFrequencyHeap()->AllocMem(sizeof(TypeVarTypeDesc));
+            inst[i] = TypeHandle(new (mem) TypeVarTypeDesc(this,i)); 
+        }; 
+        m_pTypicalInst = inst;
+        LOG((LF_VERIFIER, LL_INFO1000, "GENERICSVER: Initialized typical class instantiation with %d type handles\n",n)); 
+    }
+}
+
 Assembly* EEClass::GetAssembly()
 {
     return GetClassLoader()->m_pAssembly;
@@ -9981,6 +10995,7 @@ BOOL EEClass::RunClassInit(DeadlockAwareLockedListElement *pEntry, OBJECTREF *pT
     BOOL fRet = FALSE;
 
     _ASSERTE(IsRestored());
+    _ASSERTE(!HasInstantiation());
 
 
     if (s_cctorSig == NULL)
@@ -9988,7 +11003,7 @@ BOOL EEClass::RunClassInit(DeadlockAwareLockedListElement *pEntry, OBJECTREF *pT
         // Allocate a metasig to use for all class constructors.
         void *tempSpace = SystemDomain::Loader()->GetHighFrequencyHeap()->AllocMem(sizeof(MetaSig));
         s_cctorSig = new (tempSpace) MetaSig(gsig_SM_RetVoid.GetBinarySig(), 
-                                             SystemDomain::SystemModule());
+                                             SystemDomain::SystemModule(),NULL,NULL);
     }
 
     // Find init method
@@ -10108,6 +11123,8 @@ BOOL EEClass::DoRunClassInit(OBJECTREF *pThrowable, AppDomain *pDomain, DomainLo
     // Have we run clinit already on this class?
     if (IsInited())
         return TRUE;
+
+    _ASSERTE(!HasInstantiation());
 
     //
     // If we're shared, see if our DLS is set up already.
@@ -10346,17 +11363,22 @@ DomainLocalClass *EEClass::GetDomainLocalClassNoLock(AppDomain *pAppDomain)
     return pLocalBlock->GetClass(GetMethodTable()->GetSharedClassIndex());
 }
 
+DWORD MethodTable::GetNumGenericArgs()
+{
+  return GetClass()->GetNumGenericArgs();
+}
+
 //==========================================================================
-// If the EEClass doesn't yet know the Exposed class that represents it via
+// If the MethodTable doesn't yet know the Exposed class that represents it via
 // Reflection, acquire that class now.  Regardless, return it to the caller.
 //==========================================================================
-OBJECTREF EEClass::GetExposedClassObject()
+OBJECTREF MethodTable::GetExposedClassObject()
 {
     THROWSCOMPLUSEXCEPTION();
     TRIGGERSGC();
 
     // We shouldnt be here if the class is __TransparentProxy
-    _ASSERTE(!CRemotingServices::IsRemotingInitialized()||this != CTPMethodTable::GetMethodTable()->GetClass());
+    _ASSERTE(!CRemotingServices::IsRemotingInitialized() || this != CTPMethodTable::GetMethodTable());
 
     if (m_ExposedClassObject == NULL) {
         // Make sure that reflection has been initialized
@@ -10367,7 +11389,7 @@ OBJECTREF EEClass::GetExposedClassObject()
 
         REFLECTCLASSBASEREF  refClass = NULL;
         GCPROTECT_BEGIN(refClass);
-        COMClass::CreateClassObjFromEEClass(this, &refClass);
+        COMClass::CreateClassObjFromTypeHandle(TypeHandle(this), &refClass);
 
         // Let all threads fight over who wins using InterlockedCompareExchange.
         // Only the winner can set m_ExposedClassObject from NULL.      
@@ -10483,6 +11505,9 @@ BOOL EEClass::PatchAggressively(MethodDesc *pMD, SLOT codeaddr)
 
     _ASSERTE(pMD->IsVirtual());
 
+	if (pMT->HasInstantiation())
+		return TRUE;
+
     // We are starting at the point in the hierarchy where the MD was introduced.  So
     // we only need to patch downwards.
     while (TRUE)
@@ -10556,13 +11581,14 @@ go_sideways:
 
 
 // if this returns E_FAIL and pThrowable is specified, it must be set
-
 HRESULT EEClass::GetDescFromMemberRef(Module *pModule, 
                                       mdMemberRef MemberRef, 
                                       mdToken mdTokenNotToLoad, 
                                       void **ppDesc,
                                       BOOL *pfIsMethod,
-                                      OBJECTREF *pThrowable)
+                                      OBJECTREF *pThrowable,
+                                      TypeHandle *classInst,
+				      TypeHandle *methodInst)
 {
     _ASSERTE(IsProtectedByGCFrame(pThrowable));
 
@@ -10684,7 +11710,7 @@ HRESULT EEClass::GetDescFromMemberRef(Module *pModule,
         pLoader = pModule->GetClassLoader();
         _ASSERTE(pLoader);
         name.SetTokenNotToLoad(mdTokenNotToLoad);
-        TypeHandle typeHnd = pLoader->LoadTypeHandle(&name, pThrowable);
+        TypeHandle typeHnd = pLoader->LoadTypeHandle(&name, pThrowable, classInst, methodInst);
         pEEClass = typeHnd.GetClass();
 
         if (pEEClass == NULL)
@@ -10704,13 +11730,33 @@ HRESULT EEClass::GetDescFromMemberRef(Module *pModule,
             }
 
             *ppDesc = (void *) pFD;
-            pReference->StoreMemberRef(MemberRef, pFD);
+            //@GENERICS: don't store FieldDescs for instantiated types or we'll get the wrong one for another instantiation!
+            if (!typeHnd.HasInstantiation())
+              pReference->StoreMemberRef(MemberRef, pFD);
         }
         else
         {
             MethodDesc *pMD;
 
-            pMD = pEEClass->FindMethod(szMember, pSig, cSig, pModule, 0, TRUE, typeHnd);
+            // For array method signatures, the caller's signature contains 
+            // "actual" types whereas the callee's signature has
+            // formals (ELEMENT_TYPE_VAR 0 wherever the element type of the
+            // array occurs). So we need to pass in a substitution
+            // built from the signature of the element type.
+            PCCOR_SIGNATURE pInst = NULL;
+            if (typeHnd.IsArray() && TypeFromToken(typeref) == mdtTypeSpec) 
+            {
+                _ASSERTE(TypeFromToken(typeref) == mdtTypeSpec);
+                ULONG cSig;
+                PCCOR_SIGNATURE pSig;         
+                pInternalImport->GetTypeSpecFromToken(typeref, &pSig, &cSig);
+                SigPointer sigptr = SigPointer(pSig);
+                CorElementType type = sigptr.GetElemType();
+                _ASSERTE(type == ELEMENT_TYPE_SZARRAY || type == ELEMENT_TYPE_ARRAY || type == ELEMENT_TYPE_VALUEARRAY);
+                pInst = sigptr.GetPtr();
+            }
+            Substitution sigSubst(pModule, pInst);              
+            pMD = pEEClass->FindMethod(szMember, pSig, cSig, pModule, NULL, 0, TRUE, &sigSubst);
 
             if (pMD == NULL)
             {
@@ -10718,8 +11764,22 @@ HRESULT EEClass::GetDescFromMemberRef(Module *pModule,
                 goto exit;
             }
 
+            _ASSERTE(!pMD->HasMethodInstantiation());
+            
             *ppDesc = (void *) pMD;
-            pReference->StoreMemberRef(MemberRef, pMD);
+
+            // @GENERICS: don't store MethodDescs for instantiated types or we'll
+            // get the wrong one for another instantiation!
+            // The same thing happens for arrays as the same MemberRef can be used
+            // for multiple array types
+            // e.g. the member ref in
+            //   call void MyList<!0>[,]::Set(int32,int32,MyList<!0>)
+            // could be used for the Set method in MyList<string>[,] and MyList<int32>[,], etc.
+            // <NICE> do use cache when memberref is closed (contains no free type
+            // parameters) as then it does identify a method-desc uniquely </NICE>
+            if (!typeHnd.HasInstantiation() && !typeHnd.IsArray()) {
+              pReference->StoreMemberRef(MemberRef, pMD);
+            }
         }
 
         hr = S_OK;
@@ -10740,9 +11800,9 @@ HRESULT EEClass::GetDescFromMemberRef(Module *pModule,
 
         // No, so do it the long way
         mdTypeDef   typeDef;
-        IMDInternalImport *pInternalImport;
+		IMDInternalImport *pInternalImport;
 
-        pInternalImport = pModule->GetMDImport();
+		pInternalImport = pModule->GetMDImport();
 
         hr = pInternalImport->GetParentToken(MemberRef, &typeDef); 
         if (FAILED(hr)) 
@@ -10754,7 +11814,11 @@ HRESULT EEClass::GetDescFromMemberRef(Module *pModule,
         
         NameHandle name(pModule, typeDef);
         name.SetTokenNotToLoad(mdTokenNotToLoad);
-        pEEClass = pLoader->LoadTypeHandle(&name, pThrowable).GetClass();
+
+        //@GENERICS: changed this to instantiate the class
+        TypeHandle th = pLoader->LoadTypeHandle(&name, pThrowable, classInst, methodInst);
+        pEEClass = th.GetClass();
+
         if (pEEClass == NULL)
         {
             hr = COR_E_TYPELOAD;
@@ -10823,7 +11887,9 @@ HRESULT EEClass::GetDescFromMemberRef(Module *pModule,
         }
 
         *ppDesc = (void *) pFD;
-        (void) pModule->StoreFieldDef(MemberRef, pFD);
+        //@GENERICS: don't store FieldDescs for instantiated types or we'll get the wrong one for another instantiation!
+        if (!pEEClass->HasInstantiation())
+          (void) pModule->StoreFieldDef(MemberRef, pFD);
 
         hr = S_OK;
     }
@@ -10858,7 +11924,7 @@ exit:
         {
             if (pSig && pModule)
             {
-                MetaSig tmp(pSig, pModule);
+                MetaSig tmp(pSig, pModule, classInst, methodInst);
                 SigFormat sf(tmp, szMember ? szMember : "?", szClassName, NULL);
                 MAKE_WIDEPTR_FROMUTF8(szwFullName, sf.GetCString());
                 CreateExceptionObject(kMissingMethodException, IDS_EE_MISSING_METHOD, szwFullName, NULL, NULL, pThrowable);
@@ -10873,12 +11939,64 @@ exitThrowable:
     return hr;
 }
 
-HRESULT EEClass::GetMethodDescFromMemberRef(Module *pModule, mdMemberRef MemberRef, MethodDesc **ppMethodDesc, OBJECTREF *pThrowable)
+HRESULT EEClass::GetMethodDescFromMemberRef(Module *pModule, mdMemberRef MemberRef, MethodDesc **ppMethodDesc, OBJECTREF *pThrowable, 
+  TypeHandle *classInst, TypeHandle *methodInst, BOOL allowInstParam)
 {
     _ASSERTE(IsProtectedByGCFrame(pThrowable));
     BOOL fIsMethod;
+
+    if (TypeFromToken(MemberRef) == mdtMethodSpec)
+    {
+        if (!g_pConfig->IsGenericsEnabled())
+          return E_FAIL;
+
+        PCCOR_SIGNATURE pSig;
+        ULONG cSig;
+        IMDInternalImport *pInternalImport = pModule->GetMDImport();
+        HRESULT hr = S_OK;
+        mdMemberRef GenericMemberRef;
+        MethodDesc *pGenericMeth;
+
+        // Get the member def/ref and instantiation signature
+        pInternalImport->GetMethodSpecProps(MemberRef, &GenericMemberRef, &pSig, &cSig);
+
+	_ASSERTE(TypeFromToken(GenericMemberRef) == mdtMethodDef || TypeFromToken(GenericMemberRef) == mdtMemberRef);
+
+        // Lookup the generic method desc
+        IfFailRet(GetDescFromMemberRef(pModule, GenericMemberRef, (void**) (&pGenericMeth), &fIsMethod, pThrowable, classInst, methodInst));
+
+        _ASSERTE(pGenericMeth->IsGenericMethodDefinition());
+
+        // Create the instantiated MethodDesc in the same node in the
+	// hierarchy as the generic MethodDesc.
+        TypeHandle owner = TypeHandle(pGenericMeth->GetMethodTable());
+
+        _ASSERTE(*pSig == IMAGE_CEE_CS_CALLCONV_INSTANTIATION);
+        pSig++;
+
+	DWORD ntypars = pGenericMeth->GetNumGenericMethodArgs();
+	_ASSERTE(*pSig == ntypars);
+        pSig++;
+
+	SigPointer sp(pSig);
+	TypeHandle *typars = (TypeHandle*) _alloca(ntypars * sizeof(TypeHandle));
+	for (DWORD i = 0; i < ntypars; i++)
+	{
+	  typars[i] = sp.GetTypeHandle(pModule, pThrowable, FALSE, FALSE, FALSE, classInst, methodInst);
+	  if (typars[i].IsNull())
+	    return E_FAIL;
+	  sp.SkipExactlyOne();
+	}
+        *ppMethodDesc = InstantiatedMethodDesc::CreateGenericInstantiation(owner.GetMethodTable(), pGenericMeth, typars, allowInstParam);
+
+        if (*ppMethodDesc == NULL)
+          return E_FAIL;
+        else 
+          return S_OK;
+    }
+
     // We did not find this in the various permutations available to methods now so use the fallback!
-    HRESULT hr = GetDescFromMemberRef(pModule, MemberRef, (void **) ppMethodDesc, &fIsMethod, pThrowable);
+    HRESULT hr = GetDescFromMemberRef(pModule, MemberRef, (void **) ppMethodDesc, &fIsMethod, pThrowable, classInst, methodInst);
     if (SUCCEEDED(hr) && !fIsMethod)
     {
         hr = E_FAIL;
@@ -10887,11 +12005,12 @@ HRESULT EEClass::GetMethodDescFromMemberRef(Module *pModule, mdMemberRef MemberR
     return hr;
 }
 
-HRESULT EEClass::GetFieldDescFromMemberRef(Module *pModule, mdMemberRef MemberRef, FieldDesc **ppFieldDesc, OBJECTREF *pThrowable)
+HRESULT EEClass::GetFieldDescFromMemberRef(Module *pModule, mdMemberRef MemberRef, FieldDesc **ppFieldDesc, OBJECTREF *pThrowable,
+  TypeHandle *classInst, TypeHandle *methodInst)
 {
     _ASSERTE(IsProtectedByGCFrame(pThrowable));
     BOOL fIsMethod;
-    HRESULT hr = GetDescFromMemberRef(pModule, MemberRef, (void **) ppFieldDesc, &fIsMethod, pThrowable);
+    HRESULT hr = GetDescFromMemberRef(pModule, MemberRef, (void **) ppFieldDesc, &fIsMethod, pThrowable, classInst, methodInst);
     if (SUCCEEDED(hr) && fIsMethod)
     {
         hr = E_FAIL;
@@ -11036,45 +12155,6 @@ void EEClass::Unload()
 {
     LOG((LF_APPDOMAIN, LL_INFO100, "EEClass::Unload %8.8x, MethodTable %8.8x, %s\n", this, m_pMethodTable, m_szDebugClassName));
 
-}
-
-/**************************************************************************/
-// returns true if 'this' delegate is structurally equivalent to 'toDelegate'
-// delegagate.  For example if
-//      delegate Object delegate1(String)
-//      delegate String delegate2(Object)
-// then
-//      delegate2->CanCastTo(delegate1)
-//
-// note that the return type can be any subclass (covariant) 
-// but the args need to be superclasses (contra-variant)
-    
-BOOL DelegateEEClass::CanCastTo(DelegateEEClass* toDelegate) {
-
-    MetaSig fromSig(m_pInvokeMethod->GetSig(), m_pInvokeMethod ->GetModule());
-    MetaSig toSig(toDelegate->m_pInvokeMethod->GetSig(), toDelegate->m_pInvokeMethod ->GetModule());
-
-    unsigned numArgs = fromSig.NumFixedArgs();
-    if (numArgs != toSig.NumFixedArgs() ||  
-        fromSig.GetCallingConventionInfo() != toSig.GetCallingConventionInfo())
-        return false;
-
-    TypeHandle fromType = fromSig.GetRetTypeHandle();
-    TypeHandle toType = toSig.GetRetTypeHandle();
-
-    if (fromType.IsNull() || toType.IsNull() || !fromType.CanCastTo(toType))
-        return(false);
-
-    while (numArgs > 0) {
-        fromSig.NextArg();
-        toSig.NextArg();
-        fromType = fromSig.GetTypeHandle();
-        toType = toSig.GetTypeHandle();
-        if (fromType.IsNull() || toType.IsNull() || !toType.CanCastTo(fromType))
-            return(false);
-        --numArgs;
-    }
-    return(true);
 }
 
 struct TempEnumValue
@@ -11405,6 +12485,7 @@ void TypeHandle::CheckRestore()
 
 OBJECTREF TypeHandle::CreateClassObj()
 {
+    THROWSCOMPLUSEXCEPTION();
     OBJECTREF o;
 
     switch(GetNormCorElementType()) {
@@ -11418,13 +12499,13 @@ OBJECTREF TypeHandle::CreateClassObj()
     case ELEMENT_TYPE_TYPEDBYREF: 
     {
         EEClass* cls = COMMember::g_pInvokeUtil->GetAnyRef();
-        o = cls->GetExposedClassObject();
+        o = cls->GetMethodTable()->GetExposedClassObject();
     } 
     break;
 
     // for this release a function pointer is mapped into an IntPtr. This result in a loss of information. Fix next release
     case ELEMENT_TYPE_FNPTR:
-        o = TheIntPtrClass()->GetClass()->GetExposedClassObject();
+        o = TheIntPtrClass()->GetExposedClassObject();
         break;
 
     default:
@@ -11432,11 +12513,11 @@ OBJECTREF TypeHandle::CreateClassObj()
             _ASSERTE(!"Bad Type");
             o = NULL;
         }
-        EEClass* cls = AsClass();
         // We never create the Type object for the transparent proxy...
-        if (cls->GetMethodTable()->IsTransparentProxyType())
-            return 0;
-        o = cls->GetExposedClassObject();
+        if (AsMethodTable()->IsTransparentProxyType())
+            o = NULL;
+        else 
+            o = AsMethodTable()->GetExposedClassObject();
         break;
     }
     

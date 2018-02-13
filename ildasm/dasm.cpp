@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -105,6 +110,7 @@ BOOL                    g_fHidePrivScope = TRUE;
 
 extern BOOL             g_fQuoteAllNames; // declared in formatType.cpp, init to FALSE
 BOOL		        g_fOnUnicode;
+BOOL                g_fForwardDecl=FALSE;
 
 char                    g_szAsmCodeIndent[MAX_MEMBER_LENGTH];
 char                    g_szNamespace[MAX_MEMBER_LENGTH];
@@ -780,13 +786,13 @@ void DumpCustomAttribute(mdCustomAttribute tkCA, void *GUICookie, bool bWithOwne
 						szptr+=sprintf(szptr,"field ");
 					else
 						szptr+=sprintf(szptr,"method ");
-					PrettyPrintMemberRef(szString,tkOwner,g_pImport,GUICookie);
+					PrettyPrintMemberRef(szString,tkOwner,NULL,0,g_pImport,GUICookie);
 				}
 				break;
 
 			case mdtMethodDef:
 				szptr += sprintf(szptr, "method ");
-				PrettyPrintMethodDef(szString,tkOwner,g_pImport,GUICookie);
+				PrettyPrintMethodDef(szString,tkOwner,NULL,0,g_pImport,GUICookie);
 				break;
 
 			default :
@@ -812,11 +818,11 @@ void DumpCustomAttribute(mdCustomAttribute tkCA, void *GUICookie, bool bWithOwne
             break;
 
         case mdtMemberRef:
-            PrettyPrintMemberRef(szString,tkType,g_pImport,GUICookie);
+            PrettyPrintMemberRef(szString,tkType,NULL,0,g_pImport,GUICookie);
             break;
 
         case mdtMethodDef:
-            PrettyPrintMethodDef(szString,tkType,g_pImport,GUICookie);
+            PrettyPrintMethodDef(szString,tkType,NULL,0,g_pImport,GUICookie);
             break;
 
         default :
@@ -1094,12 +1100,12 @@ void PrettyPrintMethodSig(char* szString, unsigned* puStringLen, CQuickBytes* pq
 					strcat(pszTailSig,pszOffset+1);
 					pszOffset = strstr(pszTailSig,newbuff);
 				}
-				int i, j, k, indent = (int) (pszOffset - pszTailSig + strlen(buff) + 2);
+				size_t i, j, k, l, indent = pszOffset - pszTailSig + strlen(buff) + 2;
 				char chAfterComma;
 				char *pComma = pszTailSig+strlen(buff), *pch;
                 while((pComma = strchr(pComma,',')))
 				{
-					for(pch = pszTailSig, i=0, j = 0, k=0; pch < pComma; pch++)
+					for(pch = pszTailSig, i=0, j = 0, k=0, l=0; pch < pComma; pch++)
 					{
 						if(*pch == '\'') j=1-j;
 						else if(*pch == '\"') k=1-k;
@@ -1107,10 +1113,12 @@ void PrettyPrintMethodSig(char* szString, unsigned* puStringLen, CQuickBytes* pq
 						{
 								if(*pch == '[') i++;
 								else if(*pch == ']') i--;
+								else if(*pch == '<') l++;
+								else if(*pch == '>') l--;
 						}
 					}
 					pComma++; 
-					if((i==0)&&(j==0)&&(k==0))// no brackets/quotes or all opened/closed
+					if((i==0)&&(j==0)&&(k==0)&&(l==0))// no brackets/quotes or all opened/closed
 					{
 						chAfterComma = *pComma;
 						*pComma = 0;
@@ -1133,7 +1141,7 @@ void PrettyPrintMethodSig(char* szString, unsigned* puStringLen, CQuickBytes* pq
 		}
 		else // it's for GUI, don't split it into several lines
 		{
-			ULONG L = (ULONG) strlen(szString);
+			size_t L = strlen(szString);
 			if(L < 2048)
 			{
 				L = 2048-L;
@@ -1162,6 +1170,52 @@ BOOL DisassembleWrapper(IMDInternalImport *pImport, BYTE *ILHeader,
 
     return fRet;
 }
+
+// Pretty-print formal type parameters for a class or method
+char *DumpGenericPars(char* szptr, mdToken tok)
+{
+    WCHAR wzArgName[1024];
+    ULONG chName;
+    mdToken tkBound;
+
+    DWORD           NumTyPars;
+    mdGenericPar    tkTyPar;
+    HCORENUM        hEnumTyPar = NULL;
+
+    if (FAILED(g_pPubImport->EnumGenericPars(&hEnumTyPar, tok, &tkTyPar, 1, &NumTyPars)))
+      return NULL;
+
+    if (NumTyPars > 0)
+    {      
+      *szptr++ = '<';
+      while (NumTyPars != 0)
+      {
+        g_pPubImport->GetGenericParProps(tkTyPar, NULL, NULL, NULL, NULL, &tkBound, wzArgName, 1024, &chName);
+        *szptr = 0;
+        if (!IsNilToken(tkBound))
+	{
+	  CQuickBytes out;
+	  szptr += sprintf(szptr,"(%s) ", PrettyPrintClass(&out,tkBound,g_pImport));
+	}
+	if (chName) 
+        { 
+          WCHAR *pw = &wzArgName[0];
+          do {} while((*szptr++ = (char)(*pw++)));
+          szptr--;
+        }
+
+        if (FAILED(g_pPubImport->EnumGenericPars(&hEnumTyPar, tok, &tkTyPar, 1, &NumTyPars)))
+          return NULL;
+        if (NumTyPars != 0)
+          *szptr++ = ',';
+      }
+
+      *szptr++ = '>';
+    }
+    *szptr = 0;
+    return szptr;
+}
+
 BOOL DumpMethod(mdToken FuncToken, const char *pszClassName, DWORD dwEntryPointToken,void *GUICookie,BOOL DumpBody)
 {
     const char      *pszMemberName;//[MAX_MEMBER_LENGTH];
@@ -1282,6 +1336,16 @@ BOOL DumpMethod(mdToken FuncToken, const char *pszClassName, DWORD dwEntryPointT
 		buff = new char[strlen(psz)+1];
 		strcpy(buff,psz);
 	}
+
+    static char typarbuff[8192];
+
+    strcpy(typarbuff, buff);
+
+    DumpGenericPars(typarbuff+strlen(typarbuff), FuncToken);
+    delete [] buff;
+    buff = new char[strlen(typarbuff)+1];
+    strcpy(buff, typarbuff);
+
     qbMemberSig.ReSize(0);
     // Get the argument names, if any
     strcpy(szArgPrefix,(g_fThisIsInstanceMethod ? "A1": "A0"));
@@ -1821,11 +1885,11 @@ BOOL DumpEvent(mdToken FuncToken, const char *pszClassName, DWORD dwClassAttrs, 
             else if(IsMsOther(rAssoc[i].m_dwSemantics))     szptr+=sprintf(szptr,"%s.other ",g_szAsmCodeIndent);
 
             if (TypeFromToken(rAssoc[i].m_memberdef) == mdtMethodDef)
-                PrettyPrintMethodDef(szString,rAssoc[i].m_memberdef,g_pImport,GUICookie);
+                PrettyPrintMethodDef(szString,rAssoc[i].m_memberdef,NULL,0,g_pImport,GUICookie);
             else
             {
                 _ASSERTE(TypeFromToken(rAssoc[i].m_memberdef) == mdtMemberRef);
-                PrettyPrintMemberRef(szString,rAssoc[i].m_memberdef,g_pImport,GUICookie);
+                PrettyPrintMemberRef(szString,rAssoc[i].m_memberdef,NULL,0,g_pImport,GUICookie);
             }
             printLine(GUICookie,szString);
         }
@@ -1943,11 +2007,11 @@ BOOL DumpProp(mdToken FuncToken, const char *pszClassName, DWORD dwClassAttrs, v
 				else if(IsMsOther(rAssoc[i].m_dwSemantics))     szptr+=sprintf(szptr,"%s.other ",g_szAsmCodeIndent);
 				if(g_fDumpTokens) szptr+=sprintf(szptr,"/*%08X*/ ",rAssoc[i].m_memberdef);
 				if (TypeFromToken(rAssoc[i].m_memberdef) == mdtMethodDef)
-					PrettyPrintMethodDef(szString,rAssoc[i].m_memberdef,g_pImport,GUICookie);
+					PrettyPrintMethodDef(szString,rAssoc[i].m_memberdef,NULL,0,g_pImport,GUICookie);
 				else
 				{
 					_ASSERTE(TypeFromToken(rAssoc[i].m_memberdef) == mdtMemberRef);
-					PrettyPrintMemberRef(szString,rAssoc[i].m_memberdef,g_pImport,GUICookie);
+					PrettyPrintMemberRef(szString,rAssoc[i].m_memberdef,NULL,0,g_pImport,GUICookie);
 				}
 				printLine(GUICookie,szString);
 			}
@@ -2201,6 +2265,11 @@ BOOL DumpClass(mdTypeDef cl, DWORD dwEntryPointToken, void* GUICookie, ULONG Wha
 	if (IsTdRTSpecialName(dwClassAttrs))            szptr+=sprintf(szptr,"rtspecialname ");
 
     szptr+=sprintf(szptr,"%s", ProperName(pszClassName));
+
+    szptr = DumpGenericPars(szptr, cl);
+    if (szptr == NULL)
+      return FALSE;
+
 	printLine(GUICookie,szString);
 	if (!IsNilToken(crExtends))
 	{
@@ -2326,11 +2395,11 @@ BOOL DumpClass(mdTypeDef cl, DWORD dwEntryPointToken, void* GUICookie, ULONG Wha
 				}
 				szptr+=sprintf(szptr,"%s with ",ProperName((char*)pszMemberName));
 				if (TypeFromToken((*g_pmi_list)[i].tkBody) == mdtMethodDef)
-					PrettyPrintMethodDef(szString,(*g_pmi_list)[i].tkBody,g_pImport,GUICookie);
+					PrettyPrintMethodDef(szString,(*g_pmi_list)[i].tkBody,NULL,0,g_pImport,GUICookie);
 				else
 				{
 					_ASSERTE(TypeFromToken((*g_pmi_list)[i].tkBody) == mdtMemberRef);
-					PrettyPrintMemberRef(szString,(*g_pmi_list)[i].tkBody,g_pImport,GUICookie);
+					PrettyPrintMemberRef(szString,(*g_pmi_list)[i].tkBody,NULL,0,g_pImport,GUICookie);
 				}
 				printLine(GUICookie,szString);
 			}
@@ -3988,8 +4057,7 @@ void DumpMetaInfo(char* pszFileName, char* pszObjFileName, void* GUICookie)
 				pwzObjFileName = new WCHAR[L];
 				memset(pwzObjFileName,0,sizeof(WCHAR)*L);
 				WszMultiByteToWideChar(CP_UTF8,0,pszObjFileName,-1,pwzObjFileName,L);
-			}
-            DisplayFile(pwzFileName, true, g_ulMetaInfoFilter, pwzObjFileName, DumpMI);
+			}            DisplayFile(pwzFileName, true, g_ulMetaInfoFilter, pwzObjFileName, DumpMI);
             g_pDisp->Release();
 			g_pDisp = NULL;
 		    if (pwzObjFileName) delete pwzObjFileName;

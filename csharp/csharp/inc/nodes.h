@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -94,6 +99,9 @@ enum NODEFLAGS
 
     // 'new' flags
     NF_NEW_STACKALLOC       = 0x0001,       // NEWNODE contains a 'stackalloc' expression
+ 
+	// constraint flags
+    NF_CONSTRAINTNEWABLE    = 0x0001,       // NK_CONSTRAINT is default constructor - 'new()'
 
     // MEMBER flags (EX -- stored in BASENODE::other)
     NFEX_CTOR_BASE          = 0x01,
@@ -211,12 +219,14 @@ struct BASENODE
     PROPERTYNODE    *asANYPROPERTY ();
     FIELDNODE       *asANYFIELD ();
     MEMBERNODE      *asANYMEMBER ();
+	NAMENODE        *asANYNAME ();
 
     // Handy functions
     BOOL    InGroup (DWORD dwGroups) { return (m_rgNodeGroups[kind] & dwGroups) != 0; }
     NAMENODE *LastNameOfDottedName();
     long    GetGlyph ();
     long    GetOperatorToken (long iOp);
+    BOOL    IsAnyName() { return kind == NK_NAME || kind == NK_GENERICNAME; }
 
     // Name and key construction methods (OLD, OBSOLETE)
     /*
@@ -273,16 +283,34 @@ DECLARE_NODE (NAME, BASE)
 END_NODE()
 
 ////////////////////////////////////////////////////////////////////////////////
+// GENERICNAMENODE
+
+DECLARE_NODE (GENERICNAME, NAME)
+    BASENODE        *pParams;       // Parameters to qualified type name, only used for fully qualified names in 
+                                    // explicit impls, e.g. System.Collections.IEnumerator<Object>.GetEnumerator()
+END_NODE()
+
+////////////////////////////////////////////////////////////////////////////////
 // CLASSNODE -- class/struct
 
 DECLARE_NODE (CLASS, BASE)
     BASENODE        *pAttr;         // Attributes
     NAMENODE        *pName;         // Name of class
     BASENODE        *pBases;        // List of base class/interfaces
+    BASENODE        *pTypeParams;       // List of type parameters
+	BASENODE        *pConstraints;  // List of Constraints on type parameters
     MEMBERNODE      *pMembers;      // List of members
     long            iOpen;          // Open curly
     long            iClose;         // Close curly
     NAME            *pKey;          // Key
+END_NODE()
+
+////////////////////////////////////////////////////////////////////////////////
+// CONSTRAINTNODE -- type parameter
+
+DECLARE_NODE (CONSTRAINT, BASE)
+    NAMENODE        *pName;         // Name of type variable
+    TYPENODE        *pType;         // Functionality supported by bound
 END_NODE()
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -293,6 +321,8 @@ DECLARE_NODE (DELEGATE, BASE)
     TYPENODE        *pType;         // Return type
     NAMENODE        *pName;         // Name
     BASENODE        *pParms;        // Parameters
+    BASENODE        *pTypeParams;   // Type parameters and their bounds
+	BASENODE        *pConstraints;  // List of Constraints on type parameters
     long            iSemi;          // Semicolon position
     NAME            *pKey;          // Key
 END_NODE()
@@ -333,6 +363,7 @@ DECLARE_NODE (METHOD, MEMBER)
         OPERATOR        iOp;        // (NK_OPERATOR only -- overloaded operator)
         BASENODE        *pCtorArgs; // (NK_CTOR only -- arg list to base (NF_CTOR_BASE) or this (NF_CTOR_THIS))
     };
+    BASENODE        *pConstraints;  // List of Constraints on type parameters
     BASENODE        *pParms;        // Parameter list
     long            iOpen;          // Token index of open curly/semicolon
     BLOCKNODE       *pBody;         // Method body (if parsed)
@@ -391,11 +422,11 @@ END_NODE()
 DECLARE_NODE (TYPE, BASE)
     union
     {
-        BYTE        iType;          // (flags & NF_TYPEMASK) == NF_TYPE_PREDEFINED
-        BASENODE    *pName;         // (flags & NF_TYPEMASK) == NF_TYPE_NAMED
-        TYPENODE    *pElementType;  // (flags & NF_TYPEMASK) == NF_TYPE_ARRAY or NF_TYPE_POINTER
+        BYTE        iType;          // (TYPE_KIND)other == TK_PREDEFINED
+        BASENODE    *pName;         // (TYPE_KIND)other == TK_NAMED
+        TYPENODE    *pElementType;  // (TYPE_KIND)other == TK_ARRAY or TK_POINTER
     };
-    int             iDims;          // Number of dimensions (-1 == unknown, i.e. [?])
+    int             iDims;      // (TYPE_KIND)other == TK_ARRAY, Number of dimensions (-1 == unknown, i.e. [?])
 END_NODE()
 
 
@@ -607,13 +638,21 @@ __forceinline MEMBERNODE * BASENODE::asANYMEMBER ()
     return static_cast<MEMBERNODE *> (this);
 }
 
+__forceinline NAMENODE * BASENODE::asANYNAME ()
+{
+    ASSERT(this == NULL || this->IsAnyName());
+    return static_cast<NAMENODE *> (this);
+}
+
 __forceinline NAMENODE *BASENODE::LastNameOfDottedName()
 {
-    ASSERT(this->kind == NK_NAME || this->kind == NK_DOT);
+    ASSERT(this->kind == NK_NAME || this->kind == NK_GENERICNAME || this->kind == NK_DOT);
     if (this->kind == NK_NAME)
         return this->asNAME();
+	else if (this->kind == NK_GENERICNAME)
+        return this->asGENERICNAME();
     else
-        return this->asDOT()->p2->asNAME();
+        return this->asDOT()->p2->asANYNAME();
 }
 
 __forceinline BASENODE *BASENODE::GetParent () 
@@ -673,7 +712,7 @@ public:
             while (pNode->kind == NK_DOT)
                 pNode = pNode->asDOT()->p1;
         }
-        m_pCurNode = pNode->asNAME();
+        m_pCurNode = pNode->asANYNAME();
     }
 
     NAMENODE    *Next ()
@@ -693,11 +732,11 @@ public:
         BINOPNODE   *pParent = m_pCurNode->pParent->asDOT();        // Must be a dot; otherwise we couldn't get here
 
         if (pParent->p1 == m_pCurNode)
-            m_pCurNode = pParent->p2->asNAME();                     // Switch from left-side to right-side
+            m_pCurNode = pParent->p2->asANYNAME();                     // Switch from left-side to right-side
         else if (pParent == m_pRootNode)
             m_pCurNode = NULL;                                      // Last name in chain
         else
-            m_pCurNode = pParent->pParent->asDOT()->p2->asNAME();   // Next name is right side of grandparent
+            m_pCurNode = pParent->pParent->asDOT()->p2->asANYNAME();   // Next name is right side of grandparent
         return pRet;
     }
 

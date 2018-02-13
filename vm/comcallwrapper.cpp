@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -78,7 +83,7 @@ static MethodDesc* GetInvokeMemberMD()
         MethodDesc *pMD = g_Mscorlib.GetMethod(METHOD__CLASS__INVOKE_MEMBER);
 
         // Ensure that the value types in the signature are loaded.
-        MetaSig::EnsureSigValueTypesLoaded(pMD->GetSig(), pMD->GetModule());
+        MetaSig::EnsureSigValueTypesLoaded(pMD);
 
         // Cache the method desc.
         s_pInvokeMemberMD = pMD;
@@ -88,9 +93,9 @@ static MethodDesc* GetInvokeMemberMD()
     return s_pInvokeMemberMD;
 }
 
-static OBJECTREF GetReflectionObject(EEClass* pClass)
+static OBJECTREF GetReflectionObject(MethodTable* pMT)
 {
-    return pClass->GetExposedClassObject();
+    return pMT->GetExposedClassObject();
 }
 
 static OBJECTHANDLE s_hndOleAutBinder;
@@ -164,14 +169,12 @@ VOID ComCallWrapper::InvokeByNameCallback(LPVOID ptr)
     // Invoke using IReflect::InvokeMember
     //
 
-    EEClass *pClass = gc.Target->GetClass();
-
     // Retrieve the method descriptor that will be called on.
     MethodDesc *pMD = GetInvokeMemberMD();
 
     // Prepare the arguments that will be passed to Invoke.
     ARG_SLOT Args[] = {
-            ObjToArgSlot(GetReflectionObject(pClass)), // IReflect
+            ObjToArgSlot(GetReflectionObject(gc.Target->GetMethodTable())), // IReflect
             ObjToArgSlot(gc.MemberName),    // name
             (ARG_SLOT) args->BindingFlags,  // invokeAttr
             ObjToArgSlot(GetOleAutBinder()),// binder

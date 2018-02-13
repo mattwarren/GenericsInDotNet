@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -52,7 +57,7 @@ EXPR * FUNCBREC::bindAttributeValue(PARENTSYM *parent, BASENODE * tree)
     return val;
 }
 
-EXPR * FUNCBREC::bindNamedAttributeValue(PARENTSYM *parent, AGGSYM *attributeClass, ATTRNODE * attr)
+EXPR * FUNCBREC::bindNamedAttributeValue(PARENTSYM *parent, TYPESYM *attributeType, ATTRNODE * attr)
 {
     //
     // bind name to public non-readonly field or property
@@ -63,8 +68,8 @@ EXPR * FUNCBREC::bindNamedAttributeValue(PARENTSYM *parent, AGGSYM *attributeCla
     MEMBVARSYM * field = NULL;
     PROPSYM * property = NULL;
     TYPESYM * type = NULL;
-    AGGSYM *classToSearch = attributeClass;
-    while (NULL != (sym = compiler()->clsDeclRec.findNextAccessibleName(name, classToSearch, pParent, sym, false, true))) {
+    TYPESYM *typeToSearch = attributeType;
+    while (NULL != (sym = compiler()->clsDeclRec.findNextAccessibleName(name, &typeToSearch, pParent, sym, false, true))) {
         if (sym->kind == SK_MEMBVARSYM) {
             if (sym->asMEMBVARSYM()->isReadOnly || sym->asMEMBVARSYM()->isStatic || sym->asMEMBVARSYM()->isConst) {
                 if (!badSym) {
@@ -100,7 +105,6 @@ EXPR * FUNCBREC::bindNamedAttributeValue(PARENTSYM *parent, AGGSYM *attributeCla
             }
         }
 
-        classToSearch = sym->parent->asAGGSYM();
     }
 
     if (!field && !property) {
@@ -112,9 +116,9 @@ EXPR * FUNCBREC::bindNamedAttributeValue(PARENTSYM *parent, AGGSYM *attributeCla
                     || (badSym->kind == SK_PROPSYM && !compiler()->clsDeclRec.isAttributeType(badSym->asPROPSYM()->retType)))) {
             // bad type
             compiler()->clsDeclRec.errorNameRefStrSymbol(attr->pName, parent, compiler()->ErrSym(badSym), badSym, ERR_BadNamedAttributeArgumentType);
-        } else if (!badSym && !(badSym = compiler()->clsDeclRec.findNextName(name, classToSearch, sym))) {
+        } else if (!badSym && !(badSym = compiler()->clsDeclRec.findNextName(name, &typeToSearch, sym))) {
             // name not found
-            compiler()->clsDeclRec.errorNameRefStr(attr->pName, parent, compiler()->ErrSym(attributeClass), ERR_NameNotInContext);
+            compiler()->clsDeclRec.errorNameRefStr(attr->pName, parent, compiler()->ErrSym(attributeType), ERR_NameNotInContext);
         } else if (badSym->kind == SK_PROPSYM && (!badSym->asPROPSYM()->methSet && !(badSym->asPROPSYM()->parseTree && badSym->asPROPSYM()->parseTree->asANYPROPERTY()->pSet))) {
             // read only property
             compiler()->clsDeclRec.errorStrFile(
@@ -158,7 +162,7 @@ EXPR * FUNCBREC::bindNamedAttributeValue(PARENTSYM *parent, AGGSYM *attributeCla
     return newExprBinop(attr, EK_ASSG, op1->type, op1, value);
 }
 
-EXPR * FUNCBREC::bindAttrArgs(PARENTSYM *parent, AGGSYM *attributeClass, ATTRNODE * attr, EXPR **namedArgs)
+EXPR * FUNCBREC::bindAttrArgs(PARENTSYM *parent, TYPESYM *attributeType, ATTRNODE * attr, EXPR **namedArgs)
 {
     EXPR *rval = NULL;
     EXPR ** prval = &rval;
@@ -182,7 +186,7 @@ EXPR * FUNCBREC::bindAttrArgs(PARENTSYM *parent, AGGSYM *attributeClass, ATTRNOD
                 }
             ENDLOOP
 
-            EXPR * item = bindNamedAttributeValue(parent, attributeClass, argNode);
+            EXPR * item = bindNamedAttributeValue(parent, attributeType, argNode);
             if (item) {
                 newList(item, &namedArgs);
             }
@@ -272,7 +276,7 @@ EXPR * FUNCBREC::bindAttribute(PARENTSYM *parent, ATTRNODE * attr, EXPR **namedA
     return rval;
 }
 
-EXPRCALL *FUNCBREC::bindAttribute(PARENTSYM * context, AGGSYM * attributeClass, ATTRNODE * attribute, EXPR ** namedArgs)
+EXPRCALL *FUNCBREC::bindAttribute(PARENTSYM * context, TYPESYM * attributeType, ATTRNODE * attribute, EXPR ** namedArgs)
 {
     SETINPUTFILE(context->getInputFile());
 
@@ -289,11 +293,11 @@ EXPRCALL *FUNCBREC::bindAttribute(PARENTSYM * context, AGGSYM * attributeClass, 
     pOuterScope = NULL;
 
     *namedArgs = NULL;
-    EXPR * args = bindAttrArgs(context, attributeClass, attribute, namedArgs);
+    EXPR * args = bindAttrArgs(context, attributeType, attribute, namedArgs);
     if (args && !args->isOK()) {
         return NULL;
     }
-    EXPRCALL *call = createConstructorCall(attribute, attributeClass, NULL, args, true)->asCALL();
+    EXPRCALL *call = createConstructorCall(attribute, attributeType, NULL, args, true)->asCALL();
     if (!call->method) {
         call = NULL;
     }
@@ -582,13 +586,8 @@ EXPR * FUNCBREC::bindSkipVerifyNamedArgs()
 
 //-----------------------------------------------------------------------------
 
-BOOL CLSDREC::isAttributeClass(TYPESYM *type)
+BOOL CLSDREC::isAttributeClass(AGGSYM *cls)
 {
-    if (type->kind != SK_AGGSYM) {
-        return false;
-    }
-
-    AGGSYM *cls = type->asAGGSYM();
     compiler()->symmgr.DeclareType(cls);
     return (cls->isAttribute != 0);
 }
@@ -601,12 +600,13 @@ bool CLSDREC::isAttributeType(TYPESYM *type)
     compiler()->symmgr.DeclareType(type);
 
     switch (type->kind) {
+	case SK_INSTAGGSYM:
     case SK_AGGSYM:
-        if (type->asAGGSYM()->isEnum) {
+        if (type->underlyingAggregate()->isEnum) {
             return true;
         }
-        else if (type->asAGGSYM()->isPredefined) {
-            switch (type->asAGGSYM()->iPredef) {
+        else if (type->underlyingAggregate()->isPredefined) {
+            switch (type->underlyingAggregate()->iPredef) {
 
             case PT_BYTE:
             case PT_SHORT:
@@ -687,7 +687,11 @@ static unsigned EstimateEncodedSize(TYPESYM *type, COMPILER *compiler)
         return 1 + EstimateEncodedSize(type->asARRAYSYM()->elementType(), compiler);
         break;
 
-    case SK_AGGSYM:
+	case SK_INSTAGGSYM:
+		ASSERT("not yet complete - SK_INSTAGGSYM");
+		break;
+
+	case SK_AGGSYM:
         if (type->asAGGSYM()->isEnum) {
             return 1 + EstimateTypeNameLength(type, compiler);
         }
@@ -725,7 +729,7 @@ ATTRBIND::ATTRBIND(COMPILER *compiler, bool haveAttributeUsage) :
     sym(0),
     ek((CorAttributeTargets)0),
     context(0),
-    attributeClass(0),
+    attributeType(0),
     customAttributeList(0),
     haveAttributeUsage(haveAttributeUsage),
     compiler(compiler)
@@ -945,7 +949,12 @@ static BYTE *StoreEncodedType(BYTE *buffer, BYTE *bufferEnd, TYPESYM *type, COMP
         buffer += 1;
         return StoreEncodedType(buffer, bufferEnd, type->asARRAYSYM()->elementType(), compiler);
 
-    case SK_AGGSYM:
+	case SK_INSTAGGSYM:
+		ASSERT("not yet complete - SK_INSTAGGSYM"); // GENERICS: TODO
+		return buffer;
+		break;
+
+	case SK_AGGSYM:
 
         if (type->asAGGSYM()->isEnum) {
             *buffer = SERIALIZATION_TYPE_ENUM;
@@ -985,10 +994,10 @@ void ATTRBIND::Compile(BASENODE *attributes)
 }
 
 
-void ATTRBIND::CompileSynthetizedAttribute(AGGSYM * attributeClass, EXPR* ctorExpression, EXPR * namedArguments)
+void ATTRBIND::CompileSynthetizedAttribute(TYPESYM * attributeType, EXPR* ctorExpression, EXPR * namedArguments)
 {
 
-    this->attributeClass = attributeClass;
+    this->attributeType = attributeType;
     this->ctorExpression = ctorExpression;
     this->namedArguments = namedArguments;
 
@@ -1004,7 +1013,7 @@ void ATTRBIND::CompileSingleAttribute(ATTRNODE *attr)
 
     if (attr) {
 
-        attributeClass      = NULL;
+        attributeType      = NULL;
         ctorExpression      = NULL;
         namedArguments      = NULL;
 
@@ -1026,21 +1035,21 @@ void ATTRBIND::CompileSingleAttribute(ATTRNODE *attr)
                 return;
             }
 
-            attributeClass = type->asAGGSYM();
-            if (attributeClass->isAbstract) {
+            attributeType = type;
+            if (attributeType->underlyingAggregate()->isAbstract) {
                 errorNameRef(name, context, ERR_AbstractAttributeClass);
             }
 
             //
             // map from the attribute class back to a possible predefined attribute
             //
-            PREDEFATTR pa = attributeClass->getPredefAttr();
+            PREDEFATTR pa = type->getPredefAttr();
             if (pa != PA_COUNT) {
                 predefinedAttribute = compiler->symmgr.GetPredefAttr(pa);
             }
         }
     } else {
-        ASSERT(attributeClass && ctorExpression);
+        ASSERT(attributeType && ctorExpression);
     }
 
     //
@@ -1053,7 +1062,7 @@ void ATTRBIND::CompileSingleAttribute(ATTRNODE *attr)
 
 bool ATTRBIND::BindAttribute(ATTRNODE *attr)
 {
-    if (attributeClass) {
+    if (attributeType) {
         return BindClassAttribute(attr);
     } else {
         ASSERT(predefinedAttribute);
@@ -1089,16 +1098,16 @@ bool ATTRBIND::BindClassAttribute(ATTRNODE *attr)
 
     if (attr) {
 
-        if (!compiler->clsDeclRec.isAttributeClass(attributeClass)) {
-            compiler->clsDeclRec.errorFileSymbol(attr->pName, context->getInputFile(), ERR_NotAnAttributeClass, attributeClass);
+        if (!compiler->clsDeclRec.isAttributeClass(attributeType->underlyingAggregate())) {
+            compiler->clsDeclRec.errorFileSymbol(attr->pName, context->getInputFile(), ERR_NotAnAttributeClass, attributeType->underlyingAggregate());
             return false;
         }
 
         //
         // do we have an attribute class which can be applied to this symbol
         //
-        if (haveAttributeUsage && !(attributeClass->attributeClass & ek)) {
-            if (ek == catMethod && !wcscmp(attributeClass->name->text, L"MarshalAsAttribute")) {
+        if (haveAttributeUsage && !(attributeType->underlyingAggregate()->attributeClass & ek)) {
+            if (ek == catMethod && !wcscmp(attributeType->underlyingAggregate()->name->text, L"MarshalAsAttribute")) {
                 errorStrStrFile(attr, context->getInputFile(), ERR_FeatureDeprecated, L"MarshalAs attribute on method", L"return : location override with MarshalAs attribute");
                 return false;
             }
@@ -1109,11 +1118,11 @@ bool ATTRBIND::BindClassAttribute(ATTRNODE *attr)
         //
         // check for duplicate user defined attribute
         //
-        if (haveAttributeUsage && !attributeClass->isMultipleAttribute) {
+        if (haveAttributeUsage && !attributeType->underlyingAggregate()->isMultipleAttribute) {
             SYMLIST **customAttributeListTail = &customAttributeList;
             SYMLIST * list = customAttributeList;
             while (list) {
-                if (list->sym == attributeClass) {
+                if (list->sym == attributeType) {
                     compiler->clsDeclRec.errorNameRef(attr->pName, context, ERR_DuplicateAttribute);
                     return false;
                 }
@@ -1124,14 +1133,14 @@ bool ATTRBIND::BindClassAttribute(ATTRNODE *attr)
             //
             // not found, add it to our list of attributes for this symbol
             //
-            compiler->symmgr.AddToLocalSymList(attributeClass, &customAttributeListTail);
+            compiler->symmgr.AddToLocalSymList(attributeType, &customAttributeListTail);
         }
 
         //
         // bind ctor args
         //
         namedArgs = NULL;
-        call = compiler->funcBRec.bindAttribute(context, attributeClass, attr, &namedArgs);
+        call = compiler->funcBRec.bindAttribute(context, attributeType, attr, &namedArgs);
 
     } else {
 
@@ -1279,7 +1288,7 @@ bool ATTRBIND::verifyAttributeArg(EXPR *arg, unsigned &totalSize)
     unsigned size = 0;
 REDO:
     switch (type->kind) {
-    case SK_AGGSYM:
+	case SK_AGGSYM:
     {
         AGGSYM *cls = type->asAGGSYM();
         if (cls->isEnum) {
@@ -1532,8 +1541,8 @@ void ATTRBIND::errorBadSymbolKind(BASENODE *tree)
     // get valid targets
     //
     CorAttributeTargets validTargets;
-    if (this->attributeClass) {
-        validTargets = this->attributeClass->attributeClass;
+    if (this->attributeType) {
+        validTargets = this->attributeType->underlyingAggregate()->attributeClass;
     } else {
         validTargets = targetsByPredefAttr[this->predefinedAttribute->attr];
     }
@@ -1575,7 +1584,11 @@ BYTE * ATTRBIND::addAttributeArg(EXPR *arg, BYTE* buffer, BYTE* bufferEnd)
     unsigned int iPredef;
 
     switch (type->kind) {
-    case SK_AGGSYM:
+	case SK_INSTAGGSYM:
+		ASSERT("not yet complete - SK_INSTAGGSYM");
+		break;
+
+	case SK_AGGSYM:
     {
         AGGSYM *cls = type->asAGGSYM();
         if (cls->isEnum) {
@@ -1868,7 +1881,7 @@ AGGATTRBIND::AGGATTRBIND(COMPILER *compiler, AGGSYM *cls, AGGINFO *info, NAME * 
 
 void AGGATTRBIND::VerifyAndEmitClassAttribute(ATTRNODE *attr)
 {
-    if (attributeClass->isPredefType(PT_DEFAULTMEMBER) && defaultMemberName) {
+    if (attributeType->underlyingAggregate()->isPredefType(PT_DEFAULTMEMBER) && defaultMemberName) {
         errorFile(attr->pName, cls->getInputFile(), ERR_DefaultMemberOnIndexedType);
     } else {
         ATTRBIND::VerifyAndEmitClassAttribute(attr);
@@ -1898,7 +1911,6 @@ void AGGATTRBIND::VerifyAndEmitPredefinedAttribute(ATTRNODE *attr)
         info->isComimport = true;
         cls->isComImport = true;
         if (cls->isClass) {
-            // this is a wrapper for a  COM classic coclass
 
             // can only have a compiler generated constructor
             METHSYM *ctor = compiler->symmgr.LookupGlobalSym(GetPredefName(PN_CTOR), cls, MASK_METHSYM)->asMETHSYM();
@@ -2318,6 +2330,12 @@ void CONDITIONALATTRBIND::VerifyAndEmitPredefinedAttribute(ATTRNODE *attr)
     } else if (!attr->pArgs) {
         errorNameRef(name, method->getClass(), ERR_TooFewArgumentsToAttribute);
     } else {
+        // conditional method cannot have out parameters
+        for (int i = 0; i < method->cParams; i += 1) {
+            if (method->params[i]->kind == SK_PARAMMODSYM && method->params[i]->asPARAMMODSYM()->isOut) {
+                errorStrFile(attr, method->getInputFile(), ERR_ConditionalWithOutParam, compiler->ErrSym(method));
+            }
+        }
         //
         // validate arguments ...
         //
@@ -2962,7 +2980,7 @@ void GLOBALATTRBIND::VerifyAndEmitPredefinedAttribute(ATTRNODE *attr)
     // predefined attribute which is not valid on assemblies or modules -- if
     // it doesn't have an attribute class, it's invalid.
     //
-    if (! attributeClass)
+    if (! attributeType)
         errorBadSymbolKind(name);
     else {
         if (predefinedAttribute->attr == PA_CLSCOMPLIANT && globalAttribute->getElementKind() == catModule && compiler->BuildAssembly())

@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -407,6 +412,7 @@ public:
     static const mdToken mdtImplementation[3];
     static const mdToken mdtCustomAttributeType[5];
     static const mdToken mdtResolutionScope[4];
+        static const mdToken mdtTypeOrMethodDef[2];
 
 protected:
     CMiniMdSchema   m_Schema;           // data header.
@@ -909,6 +915,20 @@ public:
     _GETLIST(TypeDef,MethodList,Method);    // RID getMethodListOfTypeDef(TypeDefRec *pRec);
     mdToken _GETCDTKN(TypeDef,Extends,mdtTypeDefOrRef); // mdToken getExtendsOfTypeDef(TypeDefRec *pRec);
 
+	RID getGenericParsForTypeDef(RID rid, RID *pEnd=0)
+	{ 
+		return SearchTableForMultipleRows(TBL_GenericPar, 
+							_COLDEF(GenericPar,Owner),
+							encodeToken(rid, mdtTypeDef, mdtTypeOrMethodDef, lengthof(mdtTypeOrMethodDef)),
+							pEnd);
+	}
+	RID getGenericParsForMethodDef(RID rid, RID *pEnd=0)
+	{ 
+		return SearchTableForMultipleRows(TBL_GenericPar, 
+							_COLDEF(GenericPar,Owner),
+							encodeToken(rid, mdtMethodDef, mdtTypeOrMethodDef, lengthof(mdtTypeOrMethodDef)),
+							pEnd);
+	}
     RID getInterfaceImplsForTypeDef(RID rid, RID *pEnd=0)
     {
         return SearchTableForMultipleRows(TBL_InterfaceImpl,
@@ -1125,6 +1145,17 @@ public:
         return _COLDEF(Method,Name).m_cbColumn;
     }
 
+    // GenericParRec
+    USHORT _GETFLD(GenericPar,Number);
+    USHORT _GETFLD(GenericPar,Flags);
+    mdToken _GETCDTKN(GenericPar,Owner,mdtTypeOrMethodDef);
+    mdToken _GETCDTKN(GenericPar,Constraint,mdtTypeDefOrRef);
+    mdToken _GETCDTKN(GenericPar,Kind,mdtTypeDefOrRef);
+    LPCUTF8 _GETSTR(GenericPar,Name);
+
+    // MethodSpecRec
+    mdToken _GETCDTKN(MethodSpec,Method,mdtMethodDefOrRef);
+    PCCOR_SIGNATURE _GETSIGBLOB(MethodSpec,Instantiation);
 };
 
 

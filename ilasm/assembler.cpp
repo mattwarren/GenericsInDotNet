@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -18,9 +23,6 @@
 #include "nvpair.h"
 
 #define FAIL_UNLESS(x, y) if (!(x)) { report->error y; return; }
-
-extern bool OnErrGo;
-extern unsigned int g_uCodePage;
 
 /**************************************************************************/
 void Assembler::StartNameSpace(char* name)
@@ -65,33 +67,38 @@ void	Assembler::ClearImplList(void)
 	while(m_nImplList) m_crImplList[--m_nImplList] = mdTypeRefNil;
 }
 /**************************************************************************/
-void	Assembler::AddToImplList(char *name)
+void	Assembler::AddToImplList(mdToken tk)
 {
-	if(m_nImplList >= m_nImplListSize - 1)
+	if(m_nImplList+1 >= m_nImplListSize)
 	{
-		mdTypeRef	*ptr = new mdTypeRef[m_nImplListSize + MAX_INTERFACES_IMPLEMENTED];
+		mdToken	*ptr = new mdToken[m_nImplListSize + MAX_INTERFACES_IMPLEMENTED];
 		if(ptr == NULL) 
 		{
 			report->error("Failed to reallocate Impl List from %d to %d bytes\n",
-				m_nImplListSize,m_nImplListSize+MAX_INTERFACES_IMPLEMENTED);
+				m_nImplListSize*sizeof(mdToken),
+                (m_nImplListSize+MAX_INTERFACES_IMPLEMENTED)*sizeof(mdToken));
 			return;
 		}
-		memcpy(ptr,m_crImplList,m_nImplList*sizeof(mdTypeRef));
+		memcpy(ptr,m_crImplList,m_nImplList*sizeof(mdToken));
 		delete m_crImplList;
 		m_crImplList = ptr;
 		m_nImplListSize += MAX_INTERFACES_IMPLEMENTED;
 	}
-	if((m_crImplList[m_nImplList] = ResolveClassRef(name,NULL))!=mdTokenNil) m_nImplList++;
-	else	report->error("Unable to resolve interface reference '%s'\n",name);
+	m_crImplList[m_nImplList++] = tk;
 	m_crImplList[m_nImplList] = mdTypeRefNil;
 }
+
+void	Assembler::ClearBoundList(void)
+{
+	m_TyParList = NULL;
+}
 /**************************************************************************/
-// Convert a class name into a class ref (mdTypeRef).
-// Assume the scope and namespace are the same as in the Assembler object.
-mdToken Assembler::ResolveClassRef(const char *pszFullClassName, Class** ppClass)
+
+mdToken Assembler::ResolveClassRef(mdToken tkResScope, char *pszFullClassName, Class** ppClass)
 {
 	Class *pClass = NULL;
-	mdToken tkRet;
+	mdToken tkRet = mdTokenNil;
+    mdToken *ptkSpecial = NULL;
 
 	if(pszFullClassName == NULL) return mdTokenNil;
 	if (m_fInitialisedMetaData == FALSE)
@@ -103,228 +110,126 @@ mdToken Assembler::ResolveClassRef(const char *pszFullClassName, Class** ppClass
 			return mdTokenNil;
 		}
 	}
-    if((pClass = FindClass(pszFullClassName)))
-	{
-		if(ppClass) *ppClass = pClass;
-		tkRet = pClass->m_cl;
-	}
+        if((m_tkSysObject==0)&&(strcmp(pszFullClassName,"System.Object")==0)) ptkSpecial = &m_tkSysObject;
+        else if((m_tkSysString==0)&&(strcmp(pszFullClassName,"System.String")==0)) ptkSpecial = &m_tkSysString;
+        else if((m_tkSysValue==0)&&(strcmp(pszFullClassName,"System.ValueType")==0)) ptkSpecial = &m_tkSysValue;
+        else if((m_tkSysEnum==0)&&(strcmp(pszFullClassName,"System.Enum")==0)) ptkSpecial = &m_tkSysEnum;
+    
+        if(ptkSpecial && (!m_fIsMscorlib)) tkResScope = GetAsmRef("mscorlib");
+        if(tkResScope == 1)
+        {
+             if((pClass = FindCreateClass(pszFullClassName))) tkRet = pClass->m_cl;
+        }
 	else
 	{
-		BinStr* pbs = new BinStr();
-		pbs->appendInt8(ELEMENT_TYPE_NAME);
-		strcpy((char*)(pbs->getBuff((unsigned int)strlen(pszFullClassName)+1)),pszFullClassName);
-		if(!ResolveTypeSpecToRef(pbs,&tkRet)) tkRet = mdTokenNil;
-		if(ppClass) *ppClass = NULL;
-		delete pbs;
-	}
+	    tkRet = MakeTypeRef(tkResScope, pszFullClassName);
+        pClass = NULL;
+    }
+    if(ppClass) *ppClass = pClass;
+    if(ptkSpecial) *ptkSpecial = tkRet;
 	return tkRet;
 }
 
 /**************************************************************************/
-BOOL Assembler::ResolveTypeSpec(BinStr* typeSpec, mdTypeRef *pcr, Class** ppClass)
+mdToken Assembler::ResolveTypeSpec(BinStr* typeSpec)
 {
-	if (typeSpec->ptr()[0] == ELEMENT_TYPE_NAME) {
-		char* pszName = (char*) &typeSpec->ptr()[1];
-		*pcr = ResolveClassRef(pszName, ppClass);
-		return TRUE;
-	}
-	else {
-		if(ppClass) *ppClass = NULL;
-		return(SUCCEEDED(m_pEmitter->GetTokenFromTypeSpec(typeSpec->ptr(), typeSpec->length(), pcr)));
-	}
+    mdToken tk;
+    if(FAILED(m_pEmitter->GetTokenFromTypeSpec(typeSpec->ptr(), typeSpec->length(), &tk))) tk = mdTokenNil;
+    return tk;
 }
 
 /**************************************************************************/
-BOOL Assembler::ResolveTypeSpecToRef(BinStr* typeSpec, mdTypeRef *pcr)
+mdToken Assembler::GetAsmRef(char* szName)
 {
-	if((typeSpec == NULL) || (pcr == NULL)) return FALSE;
-	if (typeSpec->ptr()[0] == ELEMENT_TYPE_NAME) 
-	{
-		char *pszFullClassName = (char*) &typeSpec->ptr()[1];
-		mdToken	tkResScope = 1; // default: this module
-		mdToken tkRet;
-		char* pc;
-		char* pszNamespace;
-		char* pszClassName;
-		char* szFullName;
-
-		if((pszFullClassName == NULL)||(*pszFullClassName == 0)
-			|| (strcmp(pszFullClassName,"<Module>")==0))
-		{
-			*pcr = mdTokenNil;
-			return TRUE;
-		}
-		if (m_fInitialisedMetaData == FALSE)
-		{
-			if (FAILED(InitMetaData())) // impl. see WRITER.CPP
-			{
-				_ASSERTE(0);
-				*pcr = mdTokenNil;
-				return FALSE;
-			}
-		}
-        if((szFullName = new char[strlen(pszFullClassName)+1])) strcpy(szFullName,pszFullClassName);
-		else
-		{
-			report->error("\nOut of memory!\n");
-			_ASSERTE(0);
-			*pcr = mdTokenNil;
-			return FALSE;
-		}
-        if((pc = strrchr(szFullName,'/'))) // scope: enclosing class
-		{
-			*pc = 0;
-			pc++;
-//			tkResScope = ResolveClassRef(szFullName,NULL); // can't do that - must have TypeRef
-
-			BinStr* pbs = new BinStr();
-			pbs->appendInt8(ELEMENT_TYPE_NAME);
-			strcpy((char*)(pbs->getBuff((unsigned int)strlen(szFullName)+1)),szFullName);
-			if(!ResolveTypeSpecToRef(pbs,&tkResScope)) tkResScope = mdTokenNil;
-			delete pbs;
-		}
-        else if((pc = strrchr(szFullName,'^'))) //scope: AssemblyRef or Assembly
-		{
-			*pc = 0;
-			pc++;
-			tkResScope = m_pManifest->GetAsmRefTokByName(szFullName);
-			if(RidFromToken(tkResScope)==0)
-			{
-				// if it's mscorlib or self, emit the AssemblyRef
-				if((strcmp(szFullName,"mscorlib")==0)||RidFromToken(m_pManifest->GetAsmTokByName(szFullName)))
-				{
-					char *sz = new char[strlen(szFullName)+1];
-					if(sz)
-					{
-					strcpy(sz,szFullName);
-					m_pManifest->StartAssembly(sz,NULL,0,TRUE);
-					m_pManifest->EndAssembly();
-					tkResScope = m_pManifest->GetAsmRefTokByName(szFullName);
-				}
-				else
-						report->error("\nOut of memory!\n");
-				}
-				else
-					report->error("Undefined assembly ref '%s'\n",szFullName);
-			}
-		}
-        else if((pc = strrchr(szFullName,'~'))) //scope: ModuleRef
-		{
-			*pc = 0;
-			pc++;
-			if(!strcmp(szFullName,m_szScopeName)) 
-					tkResScope = 1; // scope is "this module"
-			else
-			{
-				ImportDescriptor*	pID;	
-				int i = 0;
-				tkResScope = mdModuleRefNil;
-                while((pID=m_ImportList.PEEK(i++)))
-				{
-					if(!strcmp(pID->szDllName,szFullName))
-					{
-						tkResScope = pID->mrDll;
-						break;
-					}
-				}
-				//tkResScope = m_pManifest->GetModuleRefTokByName(szFullName);
-				if(RidFromToken(tkResScope)==0)
-					report->error("Undefined module ref '%s'\n",szFullName);
-			}
-		}
-		else pc = szFullName;
-		if(*pc)
-		{
-			pszNamespace = pc;
-			pszClassName = strrchr(pszNamespace,'.');
-			if(pszClassName)
-			{
-				*pszClassName = 0;
-				pszClassName++;
-			}
-			else
-			{
-				pszClassName = pszNamespace;
-				pszNamespace = NULL;
-			}
-
-			WCHAR* wzClassName = new WCHAR[strlen(pszClassName)+1];
-			WCHAR* wzNamespace = NULL;
-			LPWSTR fullName = wzClassName;
-			if(wzClassName)
-			{
-			// convert name from ASCII to widechar
-			WszMultiByteToWideChar(g_uCodePage,0,pszClassName,-1,wzClassName,(int)strlen(pszClassName)+1);
-			}
-			else
-			{
-				report->error("\nOut of memory!\n");
-				return FALSE;
-			}
-			if(pszNamespace && strlen(pszNamespace))
-			{
-                if((wzNamespace = new WCHAR[strlen(pszNamespace)+strlen(pszClassName)+2]))
-				{
-				WszMultiByteToWideChar(g_uCodePage,0,pszNamespace,-1,wzNamespace,(int)strlen(pszNamespace)+1);
-				wcscat(wzNamespace,L".");
-				wcscat(wzNamespace,wzClassName);
-				fullName = wzNamespace;
-			}
-				else
-				{
-					report->error("\nOut of memory!\n");
-					return FALSE;
-				}
-			}
-			if(FAILED(m_pEmitter->DefineTypeRefByName(tkResScope, fullName, &tkRet))) tkRet = mdTokenNil;
-			else if((strchr(pszFullClassName,'~') == NULL)
-					&&(strchr(pszFullClassName,'^') == NULL)) // do it for 'local' type refs only
-			{
-				LocalTypeRefDescr*	pLTRD=NULL;
-				int j;
-                for(j=0; (pLTRD = m_LocalTypeRefDList.PEEK(j)); j++) 
-				{
-					if(pLTRD->m_tok == tkRet) break;
-				}
-				if(pLTRD == NULL)  // no such TypeRef recorded yet, record it
-				{
-                    if((pLTRD = new LocalTypeRefDescr(pszFullClassName)))
-					{
-					pLTRD->m_tok = tkRet;
-					m_LocalTypeRefDList.PUSH(pLTRD);
-				}
-					else
-					{
-						report->error("\nOut of memory!\n");
-						return FALSE;
-					}
-				}
-			}
-			delete szFullName;
-			delete [] wzClassName;
-			if(wzNamespace) delete [] wzNamespace;
-		}
-		else tkRet = tkResScope; // works for globals with AssemblyRef or ModuleRef
-		return ((*pcr = tkRet) != mdTokenNil);
-	}
-	else 
-	{
-		return(SUCCEEDED(m_pEmitter->GetTokenFromTypeSpec(typeSpec->ptr(), typeSpec->length(), pcr)));
-	}
+    mdToken tkResScope = 0;
+    if(strcmp(szName,"*")==0) tkResScope = mdTokenNil;
+    else
+    {
+        tkResScope = m_pManifest->GetAsmRefTokByName(szName);
+        if(RidFromToken(tkResScope)==0)
+        {
+            // if it's mscorlib or self, emit the AssemblyRef
+            if((strcmp(szName,"mscorlib")==0)||RidFromToken(m_pManifest->GetAsmTokByName(szName)))
+            {
+                char *sz = new char[strlen(szName)+1];
+                if(sz)
+                {
+                    strcpy(sz,szName);
+                    AsmManAssembly *pAsmRef = m_pManifest->m_pCurAsmRef;
+                    m_pManifest->StartAssembly(sz,NULL,0,TRUE);
+                    m_pManifest->EndAssembly();
+                    tkResScope = m_pManifest->GetAsmRefTokByName(szName);
+                    m_pManifest->m_pCurAsmRef = pAsmRef;
+                }
+                else
+                    report->error("\nOut of memory!\n");
+            }
+            else
+                report->error("Undefined assembly ref '%s'\n",szName);
+        }
+    }
+    return tkResScope;
 }
-
 /**************************************************************************/
-static char* WithoutResScope(char* szFullName)
+mdToken Assembler::GetModRef(char* szName)
 {
-	char *pc;
-    if((pc = strrchr(szFullName,'^'))) pc++;
-    else if((pc = strrchr(szFullName,'~'))) pc++;
-	else pc = szFullName;
-	return pc;
+    mdToken tkResScope = 0;
+    if(!strcmp(szName,m_szScopeName)) 
+            tkResScope = 1; // scope is "this module"
+    else
+    {
+        ImportDescriptor*	pID;	
+        int i = 0;
+        tkResScope = mdModuleRefNil;
+        DWORD L = (DWORD)strlen(szName);
+        while((pID=m_ImportList.PEEK(i++)))
+        {
+            if((pID->dwDllName==L)&& !strcmp(pID->szDllName,szName))
+            {
+                tkResScope = pID->mrDll;
+                break;
+            }
+        }
+        if(RidFromToken(tkResScope)==0)
+            report->error("Undefined module ref '%s'\n",szName);
+    }
+    return tkResScope;
+}
+/**************************************************************************/
+mdToken Assembler::MakeTypeRef(mdToken tkResScope, char* pszFullClassName)
+{
+    mdToken tkRet = mdTokenNil;
+    if(pszFullClassName && *pszFullClassName)
+    {
+        char* pc = strrchr(pszFullClassName,NESTING_SEP);
+        if(pc != NULL) // scope: enclosing class
+        {
+            DWORD L = (DWORD)(pc-pszFullClassName);
+            char* szScopeName = new char[L+1];
+            if(szScopeName != NULL)
+            {
+                memcpy(szScopeName,pszFullClassName,L);
+                szScopeName[L] = 0;
+                tkResScope = MakeTypeRef(tkResScope,szScopeName);
+                delete [] szScopeName;
+            }
+            else
+                report->error("\nOut of memory!\n");
+        }
+        else
+            pc = pszFullClassName;
+        if(*pc)
+        {
+            // convert name to widechar
+            WszMultiByteToWideChar(g_uCodePage,0,pc,-1,wzUniBuf,dwUniBuf);
+            if(FAILED(m_pEmitter->DefineTypeRefByName(tkResScope, wzUniBuf, &tkRet))) tkRet = mdTokenNil;
+        }
+    }
+	return tkRet;
 }
 /**************************************************************************/
 
-void Assembler::StartClass(char* name, DWORD attr)
+void Assembler::StartClass(char* name, DWORD attr, TyParList *typars)
 {
 	mdTypeRef	crExtends = mdTypeRefNil;
 	Class *pEnclosingClass = m_pCurClass;
@@ -332,81 +237,69 @@ void Assembler::StartClass(char* name, DWORD attr)
 	BOOL bIsEnum = FALSE;
 	BOOL bIsValueType = FALSE;
 
+    m_TyParList = typars;
+
 	if (m_pCurMethod != NULL)
 	{ 
-        report->error(".class can not be used when in a method scope\n");
+        report->error("Class cannot be declared within a method scope\n");
 	}
-	if(strlen(m_szExtendsClause))
-	{
-		// has a superclass
-		if(IsTdInterface(attr)) report->error("Base class in interface\n");
-		bIsEnum = (strcmp(WithoutResScope(m_szExtendsClause),"System.Enum")==0);
-		bIsValueType = (strcmp(WithoutResScope(m_szExtendsClause),"System.ValueType")==0);
-		if(bIsValueType)
-		{
-			bIsValueType = !((strcmp(name,"Enum")==0)
-				&& (strcmp(m_szFullNS,"System")==0)
-				&& m_pManifest && m_pManifest->m_pAssembly && m_pManifest->m_pAssembly->szName
-				&& (strcmp(m_pManifest->m_pAssembly->szName,"mscorlib")==0));
-		}
-		if ((crExtends = ResolveClassRef(m_szExtendsClause, NULL)) == mdTypeRefNil)
-		{
-			report->error("Unable to resolve class reference to parent class 's'\n",m_szExtendsClause);
-		}
-	}
-	else
-	{
-		bIsEnum = ((attr & 0x40000000) != 0);
-		bIsValueType = ((attr & 0x80000000) != 0);
-	}
-	attr &= 0x3FFFFFFF;
 	if(pEnclosingClass)
 	{
-        if((szFQN = new char[(int)strlen(pEnclosingClass->m_szFQN)+(int)strlen(name)+2]))
-            sprintf(szFQN,"%s/%s",pEnclosingClass->m_szFQN,name);
+		szFQN = new char[pEnclosingClass->m_dwFQN+(int)strlen(name)+2];
+		if (szFQN != NULL)
+            sprintf(szFQN,"%s%c%s",pEnclosingClass->m_szFQN,NESTING_SEP,name);
 		else
 			report->error("\nOut of memory!\n");
 	}
     else
 	{
-        if((szFQN = new char[(int)strlen(m_szFullNS)+(int)strlen(name)+2]))
-		{
-            if(strlen(m_szFullNS)) sprintf(szFQN,"%s.%s",m_szFullNS,name);
-            else strcpy(szFQN,name);
-            unsigned L = (unsigned)strlen(szFQN);
-            if(L >= MAX_CLASSNAME_LENGTH)
-                report->error("Full class name too long (%d characters, %d allowed).\n",L,MAX_CLASSNAME_LENGTH-1);
-        }
+        szFQN = new char[(int)strlen(m_szFullNS)+(int)strlen(name)+2];
+		if (szFQN != NULL) {
+			if(strlen(m_szFullNS)) sprintf(szFQN,"%s.%s",m_szFullNS,name);
+			else strcpy(szFQN,name);
+			unsigned L = (unsigned)strlen(szFQN);
+			if(L >= MAX_CLASSNAME_LENGTH)
+				report->error("Full class name too long (%d characters, %d allowed).\n",L,MAX_CLASSNAME_LENGTH-1);
+		}
 		else
 			report->error("\nOut of memory!\n");
 	}
 	if(szFQN == NULL) return;
 
-    if((m_pCurClass = FindClass(szFQN)))
+    mdToken tkThis;
+    if(m_fIsMscorlib)
+        tkThis = ResolveClassRef(1,szFQN,&m_pCurClass); // boils down to FindCreateClass(szFQN)
+    else
+    {
+        m_pCurClass = FindCreateClass(szFQN);
+        tkThis = m_pCurClass->m_cl;
+    }
+	if(m_pCurClass->m_bIsMaster)
 	{
-		m_pCurClass->m_bIsMaster = FALSE;
-		//report->warn("Class '%s' already declared, augmenting the declaration.\n",name);
-	}
-	else
-	{
+    	if(!IsNilToken(m_crExtends))
+    	{
+    		// has a superclass
+    		if(IsTdInterface(attr)) report->error("Base class in interface\n");
+            bIsValueType = (m_crExtends == m_tkSysValue)&&(tkThis != m_tkSysEnum);
+            bIsEnum = (m_crExtends == m_tkSysEnum);
+            crExtends = m_crExtends;
+    	}
+    	else
+    	{
+    		bIsEnum = ((attr & 0x40000000) != 0);
+    		bIsValueType = ((attr & 0x80000000) != 0);
+    	}
+    	attr &= 0x3FFFFFFF;
 		if (m_fAutoInheritFromObject && (crExtends == mdTypeRefNil) && (!IsTdInterface(attr)))
 		{
-			BOOL bIsMscorlib = (0 != RidFromToken(m_pManifest->GetAsmTokByName("mscorlib")));
+            mdToken tkMscorlib = m_fIsMscorlib ? 1 : GetAsmRef("mscorlib");
 			crExtends = bIsEnum ? 
-				ResolveClassRef(bIsMscorlib ? "System.Enum" : "mscorlib^System.Enum",NULL)
-                :( bIsValueType ?
-					ResolveClassRef(bIsMscorlib ? "System.ValueType" : "mscorlib^System.ValueType",NULL) 
-					: ResolveClassRef(bIsMscorlib ? "System.Object" : "mscorlib^System.Object",NULL));
+				ResolveClassRef(tkMscorlib,"System.Enum",NULL)
+				:( bIsValueType ? 
+					ResolveClassRef(tkMscorlib,"System.ValueType",NULL) 
+					: ResolveClassRef(tkMscorlib, "System.Object",NULL));
 		}
-
-		m_pCurClass = new Class(name, m_szFullNS, szFQN, bIsValueType, bIsEnum);
-		if (m_pCurClass == NULL)
-		{
-			report->error("Failed to create class '%s'\n",name);
-			return;
-		}
-
-		{
+        {
 			DWORD wasAttr = attr;
 			if(pEnclosingClass && (!IsTdNested(attr)))
 			{
@@ -432,14 +325,14 @@ void Assembler::StartClass(char* name, DWORD attr)
 			}
 		}
 		m_pCurClass->m_Attr = attr;
-		m_pCurClass->m_crExtends = crExtends;
-		if(!strcmp(szFQN,BASE_OBJECT_CLASSNAME)) m_pCurClass->m_crExtends = mdTypeRefNil;
+		m_pCurClass->m_crExtends = (tkThis == m_tkSysObject)? mdTypeRefNil : crExtends;
 
         if ((m_pCurClass->m_dwNumInterfaces = m_nImplList))
 		{
-			if(bIsEnum)	report->error("Interface(s) in enum\n");
-            if((m_pCurClass->m_crImplements = new mdTypeRef[m_nImplList+1]))
-				memcpy(m_pCurClass->m_crImplements, m_crImplList, (m_nImplList+1)*sizeof(mdTypeRef));
+			if(bIsEnum)	report->error("Enum implementing interface(s)\n");
+			m_pCurClass->m_crImplements = new mdTypeRef[m_nImplList+1];
+			if(m_pCurClass->m_crImplements != NULL)
+                memcpy(m_pCurClass->m_crImplements, m_crImplList, (m_nImplList+1)*sizeof(mdTypeRef));
 			else
 			{
 				report->error("Failed to allocate Impl List for class '%s'\n", name);
@@ -447,6 +340,11 @@ void Assembler::StartClass(char* name, DWORD attr)
 			}
 		}
 		else m_pCurClass->m_crImplements = NULL;
+		if (m_TyParList)
+		{
+		    m_pCurClass->m_NumTyPars = m_TyParList->ToArray(&m_pCurClass->m_TyParBounds, &m_pCurClass->m_TyParNames);
+		}
+		else m_pCurClass->m_NumTyPars = 0;
 		if(bIsValueType)
 		{
 			if(!IsTdSealed(attr))
@@ -460,15 +358,15 @@ void Assembler::StartClass(char* name, DWORD attr)
 			}
 		}
 		m_pCurClass->m_pEncloser = pEnclosingClass;
-		m_pCurClass->m_bIsMaster = TRUE;
-		AddClass(m_pCurClass, pEnclosingClass); //impl. see ASSEM.CPP
+		m_pCurClass->m_bIsMaster = FALSE;
 	} // end if(old class) else
-	//delete [] szFQN;
-	m_tkCurrentCVOwner = m_pCurClass->m_cl;
+	m_tkCurrentCVOwner = 0;
+    m_pCustomDescrList = &(m_pCurClass->m_CustDList);
 
 	m_ClassStack.PUSH(pEnclosingClass);
 	ClearImplList();
-	strcpy(m_szExtendsClause,"");
+    ClearBoundList();
+    m_crExtends = mdTypeRefNil;
 }
 
 /**************************************************************************/
@@ -496,9 +394,9 @@ void Assembler::SetPinvoke(BinStr* DllName, int Ordinal, BinStr* Alias, int Attr
 					l = Alias->length();
                     if((m_pPInvoke->szAlias = new char[l+1]))
 					{
-					memcpy(m_pPInvoke->szAlias,Alias->ptr(),l);
-					m_pPInvoke->szAlias[l] = 0;
-				}
+						memcpy(m_pPInvoke->szAlias,Alias->ptr(),l);
+						m_pPInvoke->szAlias[l] = 0;
+					}
 					else report->error("\nOut of memory!\n");
 				}
 				m_pPInvoke->dwAttrs = (DWORD)Attrs;
@@ -523,7 +421,7 @@ void Assembler::SetPinvoke(BinStr* DllName, int Ordinal, BinStr* Alias, int Attr
 }
 
 /**************************************************************************/
-void Assembler::StartMethod(char* name, BinStr* sig, CorMethodAttr flags, BinStr* retMarshal, DWORD retAttr)
+void Assembler::StartMethod(char* name, BinStr* sig, CorMethodAttr flags, BinStr* retMarshal, DWORD retAttr, TyParList *typars)
 {
     if (m_pCurMethod != NULL)
     {
@@ -554,9 +452,11 @@ void Assembler::StartMethod(char* name, BinStr* sig, CorMethodAttr flags, BinStr
 	{
 		Method* pMethod;
 		Class* pClass = (m_pCurClass ? m_pCurClass : m_pModuleClass);
-        for(int j=0; (pMethod = pClass->m_MethodList.PEEK(j)); j++)
+                DWORD L = (DWORD)strlen(name);
+		for(int j=0; (pMethod = pClass->m_MethodList.PEEK(j)); j++)
 		{
-			if(	(!strcmp(pMethod->m_szName,name)) &&
+			if(	(pMethod->m_dwName == L) &&
+                (!strcmp(pMethod->m_szName,name)) &&
 				(pMethod->m_dwMethodCSig == sig->length())  &&
 				(!memcmp(pMethod->m_pMethodSig,sig->ptr(),sig->length()))
 				&&(!IsMdPrivateScope(pMethod->m_Attr)))
@@ -570,14 +470,13 @@ void Assembler::StartMethod(char* name, BinStr* sig, CorMethodAttr flags, BinStr
 	{ // instance method
 		if(IsMdAbstract(flags) && !IsTdAbstract(m_pCurClass->m_Attr))
 		{
-			report->error("Abstract method '%s' in non-abstract class '%s'\n",name,m_pCurClass->m_szName);
+			report->error("Abstract method '%s' in non-abstract class '%s'\n",name,m_pCurClass->m_szFQN);
 		}
-		//if(IsTdEnum(m_pCurClass->m_Attr)) report->error("Method in enum\n");
-
+		if(m_pCurClass->m_crExtends == m_tkSysEnum) report->error("Method in enum\n");
 		if(!strcmp(name,COR_CTOR_METHOD_NAME))
 		{
 			flags = (CorMethodAttr)(flags | mdSpecialName);
-			if(IsTdInterface(m_pCurClass->m_Attr)) report->error("Constructor in interface\n");
+			if(IsTdInterface(m_pCurClass->m_Attr)) report->error("Instance constructor in interface\n");
 
 		}
 		if(IsTdInterface(m_pCurClass->m_Attr))
@@ -617,6 +516,18 @@ void Assembler::StartMethod(char* name, BinStr* sig, CorMethodAttr flags, BinStr
 			}
 		}
 		m_pCurMethod = new Method(this, m_pCurClass, name, sig, flags);
+        if(m_pCurMethod->m_firstArgName)
+        {
+    		for(ARG_NAME_LIST *pAN=m_pCurMethod->m_firstArgName; pAN; pAN = pAN->pNext)
+            {
+    			if(pAN->dwName)
+                {
+                    int k = m_pCurMethod->findArgNum(pAN->pNext,pAN->szName,pAN->dwName);
+                    if(k >= 0)
+                        report->error("Duplicate param name '%s' in method '%s'\n",pAN->szName,name);
+                }
+            }
+        }
 	    if (m_pCurMethod)
 		{
 			m_pCurMethod->SetIsGlobalMethod();
@@ -625,12 +536,18 @@ void Assembler::StartMethod(char* name, BinStr* sig, CorMethodAttr flags, BinStr
 	}
 	if(m_pCurMethod)
 	{
-	m_pCurMethod->m_pRetMarshal = retMarshal;
-	m_pCurMethod->m_dwRetAttr = retAttr;
-	m_tkCurrentCVOwner = 0;
-	m_pCustomDescrList = &(m_pCurMethod->m_CustomDescrList);
-	m_pCurMethod->m_MainScope.dwStart = m_CurPC;
-}
+		m_pCurMethod->m_pRetMarshal = retMarshal;
+		m_pCurMethod->m_dwRetAttr = retAttr;
+		m_tkCurrentCVOwner = 0;
+		m_pCustomDescrList = &(m_pCurMethod->m_CustomDescrList);
+		m_pCurMethod->m_MainScope.dwStart = m_CurPC;
+        if (typars)
+        {
+            m_pCurMethod->m_NumTyPars = typars->ToArray(&m_pCurMethod->m_TyParBounds,
+            &m_pCurMethod->m_TyParNames);
+        }
+        else m_pCurMethod->m_NumTyPars = 0;
+	}
 	else report->error("Failed to allocate Method class\n");
 }
 
@@ -639,10 +556,6 @@ void Assembler::EndMethod()
 {
 	unsigned uLocals;
 
-	strcpy(m_pCurMethod->m_szSourceFileName,m_szSourceFileName);
-	memcpy(&(m_pCurMethod->m_guidLang),&m_guidLang,sizeof(GUID));
-	memcpy(&(m_pCurMethod->m_guidLangVendor),&m_guidLangVendor,sizeof(GUID));
-	memcpy(&(m_pCurMethod->m_guidDoc),&m_guidDoc,sizeof(GUID));
 	if(m_pCurMethod->m_pCurrScope != &(m_pCurMethod->m_MainScope))
 	{
 		report->error("Invalid lexical scope structure in method %s\n",m_pCurMethod->m_szName);
@@ -673,7 +586,6 @@ void Assembler::EndMethod()
 		if (cSig > 1)    // non-empty signature
 		{
 			hr = m_pEmitter->GetTokenFromSig(mySig, cSig, &m_pCurMethod->m_LocalsSig);
-			m_pCurMethod->m_numLocals = CorSigUncompressData(mySig); // imported func.
 			_ASSERTE(SUCCEEDED(hr));
 		}
 		delete pbsSig;
@@ -742,7 +654,7 @@ void Assembler::AddField(char* name, BinStr* sig, CorFieldAttr flags, char* rvaL
 	Class* pClass;
 
     if (m_pCurMethod)
-		report->error("field cannot be declared within a method\n");
+		report->error("Field cannot be declared within a method\n");
 
 	if(strlen(name) >= MAX_CLASSNAME_LENGTH)
 			report->error("Field '%s' -- name too long (%d characters).\n",name,strlen(name));
@@ -782,10 +694,11 @@ void Assembler::AddField(char* name, BinStr* sig, CorFieldAttr flags, char* rvaL
 	}
 	pClass = (m_pCurClass ? m_pCurClass : m_pModuleClass);
 	n = pClass->m_FieldDList.COUNT();
+    DWORD L = (DWORD)strlen(name);
 	for(i = 0; i < n; i++)
 	{
 		pFD = pClass->m_FieldDList.PEEK(i);
-		if((pFD->m_tdClass == tkParent)&&(!strcmp(pFD->m_szName,name))
+		if((pFD->m_tdClass == tkParent)&&(L==pFD->m_dwName)&&(!strcmp(pFD->m_szName,name))
 			&&(pFD->m_pbsSig->length() == sig->length())
 			&&(memcmp(pFD->m_pbsSig->ptr(),sig->ptr(),sig->length())==0))
 		{
@@ -800,24 +713,25 @@ void Assembler::AddField(char* name, BinStr* sig, CorFieldAttr flags, char* rvaL
 	{
         if((pFD = new FieldDescriptor))
 		{
-		pFD->m_tdClass = tkParent;
-		pFD->m_szName = name;
-		pFD->m_fdFieldTok = mdTokenNil;
-		if((pFD->m_ulOffset = ulOffset) != 0xFFFFFFFF) pClass->m_dwNumFieldsWithOffset++;
-		pFD->m_rvaLabel = rvaLabel;
-		pFD->m_pbsSig = sig;
-		pFD->m_pClass = pClass;
-		pFD->m_pbsValue = pVal;
-		pFD->m_pbsMarshal = m_pMarshal;
-		pFD->m_pPInvoke = m_pPInvoke;
-		pFD->m_dwAttr = flags;
+			pFD->m_tdClass = tkParent;
+			pFD->m_szName = name;
+            pFD->m_dwName = L;
+			pFD->m_fdFieldTok = mdTokenNil;
+			if((pFD->m_ulOffset = ulOffset) != 0xFFFFFFFF) pClass->m_dwNumFieldsWithOffset++;
+			pFD->m_rvaLabel = rvaLabel;
+			pFD->m_pbsSig = sig;
+			pFD->m_pClass = pClass;
+			pFD->m_pbsValue = pVal;
+			pFD->m_pbsMarshal = m_pMarshal;
+			pFD->m_pPInvoke = m_pPInvoke;
+			pFD->m_dwAttr = flags;
 
-		m_tkCurrentCVOwner = 0;
-		m_pCustomDescrList = &(pFD->m_CustomDescrList);
+			m_tkCurrentCVOwner = 0;
+			m_pCustomDescrList = &(pFD->m_CustomDescrList);
 
-		pClass->m_FieldDList.PUSH(pFD);
-	}
-	else
+			pClass->m_FieldDList.PUSH(pFD);
+		}
+		else
 			report->error("Failed to allocate Field Descriptor\n");
 	}
 	else
@@ -833,8 +747,7 @@ void Assembler::AddField(char* name, BinStr* sig, CorFieldAttr flags, char* rvaL
 
 BOOL Assembler::EmitField(FieldDescriptor* pFD)
 {
-	size_t	cFieldNameLength = strlen(pFD->m_szName) + 1;
-    WCHAR* wzFieldName = new WCHAR[cFieldNameLength];
+    WCHAR*   wzFieldName=&wzUniBuf[0];
     HRESULT hr;
     DWORD   cSig;
     COR_SIGNATURE* mySig;
@@ -847,16 +760,7 @@ BOOL Assembler::EmitField(FieldDescriptor* pFD)
 	cSig = pFD->m_pbsSig->length();
 	mySig = (COR_SIGNATURE*)(pFD->m_pbsSig->ptr());
 
-	if(wzFieldName)
-	{
-	// convert name from ASCII to widechar
-	WszMultiByteToWideChar(g_uCodePage,0,pFD->m_szName,-1,wzFieldName,(int)cFieldNameLength);
-	}
-	else
-	{
-		report->error("\nOut of memory!\n");
-		return FALSE;
-	}
+	WszMultiByteToWideChar(g_uCodePage,0,pFD->m_szName,-1,wzFieldName,dwUniBuf); //int)cFieldNameLength);
 	if(IsFdPrivateScope(pFD->m_dwAttr))
 	{
 		WCHAR* p = wcsstr(wzFieldName,L"$PST04");
@@ -886,7 +790,6 @@ BOOL Assembler::EmitField(FieldDescriptor* pFD)
         lVal,
         &mb
     );
-	delete [] wzFieldName;
     if (FAILED(hr))
 	{
 		report->error("Failed to define field '%s' (HRESULT=0x%08X)\n",pFD->m_szName,hr);
@@ -942,9 +845,8 @@ BOOL Assembler::EmitField(FieldDescriptor* pFD)
 void Assembler::EmitByte(int val)
 {
 	char ch = (char)val;
-	unsigned uval = (unsigned)val & 0xFFFFFF00;
-	if(uval && (uval != 0xFFFFFF00))
-			report->warn("Emitting 0x%X as a byte: data truncated to 0x%X\n",(unsigned)val,(BYTE)ch);
+	//if((val < -128)||(val > 127))
+   // 		report->warn("Emitting 0x%X as a byte: data truncated to 0x%X\n",(unsigned)val,(BYTE)ch);
 	EmitBytes((BYTE *)&ch,1);
 }
 
@@ -977,11 +879,11 @@ void Assembler::SetFilterLabel(char *szFilter)
 	else report->error("Undefined label in 'filter <label>'\n");
 }
 /**************************************************************************/
-void Assembler::SetCatchClass(char *szClass)
+void Assembler::SetCatchClass(mdToken catchClass)
 {
 	if(!m_SEHD) return;
-	if((m_SEHD->cException = ResolveClassRef(szClass, NULL)) == mdTokenNil)
-		report->error("Undefined class '%s' in 'catch <class name>'\n",szClass);
+	m_SEHD->cException = catchClass;
+
 }
 /**************************************************************************/
 void Assembler::SetHandlerLabels(char *szHandlerFrom, char *szHandlerTo)
@@ -1046,7 +948,7 @@ void Assembler::AddException(DWORD pcStart, DWORD pcEnd, DWORD pcHandler, DWORD 
 		m_pCurMethod->m_ExceptionList = ptr;
 		m_pCurMethod->m_dwMaxNumExceptions += MAX_EXCEPTIONS;
     }
-    m_pCurMethod->m_ExceptionList[m_pCurMethod->m_dwNumExceptions].SetFlags((CorExceptionFlag) (m_pCurMethod->m_dwExceptionFlags | COR_ILEXCEPTION_CLAUSE_OFFSETLEN));
+    m_pCurMethod->m_ExceptionList[m_pCurMethod->m_dwNumExceptions].SetFlags(COR_ILEXCEPTION_CLAUSE_OFFSETLEN);
     m_pCurMethod->m_ExceptionList[m_pCurMethod->m_dwNumExceptions].SetTryOffset(pcStart);
     m_pCurMethod->m_ExceptionList[m_pCurMethod->m_dwNumExceptions].SetTryLength(pcEnd - pcStart);
     m_pCurMethod->m_ExceptionList[m_pCurMethod->m_dwNumExceptions].SetHandlerOffset(pcHandler);
@@ -1072,7 +974,7 @@ void Assembler::EmitMaxStack(unsigned val)
 {
 	if(val > 0xFFFF) report->warn(".maxstack parameter exceeds 65535, truncated to %d\n",val&0xFFFF);
     if (m_pCurMethod) m_pCurMethod->m_MaxStack = val&0xFFFF;
-    else  report->error(".maxstack can be used only when in a method scope\n");
+    else  report->error(".maxstack can be used only within a method scope\n");
 }
 
 /**************************************************************************/
@@ -1082,7 +984,7 @@ void Assembler::EmitLocals(BinStr* sig)
 	{
 		if (m_pCurMethod)
 		{
-			ARG_NAME_LIST	*pAN, *pList= getArgNameList();
+            ARG_NAME_LIST	*pAN, *pList= getArgNameList();
 			if(pList)
 			{
 				VarDescr*		pVD;
@@ -1120,7 +1022,7 @@ void Assembler::EmitLocals(BinStr* sig)
 					m_pCurMethod->catArgNameList(m_pCurMethod->m_pCurrScope->pLocals, pList);
 			}
 		}
-		else	report->error(".locals can be used only when in a method scope\n");
+		else	report->error(".locals can be used only within a method scope\n");
 		delete sig;
 	}
 	else report->error("Attempt to EmitLocals with NULL argument\n");
@@ -1142,20 +1044,25 @@ void Assembler::EmitEntryPoint()
 		}
 		else report->error("Multiple .entrypoint declarations\n");
 	}
-	else report->error(".entrypoint can be used only when in a method scope\n");
+	else report->error(".entrypoint can be used only within a method scope\n");
 }
 
 /**************************************************************************/
 void Assembler::EmitZeroInit()
 {
     if (m_pCurMethod) m_pCurMethod->m_Flags |= CorILMethod_InitLocals;
-	else report->error(".zeroinit can be used only when in a method scope\n");
+	else report->error(".zeroinit can be used only within a method scope\n");
 }
 
 /**************************************************************************/
 void Assembler::SetImplAttr(unsigned short attrval)
 {
-	if (m_pCurMethod) m_pCurMethod->m_wImplAttr = attrval;
+	if (m_pCurMethod)
+	{
+		if(IsMiNative(attrval)||IsMiOPTIL(attrval)||IsMiUnmanaged(attrval))
+			report->error("Cannot compile native/unmanaged method\n");
+		m_pCurMethod->m_wImplAttr = attrval;
+	}
 }
 
 /**************************************************************************/
@@ -1212,13 +1119,10 @@ void Assembler::EmitDD(char *str)
 /**************************************************************************/
 GlobalLabel *Assembler::FindGlobalLabel(char *pszName)
 {
-    GlobalLabel *pSearch;
-
-    for(int i=0; (pSearch=m_lstGlobalLabel.PEEK(i)); i++)
-    {
-        if (!strcmp(pSearch->m_szName, pszName)) break;
-    }
-    return pSearch;
+    GlobalLabel lSearch(pszName,0,NULL), *pL;
+    pL =  m_lstGlobalLabel.FIND(&lSearch);
+    lSearch.m_szName = NULL;
+    return pL;
 }
 
 /**************************************************************************/
@@ -1265,20 +1169,20 @@ void Assembler::EmitDataString(BinStr* str)
 {
 	if(str)
 	{
-	str->appendInt8(0);
-    DWORD   DataLen = str->length();
-	char	*pb = (char*)(str->ptr());	
-    WCHAR   *UnicodeString = new WCHAR[DataLen];
+		str->appendInt8(0);
+		DWORD   DataLen = str->length();
+		char	*pb = (char*)(str->ptr());	
+		WCHAR   *UnicodeString = (DataLen >= dwUniBuf) ? new WCHAR[DataLen] : &wzUniBuf[0];
 
 		if(UnicodeString)
 		{
-	WszMultiByteToWideChar(g_uCodePage,0,pb,-1,UnicodeString,DataLen);
-	EmitData(UnicodeString,DataLen*sizeof(WCHAR));
-	delete [] UnicodeString;
+			WszMultiByteToWideChar(g_uCodePage,0,pb,-1,UnicodeString,DataLen);
+			EmitData(UnicodeString,DataLen*sizeof(WCHAR));
+			if(DataLen >= dwUniBuf) delete [] UnicodeString;
 		}
 		else report->error("\nOut of memory!\n");
-	delete str;
-}
+		delete str;
+	}
 }
 
 
@@ -1291,20 +1195,42 @@ unsigned Assembler::OpcodeLen(Instr* instr)
 /**************************************************************************/
 void Assembler::EmitOpcode(Instr* instr)
 {
-	if((instr->linenum != m_ulLastDebugLine)||(instr->column != m_ulLastDebugColumn))
+	if(m_fIncludeDebugInfo &&
+       ((instr->linenum != m_ulLastDebugLine)||(instr->column != m_ulLastDebugColumn)))
 	{
 		if(m_pCurMethod)
 		{
-			LinePC *pLPC = new LinePC;
-			if(pLPC)
-			{
-				pLPC->Line = instr->linenum;
-				pLPC->Column = instr->column;
-				pLPC->PC = m_CurPC;
-				m_pCurMethod->m_LinePCList.PUSH(pLPC);
-			}
-			else report->error("\nOut of memory!\n");
-		}
+			LinePC *pLPC=NULL;
+            unsigned N = m_pCurMethod->m_LinePCList.COUNT();
+            if(N)
+            {
+                pLPC = m_pCurMethod->m_LinePCList.PEEK(N-1);
+                if(pLPC->PC != instr->pc) pLPC = NULL;
+            }
+            if(pLPC)
+            {
+                pLPC->Line = instr->linenum;
+                pLPC->Column = instr->column;
+                pLPC->LineEnd = instr->linenum_end;
+                pLPC->ColumnEnd = instr->column_end;
+                pLPC->pWriter = instr->pWriter;
+            }
+            else
+            {
+                pLPC = new LinePC;
+    			if(pLPC)
+    			{
+    				pLPC->Line = instr->linenum;
+    				pLPC->Column = instr->column;
+    				pLPC->LineEnd = instr->linenum_end;
+    				pLPC->ColumnEnd = instr->column_end;
+    				pLPC->PC = instr->pc;
+                    pLPC->pWriter = instr->pWriter;
+    				m_pCurMethod->m_LinePCList.PUSH(pLPC);
+    			}
+    			else report->error("\nOut of memory!\n");
+		    }
+        }
 		m_ulLastDebugLine = instr->linenum;
 		m_ulLastDebugColumn = instr->column;
 	}
@@ -1340,7 +1266,7 @@ void Assembler::EmitOpcode(Instr* instr)
         EmitByte(REFPRE);
         EmitBytes((BYTE *)&us,2);
     }
-	delete instr;
+    instr->opcode = -1;
 }
 
 /**************************************************************************/
@@ -1381,23 +1307,16 @@ void Assembler::EmitInstrVarByName(Instr* instr, char* label)
 
 			if(m_pCurMethod)
 			{
+                DWORD L = (DWORD)strlen(label);
 				if(nArgVarFlag == 1)
 				{
-					idx = m_pCurMethod->findArgNum(m_pCurMethod->m_firstArgName,label);
+					idx = m_pCurMethod->findArgNum(m_pCurMethod->m_firstArgName,label,L);
 				}
 				else
 				{
-					ARG_NAME_LIST	*pAN;
 					for(Scope* pSC = m_pCurMethod->m_pCurrScope; pSC; pSC=pSC->pSuperScope)
 					{
-						for(pAN = pSC->pLocals; pAN; pAN = pAN->pNext)
-						{
-							if(!strcmp(pAN->szName,label))
-							{
-								idx = (int)(pAN->dwAttr);
-								break;
-							}
-						}
+					    idx = m_pCurMethod->findArgNum(pSC->pLocals,label,L);
 						if(idx >= 0) break;
 					}
 				}
@@ -1492,67 +1411,45 @@ void Assembler::EmitInstrBrOffset(Instr* instr, int offset)
 }
 
 /**************************************************************************/
-mdToken Assembler::MakeMemberRef(BinStr* typeSpec, char* pszMemberName, BinStr* sig, unsigned opcode_len)
+mdToken Assembler::MakeMemberRef(mdToken cr, char* pszMemberName, BinStr* sig, unsigned opcode_len)
 {	
     DWORD			cSig = sig->length();
     COR_SIGNATURE*	mySig = (COR_SIGNATURE *)(sig->ptr());
-	mdMemberRef		mr = mdMemberRefNil;
+	mdToken		    mr = mdMemberRefNil;
 	Class*			pClass = NULL;
-	BOOL			bIsNotVararg = ((*mySig & IMAGE_CEE_CS_CALLCONV_MASK) != IMAGE_CEE_CS_CALLCONV_VARARG);
-
-    mdTypeRef cr = mdTypeRefNil;
-    if (typeSpec != 0)
-	{
-		if(opcode_len && bIsNotVararg) // we are dealing with an instruction, so we can put a fixup here
-		{
-			if(!ResolveTypeSpec(typeSpec, &cr, &pClass))
-			{
-				report->error("Unable to resolve class reference\n");
-				return 0;
-			}
-		}
-		else
-		{
-			if(!ResolveTypeSpecToRef(typeSpec, &cr))
-			{
-				report->error("Unable to resolve class reference\n");
-				return 0;
-			}
-		}
-	}
-	else cr=mdTokenNil;
-
-	if(opcode_len 
-		&& ((TypeFromToken(cr) == mdtTypeDef)||(cr == mdTokenNil))
-		&& bIsNotVararg	)
+    if(TypeFromToken(cr) == mdtTypeDef) pClass = m_lstClass.PEEK(RidFromToken(cr)-1);
+	if((TypeFromToken(cr) == mdtTypeDef)||(cr == mdTokenNil))
 	{
 		MemberRefDescriptor* pMRD = new MemberRefDescriptor;
-		if(pMRD)
-		{
-		pMRD->m_tdClass = cr;
-		pMRD->m_pClass = pClass;
-		pMRD->m_szName = pszMemberName;
-		pMRD->m_pSigBinStr = sig;
-		pMRD->m_ulOffset = (size_t)(m_CurPC + opcode_len);
-		m_pCurMethod->m_MemberRefDList.PUSH(pMRD);
+        if(pMRD)
+        {
+            pMRD->m_tdClass = cr;
+            pMRD->m_pClass = pClass;
+            pMRD->m_szName = pszMemberName;
+            pMRD->m_dwName = (DWORD)strlen(pszMemberName);
+            pMRD->m_pSigBinStr = sig;
+            if(*(sig->ptr())== IMAGE_CEE_CS_CALLCONV_FIELD)
+            {
+                m_LocalFieldRefDList.PUSH(pMRD);
+                mr = 0x98000000 | m_LocalFieldRefDList.COUNT();
+            }
+            else
+            {
+                m_LocalMethodRefDList.PUSH(pMRD);
+                mr = 0x99000000 | m_LocalMethodRefDList.COUNT();
+            }
+        }
+        else
+        {
+            report->error("Failed to allocate MemberRef Descriptor\n");
+            return 0;
+        }
+        if(opcode_len) m_pCurMethod->m_LocalMemberRefFixupList.PUSH(
+                new LocalMemberRefFixup(mr,(size_t)(m_CurPC + opcode_len)));
 	}
 	else
 	{
-			report->error("Failed to allocate MemberRef Descriptor\n");
-			return 0;
-		}
-	}
-	else
-	{
-			// convert name from ASCII to widechar
-		WCHAR* wzMemberName = new WCHAR[strlen(pszMemberName) + 1];
-		if(wzMemberName)
-		WszMultiByteToWideChar(g_uCodePage,0,pszMemberName,-1,wzMemberName,(int)strlen(pszMemberName)+1);
-		else
-		{
-			report->error("\nOut of memory!\n");
-			return 0;
-		}
+		WszMultiByteToWideChar(g_uCodePage,0,pszMemberName,-1,wzUniBuf,dwUniBuf);
 
 		if(cr == mdTokenNil) cr = mdTypeRefNil;
 		if(TypeFromToken(cr) == mdtAssemblyRef)
@@ -1562,7 +1459,7 @@ mdToken Assembler::MakeMemberRef(BinStr* typeSpec, char* pszMemberName, BinStr* 
 		}
 		else
 		{
-			HRESULT hr = m_pEmitter->DefineMemberRef(cr, wzMemberName, mySig, cSig, &mr);
+			HRESULT hr = m_pEmitter->DefineMemberRef(cr, wzUniBuf, mySig, cSig, &mr);
 			if(FAILED(hr))
 			{
 				report->error("Unable to define member reference '%s'\n", pszMemberName);
@@ -1571,13 +1468,48 @@ mdToken Assembler::MakeMemberRef(BinStr* typeSpec, char* pszMemberName, BinStr* 
 		}
 		//if(m_fOBJ)	m_pCurMethod->m_TRDList.PUSH(new TokenRelocDescr(m_CurPC,mr));
 		delete pszMemberName;
-		delete [] wzMemberName;
 		delete sig;
 	}
-
-	delete typeSpec;
-	return mr;
+    return mr;
 }
+
+/**************************************************************************/
+mdToken Assembler::MakeMethodSpec(mdToken tkParent, BinStr* sig, unsigned opcode_len)
+{	
+    DWORD			cSig = sig->length();
+    COR_SIGNATURE*	mySig = (COR_SIGNATURE *)(sig->ptr());
+    mdMethodSpec mi = mdMethodSpecNil;
+	if(TypeFromToken(tkParent) == 0x99000000) // Local MemberRef: postpone until resolved
+	{
+        MemberRefDescriptor* pMRD = new MemberRefDescriptor;
+        if(pMRD)
+        {
+            memset(pMRD,0,sizeof(MemberRefDescriptor));
+            pMRD->m_tdClass = tkParent;
+            pMRD->m_pSigBinStr = sig;
+            m_MethodSpecList.PUSH(pMRD);
+            mi = 0x9A000000 | m_MethodSpecList.COUNT();
+        }
+        else
+        {
+            report->error("Failed to allocate MemberRef Descriptor\n");
+            return 0;
+        }
+        if(opcode_len) m_pCurMethod->m_LocalMemberRefFixupList.PUSH(
+                new LocalMemberRefFixup(mi,(size_t)(m_CurPC + opcode_len)));
+	}
+    else
+    {
+        HRESULT hr = m_pEmitter->DefineMethodSpec(tkParent, mySig, cSig, &mi);
+        if(FAILED(hr))
+        {
+        	report->error("Unable to define method instantiation");
+        	return 0;
+        }
+    }
+    return mi;
+}
+
 /**************************************************************************/
 void Assembler::EndEvent(void) 
 { 
@@ -1586,69 +1518,40 @@ void Assembler::EndEvent(void)
 	m_pCurEvent = NULL; 
 }
 
-void Assembler::ResetEvent(char* szName, BinStr* typeSpec, DWORD dwAttr) 
+void Assembler::ResetEvent(char* szName, mdToken typeSpec, DWORD dwAttr) 
 {
 	if(strlen(szName) >= MAX_CLASSNAME_LENGTH)
 			report->error("Event '%s' -- name too long (%d characters).\n",szName,strlen(szName));
     if((m_pCurEvent = new EventDescriptor))
 	{
-	memset(m_pCurEvent,0,sizeof(EventDescriptor));
-	m_pCurEvent->m_tdClass = m_pCurClass->m_cl;
-	m_pCurEvent->m_szName = new char[strlen(szName)+1];
-	strcpy(m_pCurEvent->m_szName,szName);
-	m_pCurEvent->m_dwAttr = dwAttr;
-    m_pCurEvent->m_tkEventType = mdTypeRefNil;
-    if (typeSpec) 
-		FAIL_UNLESS(ResolveTypeSpec(typeSpec, &m_pCurEvent->m_tkEventType,NULL), ("Unable to resolve class reference\n"));
-	m_tkCurrentCVOwner = 0;
-	m_pCustomDescrList = &(m_pCurEvent->m_CustomDescrList);
-}
+		memset(m_pCurEvent,0,sizeof(EventDescriptor));
+		m_pCurEvent->m_tdClass = m_pCurClass->m_cl;
+		m_pCurEvent->m_szName = szName;
+		m_pCurEvent->m_dwAttr = dwAttr;
+		m_pCurEvent->m_tkEventType = typeSpec;
+		m_tkCurrentCVOwner = 0;
+		m_pCustomDescrList = &(m_pCurEvent->m_CustomDescrList);
+	}
 	else report->error("Failed to allocate Event Descriptor\n");
 
 }
 
-void Assembler::SetEventMethod(int MethodCode, BinStr* typeSpec, char* pszMethodName, BinStr* sig) 
+void Assembler::SetEventMethod(int MethodCode, mdToken typeSpec, char* pszMethodName, BinStr* sig) 
 {
-    DWORD			cSig = sig->length();
-    COR_SIGNATURE*	mySig = (COR_SIGNATURE *)(sig->ptr());
-	MethodDescriptor* pMD = new MethodDescriptor;
-	if(pMD == NULL)
-	{
-		report->error("\nOut of memory!\n");
-		return;
-	}
-	memset(pMD,0,sizeof(MethodDescriptor));
-	pMD->m_szName = new char[strlen(pszMethodName)+1];
-	if(pMD->m_szName == NULL)
-	{
-		report->error("\nOut of memory!\n");
-		return;
-	}
-	strcpy(pMD->m_szName,pszMethodName);
-	pMD->m_pSig = new COR_SIGNATURE[cSig];
-	if(pMD->m_pSig == NULL)
-	{
-		report->error("\nOut of memory!\n");
-		return;
-	}
-	memcpy(pMD->m_pSig,mySig,cSig);
-	pMD->m_dwCSig = cSig;
-	pMD->m_tdClass = m_pCurClass->m_cl;
-	// for now, ignore TypeSpec
-    //if (typeSpec) FAIL_UNLESS(ResolveTypeSpec(typeSpec, &cr), ("Unable to resolve class reference\n"));
+    mdToken tk = MakeMemberRef(typeSpec,pszMethodName,sig,0);
 	switch(MethodCode)
 	{
 		case 0:
-			m_pCurEvent->m_pmdAddOn = pMD;
+			m_pCurEvent->m_tkAddOn = tk;
 			break;
 		case 1:
-			m_pCurEvent->m_pmdRemoveOn = pMD;
+			m_pCurEvent->m_tkRemoveOn = tk;
 			break;
 		case 2:
-			m_pCurEvent->m_pmdFire = pMD;
+			m_pCurEvent->m_tkFire = tk;
 			break;
 		case 3:
-			m_pCurEvent->m_mdlOthers.PUSH(pMD);
+			m_pCurEvent->m_tklOthers.PUSH((mdToken*)tk);
 			break;
 	}
 }
@@ -1676,13 +1579,7 @@ void Assembler::ResetProp(char * szName, BinStr* bsType, DWORD dwAttr, BinStr* p
 	}
 	memset(m_pCurProp,0,sizeof(PropDescriptor));
 	m_pCurProp->m_tdClass = m_pCurClass->m_cl;
-	m_pCurProp->m_szName = new char[strlen(szName)+1];
-	if(m_pCurProp->m_szName == NULL)
-	{
-		report->error("\nOut of memory!\n");
-		return;
-	}
-	strcpy(m_pCurProp->m_szName,szName);
+	m_pCurProp->m_szName = szName;
 	m_pCurProp->m_dwAttr = dwAttr;
 
 	m_pCurProp->m_pSig = new COR_SIGNATURE[cSig];
@@ -1713,60 +1610,21 @@ void Assembler::ResetProp(char * szName, BinStr* bsType, DWORD dwAttr, BinStr* p
 	m_pCustomDescrList = &(m_pCurProp->m_CustomDescrList);
 }
 
-void Assembler::SetPropMethod(int MethodCode, BinStr* typeSpec, char* pszMethodName, BinStr* sig)
+void Assembler::SetPropMethod(int MethodCode, mdToken typeSpec, char* pszMethodName, BinStr* sig)
 {
-    DWORD			cSig = sig->length();
-    COR_SIGNATURE*	mySig = (COR_SIGNATURE *)(sig->ptr());
-	MethodDescriptor* pMD = new MethodDescriptor;
-	if(pMD == NULL)
-	{
-		report->error("\nOut of memory!\n");
-		return;
-	}
-	memset(pMD,0,sizeof(MethodDescriptor));
-	pMD->m_szName = new char[strlen(pszMethodName)+1];
-	if(pMD->m_szName == NULL)
-	{
-		report->error("\nOut of memory!\n");
-		return;
-	}
-	strcpy(pMD->m_szName,pszMethodName);
-	pMD->m_pSig = new COR_SIGNATURE[cSig];
-	if(pMD->m_pSig == NULL)
-	{
-		report->error("\nOut of memory!\n");
-		return;
-	}
-	memcpy(pMD->m_pSig,mySig,cSig);
-	pMD->m_dwCSig = cSig;
-	pMD->m_tdClass = m_pCurClass->m_cl;
-	// for now, ignore TypeSpec
-    //if (typeSpec) FAIL_UNLESS(ResolveTypeSpec(typeSpec, &cr), ("Unable to resolve class reference\n"));
-	switch(MethodCode)
+    mdToken tk = MakeMemberRef(typeSpec,pszMethodName,sig,0);
+    switch(MethodCode)
 	{
 		case 0:
-			m_pCurProp->m_pmdSet = pMD;
+			m_pCurProp->m_tkSet = tk;
 			break;
 		case 1:
-			m_pCurProp->m_pmdGet = pMD;
+			m_pCurProp->m_tkGet = tk;
 			break;
 		case 2:
-			m_pCurProp->m_mdlOthers.PUSH(pMD);
+			m_pCurProp->m_tklOthers.PUSH((mdToken*)tk);
 			break;
 	}
-}
-
-/**************************************************************************/
-mdToken Assembler::MakeTypeRef(BinStr* typeSpec)
-{
-    mdTypeRef cr;
-	if(!ResolveTypeSpec(typeSpec, &cr,NULL))
-	{
-		report->error("Unable to resolve class reference\n");
-		cr = 0;
-	}
-//	if(m_fOBJ)	m_pCurMethod->m_TRDList.PUSH(new TokenRelocDescr(m_CurPC,cr));
-	return cr;
 }
 
 /**************************************************************************/
@@ -1784,7 +1642,7 @@ void Assembler::EmitInstrStringLiteral(Instr* instr, BinStr* literal, BOOL Conve
 	}
 	if(ConvertToUnicode)
 	{
-		UnicodeString = new WCHAR[DataLen+1];
+		UnicodeString = (DataLen >= dwUniBuf) ? new WCHAR[DataLen+1] : &wzUniBuf[0];
 		literal->appendInt8(0);
 		pb = literal->ptr();
 		// convert string to Unicode
@@ -1809,6 +1667,12 @@ void Assembler::EmitInstrStringLiteral(Instr* instr, BinStr* literal, BOOL Conve
 	}
 	else
 	{
+		if(DataLen & 1)
+		{
+			literal->appendInt8(0);
+			pb = literal->ptr();
+			DataLen++;
+		}
 		UnicodeString = (WCHAR*)pb;
 		L = DataLen/sizeof(WCHAR);
 	}
@@ -1833,7 +1697,7 @@ void Assembler::EmitInstrStringLiteral(Instr* instr, BinStr* literal, BOOL Conve
 	}
 OuttaHere:
 	delete literal;
-	if((void*)UnicodeString != (void*)pb) delete [] UnicodeString;
+	if(((void*)UnicodeString != (void*)pb)&&(DataLen >= dwUniBuf)) delete [] UnicodeString;
 }
 
 /**************************************************************************/
@@ -1911,6 +1775,7 @@ void Assembler::EmitInstrSwitch(Instr* instr, Labels* targets)
 				// defer until we find the label
 				AddDeferredFixup(pLbls->Label, m_pCurOutputPos, PC_nextInstr, 4 /* pcrelsize */ );
 				offset = 0;
+                pLbls->Label = NULL;
 				if (m_fDisplayTraceOutput) report->msg("forward label %s\n", pLbls->Label);
 			}
 		}
@@ -2031,10 +1896,11 @@ void Assembler::EmitSecurityInfo(mdToken            token,
 			return;
 		}
 
+        mdToken tkMscorlib = m_fIsMscorlib ? 1 : GetAsmRef("mscorlib");
+        tkTypeRef = ResolveClassRef(tkMscorlib,"System.Security.Permissions.SecurityAction", NULL);
         for (pPerm = pPermissions, i = 0; pPerm; pPerm = pPermNext, i++) {
             pPermNext = pPerm->m_Next;
 
-            tkTypeRef = ResolveClassRef("mscorlib^System.Security.Permissions.SecurityAction", NULL);
             pSig = new BinStr();
             pSig->appendInt8(IMAGE_CEE_CS_CALLCONV_DEFAULT_HASTHIS);
             pSig->appendInt8(1);
@@ -2045,12 +1911,12 @@ void Assembler::EmitSecurityInfo(mdToken            token,
 
             if((szMemberName = new char[strlen(COR_CTOR_METHOD_NAME) + 1]))
 			{
-            strcpy(szMemberName, COR_CTOR_METHOD_NAME);
-            pAttrs[i].tkCtor = MakeMemberRef(pPerm->m_TypeSpec, szMemberName, pSig, 0);
-            pAttrs[i].pCustomAttribute = (const void *)pPerm->m_Blob;
-            pAttrs[i].cbCustomAttribute = pPerm->m_BlobLength;
-            pPerm->m_TypeSpec = NULL;
-            pPerm->m_Blob = NULL;
+				strcpy(szMemberName, COR_CTOR_METHOD_NAME);
+		        pAttrs[i].tkCtor = MakeMemberRef(pPerm->m_TypeSpec, szMemberName, pSig, 0);
+				pAttrs[i].pCustomAttribute = (const void *)pPerm->m_Blob;
+				pAttrs[i].cbCustomAttribute = pPerm->m_BlobLength;
+				//pPerm->m_TypeSpec = NULL;
+				pPerm->m_Blob = NULL;
 			}
 			else report->error("\nOut of memory!\n");
             delete pPerm;
@@ -2083,71 +1949,97 @@ void Assembler::EmitSecurityInfo(mdToken            token,
     }
 }
 
-void Assembler::AddMethodImpl(BinStr* pImplementedTypeSpec, char* szImplementedName, BinStr* pSig, 
-					BinStr* pImplementingTypeSpec, char* szImplementingName)
+void Assembler::AddMethodImpl(mdToken tkImplementedTypeSpec, char* szImplementedName, BinStr* pImplementedSig, 
+			      mdToken tkImplementingTypeSpec, char* szImplementingName, BinStr* pImplementingSig)
 {
-	if(m_pCurClass)
-	{
-		MethodImplDescriptor*	pMID = new MethodImplDescriptor;
-		if(pMID == NULL)
-		{
-			report->error("Failed to allocate MethodImpl Descriptor\n");
-			return;
-		}
-		pMID->m_pbsImplementedTypeSpec  = pImplementedTypeSpec;
-		pMID->m_szImplementedName = szImplementedName;
-		pMID->m_tkDefiningClass = m_pCurClass->m_cl;
-		pMID->m_tkImplementingMethod = 0;
-		if(pSig) //called from class scope, overriding method specified
-		{
-			pMID->m_pbsImplementingTypeSpec = pImplementingTypeSpec;
-			pMID->m_szImplementingName = szImplementingName;
-			pMID->m_pbsSig = pSig;
-		}
-		else	//called from method scope, use current method as overriding
-		{
-			if(m_pCurMethod)
-			{
-				pMID->m_pbsSig = new BinStr;
-				memcpy(pMID->m_pbsSig->getBuff(m_pCurMethod->m_dwMethodCSig),m_pCurMethod->m_pMethodSig,m_pCurMethod->m_dwMethodCSig);
-				pMID->m_pbsImplementingTypeSpec = new BinStr;
-				if(m_pCurMethod->m_pClass)
-				{
-					pMID->m_pbsImplementingTypeSpec = new BinStr;
-					char* szFQN = m_pCurMethod->m_pClass->m_szFQN;
-					unsigned L = (unsigned)(strlen(szFQN)+1);
-					pMID->m_pbsImplementingTypeSpec->appendInt8(ELEMENT_TYPE_NAME);
-					memcpy(pMID->m_pbsImplementingTypeSpec->getBuff(L),szFQN,L);
-				}
-				else pMID->m_pbsImplementingTypeSpec = NULL;
-
-				pMID->m_szImplementingName = new char[strlen(m_pCurMethod->m_szName)+1];
-				strcpy(pMID->m_szImplementingName,m_pCurMethod->m_szName);
-				
-				m_pCurMethod->m_MethodImplDList.PUSH(pMID); // copy goes to method's own list (ptr only)
-			}
-			else
-			{
-				report->error("No overriding method specified");
-				delete pMID;
-				return;
-			}
-		}
-		m_MethodImplDList.PUSH(pMID);
-	}
-	else
-		report->error(".override directive outside class scope");
+    if(m_pCurClass)
+    {
+        MethodImplDescriptor*	pMID = new MethodImplDescriptor;
+        if(pMID == NULL)
+        {
+            report->error("Failed to allocate MethodImpl Descriptor\n");
+            return;
+        }
+        pMID->m_tkDefiningClass = m_pCurClass->m_cl;
+        if(szImplementingName) //called from class scope, overriding method specified
+        {
+            pMID->m_tkImplementedMethod = MakeMemberRef(tkImplementedTypeSpec,szImplementedName,pImplementedSig,0);
+            pMID->m_tkImplementingMethod = MakeMemberRef(tkImplementingTypeSpec,szImplementingName,pImplementingSig,0);
+        }
+        else	//called from method scope, use current method as overriding
+        {
+            if(m_pCurMethod)
+            {
+                if (pImplementedSig == NULL)
+                {
+                    pImplementedSig = new BinStr();
+                    memcpy(pImplementedSig->getBuff(m_pCurMethod->m_dwMethodCSig),
+                       m_pCurMethod->m_pMethodSig,m_pCurMethod->m_dwMethodCSig);
+                }
+                pMID->m_tkImplementedMethod = MakeMemberRef(tkImplementedTypeSpec,szImplementedName,pImplementedSig,0);
+                pMID->m_tkImplementingMethod = 0;
+                
+                m_pCurMethod->m_MethodImplDList.PUSH(pMID); // copy goes to method's own list (ptr only)
+            }
+            else
+            {
+                report->error("No overriding method specified");
+                delete pMID;
+                return;
+            }
+        }
+        m_MethodImplDList.PUSH(pMID);
+    }
+    else
+        report->error(".override directive outside class scope");
 }
 // source file name paraphernalia
 void Assembler::SetSourceFileName(char* szName)
 {
-	if(szName && *szName)
+	if(szName)
 	{
-		if(strcmp(m_szSourceFileName,szName))
-		{
-			strcpy(m_szSourceFileName,szName);
-		}
-	}
+        if(*szName)
+        {
+    		if(strcmp(m_szSourceFileName,szName))
+    		{
+    			strcpy(m_szSourceFileName,szName);
+    		}
+            if(m_fIncludeDebugInfo)
+            {
+                DocWriter* pDW;
+                unsigned i=0;
+                while((pDW = m_DocWriterList.PEEK(i++)))
+                {
+                    if(!strcmp(szName,pDW->Name)) break;
+                }
+                if(pDW)
+                {
+                     m_pSymDocument = pDW->pWriter;
+                }
+                else if(m_pSymWriter)
+                {
+                    HRESULT hr;
+                    WszMultiByteToWideChar(g_uCodePage,0,szName,-1,wzUniBuf,dwUniBuf);
+                    if(FAILED(hr=m_pSymWriter->DefineDocument(wzUniBuf,&m_guidLang,
+                        &m_guidLangVendor,&m_guidDoc,&m_pSymDocument)))
+                    { 
+                        m_pSymDocument = NULL;
+                        report->error("Failed to define a document writer");
+                    }
+                    pDW = new DocWriter();
+                    if(pDW) {
+                        pDW->Name = szName;
+                        pDW->pWriter = m_pSymDocument;
+                        m_DocWriterList.PUSH(pDW);
+                    }
+                    else
+                    {
+                        report->error("Out of memory");
+                    }
+                }
+            }
+        }
+    }
 }
 void Assembler::SetSourceFileName(BinStr* pbsName)
 {

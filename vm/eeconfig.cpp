@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -116,7 +121,6 @@ EEConfig::EEConfig()
     iPerfAllocsSizeThreshold = 0;
     pPerfTypesToLog = NULL;
     iFastGCStress = 0;
-    fJitVerificationDisable = false;
 #endif
 
 #ifdef _X86_
@@ -139,6 +143,11 @@ EEConfig::EEConfig()
     fLogMissingZaps = false;
 
     m_fDeveloperInstallation = false;
+
+    //@GENERICS:
+    fGenerics = true;
+    fShareValInsts = false;
+    fShareGenericCode = false;
 
     pZapSet = DEFAULT_ZAP_SET;
 
@@ -368,6 +377,11 @@ void EEConfig::sync()
     }
 
     fShowMetaDataAccess     = GetConfigDWORD(L"ShowMetadataAccess", fShowMetaDataAccess);
+
+    //@GENERICS
+    fGenerics            = (GetConfigDWORD(L"Generics", fGenerics) != 0);
+    fShareGenericCode    = (GetConfigDWORD(L"ShareGenericCode", fShareGenericCode) != 0);
+    fShareValInsts       = (GetConfigDWORD(L"ShareValInsts", fShareValInsts) != 0);
 
     iLogRemotingPerf = GetConfigDWORD(L"LogRemotingPerf", 0);
 

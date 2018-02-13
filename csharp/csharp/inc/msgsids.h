@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -89,6 +94,9 @@
 #define IDS_LowercaseEllSuffix          78
 #define IDS_BadEventUsage2              79
 #define IDS_BadEventUsageNoField        79
+#define IDS_ConstraintOnlyAllowedOnGenericDecl  80
+#define IDS_MethodTypeParamMustBeIdentifier     81
+#define IDS_EventPropertyFieldCantBeGeneric     82
 #define IDS_DuplicateParamName          100
 #define IDS_DuplicateNameInNS           101
 #define IDS_DuplicateNameInClass        102
@@ -239,6 +247,17 @@
 #define IDS_BadCastInFixed              254
 #define IDS_StackallocInCatchFinally    255
 #define IDS_MalformedString             256
+
+#define IDS_GenericStaticField          301
+#define IDS_GenericStaticMethod         302
+#define IDS_TyvarNotInScope             303
+#define IDS_NoNewTyvar                  304
+#define IDS_TypeParams                  305
+#define IDS_BadTypeParameter            306
+#define IDS_TooManyTypeParams           307
+#define IDS_TooFewTypeParams            308
+#define IDS_GenericConstraintNotSatisfied 309
+
 #define IDS_AbstractHasBody             500
 #define IDS_ConcreteMissingBody         501
 #define IDS_AbstractAndSealed           502
@@ -391,7 +410,12 @@
 #define IDS_VolatileByRef               676
 #define IDS_VolatileStruct              677
 #define IDS_VolatileAndReadonly         678
-#define IDS_InternalVirtual             679
+#define IDS_InternalVirtual	            679
+#define IDS_AbstractField               681
+#define IDS_BogusExplicitImpl           682
+#define IDS_ExplicitMethodImplAccessor  683
+#define IDS_AccessorImplementingMethod  684
+#define IDS_ConditionalWithOutParam     685
 #define IDS_IdentifierExpected          1001
 #define IDS_SemicolonExpected           1002
 #define IDS_SyntaxError                 1003
@@ -541,6 +565,8 @@
 #define IDS_ParamsCantBeRefOut          1611
 #define IDS_ReturnNotLValue             1612
 #define IDS_MissingCoClass              1613
+#define IDS_BadArgRef                   1614
+#define IDS_BadArgExtraRef              1615
 #define IDS_BadWarningLevel             1900
 #define IDS_NoWarningsAsErrors          1901
 #define IDS_BadDebugType                1902
@@ -554,6 +580,8 @@
 #define IDS_SK_UNKNOWN                  2005
 #define IDS_SK_VAIRABLE                 2006
 #define IDS_SK_EVENT                    2007
+#define IDS_SK_TYVAR                    2008
+#define IDS_SK_GCLASS                   2009
 #define IDS_CHILD                       2100
 #define IDS_PARENT                      2101
 #define IDS_CLS_NoVarArgs               3000

@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -434,10 +439,9 @@ BaseDomain* Assembly::GetDomain()
     return static_cast<BaseDomain*>(m_pDomain);
 }
 
-TypeHandle Assembly::LoadTypeHandle(NameHandle* pName, OBJECTREF *pThrowable,
-                                    BOOL dontLoadInMemoryType /*=TRUE*/)
+TypeHandle Assembly::LoadTypeHandle(NameHandle* pName, OBJECTREF *pThrowable)
 {
-    return m_pClassLoader->LoadTypeHandle(pName, pThrowable, dontLoadInMemoryType);
+    return m_pClassLoader->LoadTypeHandle(pName, pThrowable);
 }
 
 HRESULT Assembly::SetParent(BaseDomain* pParent)
@@ -1755,9 +1759,9 @@ Module* Assembly::FindModule(BYTE *pBase)
 
 
 TypeHandle Assembly::LookupTypeHandle(NameHandle* pName, 
-                                      OBJECTREF* pThrowable)
+                                      OBJECTREF* pThrowable, Pending *pending)
 {
-    return m_pClassLoader->LookupTypeHandle(pName, pThrowable);
+    return m_pClassLoader->LookupTypeHandle(pName, pThrowable, pending);
 }
 
 
@@ -3851,7 +3855,7 @@ BOOL VerifyAllMethodsForClass(Module *pModule, mdTypeDef cl, ClassLoader *pClass
             continue;
         }
 
-        if (pMD->IsIL() && !pMD->IsAbstract() && !pMD->IsUnboxingStub())
+        if (pMD->IsIL() && !pMD->IsAbstract() && !pMD->IsSpecialStub())
         {
 
             COMPLUS_TRY

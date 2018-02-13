@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -42,6 +47,7 @@
 #include "version/__product__.ver"
 #include "eeconfig.h"
 #include "assemblynative.hpp"
+#include "generics.h"
 
 typedef struct {
     BASEARRAYREF src;
@@ -1023,9 +1029,11 @@ FCIMPL1(Object*, SystemNative::CaptureStackTraceMethod, ArrayBase* pStackTraceUN
     // array is allocated as stream of chars, so need to calculate real number of elems
     int numComponents = pArray->GetNumComponents()/sizeof(pElements[0]);
     MethodDesc* pMeth = NULL;
-    for (int i=0; i < numComponents; i++) 
-    {
-        pMeth= pElements[i].pFunc;
+    TypeHandle owner = TypeHandle();
+    for (int i=0; i < numComponents; i++) {
+
+        pMeth= pElements[i].pFunc;       
+        owner= TypeHandle(pElements[i].owner); 
         _ASSERTE(pMeth);
 
         // Skip Jit Helper functions, since they can throw when you have
@@ -1037,7 +1045,7 @@ FCIMPL1(Object*, SystemNative::CaptureStackTraceMethod, ArrayBase* pStackTraceUN
     }
 
     // Convert the method into a MethodInfo...
-    rv = COMMember::g_pInvokeUtil->GetMethodInfo(pMeth);
+    rv = COMMember::g_pInvokeUtil->GetMethodInfo(pMeth, owner);
 
     HELPER_METHOD_FRAME_END();
 
@@ -1099,6 +1107,8 @@ StackWalkAction SystemNative::CaptureStackTraceCallback(CrawlFrame* pCf, VOID* d
         pData->cElementsAllocated *= 2;
     }    
     pData->pElements[pData->cElements].pFunc = pCf->GetFunction();
+    pData->pElements[pData->cElements].owner = Generics::GetFrameOwner(pCf).GetMethodTable();
+
     if (pCf->IsFrameless())
         pData->pElements[pData->cElements].ip = (PBYTE)GetControlPC(pCf->GetRegisterSet());
     else

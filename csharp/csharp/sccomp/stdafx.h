@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -28,8 +33,6 @@
 #endif // _MSC_VER > 1000
 
 #define _WIN32_DCOM
-
-#define VOLATILEFIELDS 1   // Should we allow volatile modifier on fields.
 
 
 // Insert your headers here
@@ -205,5 +208,7 @@ public:
 }
 #endif  // defined(_MSC_VER)
 typedef CComObjectRootEx<CComMultiThreadModelNoCS> CComObjectRootMT;
+
+#define COR_EE_GENERICS
 
 #endif // !defined(AFX_STDAFX_H__1FB1B422_B183_11D2_88B7_00C04F990355__INCLUDED_)

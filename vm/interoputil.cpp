@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -373,13 +378,23 @@ BOOL IsMemberVisibleFromCom(IMDInternalImport *pInternalImport, mdToken tk, mdMe
             dwFlags = pInternalImport->GetMethodDefProps(tk);
             if (!IsMdPublic(dwFlags))
                 return FALSE;
+            // Generic Methods are not visible from COM
+            {
+                HENUMInternal   hEnumTyPars;
+                if (FAILED(pInternalImport->EnumInit(mdtGenericPar, tk, &hEnumTyPars)))
+                    return FALSE;
+
+                if (pInternalImport->EnumGetCount(&hEnumTyPars) != 0)
+                    return FALSE;
+            }
+
             break;
 
         case mdtProperty:
             _ASSERTE(!IsNilToken(mdAssociate));
             dwFlags = pInternalImport->GetMethodDefProps(mdAssociate);
             if (!IsMdPublic(dwFlags))
-                return FALSE;
+                    return FALSE;
 
             break;
 

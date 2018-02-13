@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -244,7 +249,7 @@ BBLOCK * ILGENREC::createNewBB(bool makeCurrent)
     return rval;
 }
 
-// close the previuos bb and start a new one, either the one provided
+// close the previous bb and start a new one, either the one provided
 // by next, or a brand new one...
 // Return the now current BB
 BBLOCK * ILGENREC::startNewBB(BBLOCK * next, ILCODE exitIL, BBLOCK * jumpDest)
@@ -1933,7 +1938,8 @@ BBLOCK * ILGENREC::genCondBranch(EXPR * condition, BBLOCK * dest, bool sense)
 
     ASSERT(dest);
 
-    ILCODE ilcode;
+    // Initialise ilcode to the default argument of startNewBB
+    ILCODE ilcode = cee_next;
     unsigned idx;
     unsigned senseidx;
     int UNoffset;
@@ -2025,6 +2031,7 @@ SKIPSIMPLE:
             emitTypeToken(condition->asBIN()->p2->asTYPEOF()->sourceType);
             goto SIMPLEBR;
         }
+        break;
 
     default:
         genExpr(condition);
@@ -2288,9 +2295,9 @@ AGAIN:
         tree->asFUNCPTR()->func->isUsed = true;
 #endif
         if (tree->flags & EXF_BASECALL) {
-            emitMethodToken(getBaseMethod(tree->asFUNCPTR()->func)->asFMETHSYM());
+            emitMethodToken(getBaseMethod(tree->asFUNCPTR()->func)->asFMETHSYM(), tree->asFUNCPTR()->methodInType); 
         } else {
-            emitMethodToken(tree->asFUNCPTR()->func);
+            emitMethodToken(tree->asFUNCPTR()->func, tree->asFUNCPTR()->methodInType); 
         }
         break;
                      }
@@ -2663,8 +2670,9 @@ void ILGENREC::genArrayInitConstant(EXPRARRINIT * tree, TYPESYM * elemType, PVAL
 void ILGENREC::genArrayInit(EXPRARRINIT *tree, PVALUSED valUsed)
 {
 
-    int rank = tree->type->asARRAYSYM()->rank;
-    TYPESYM * elemType = tree->type->asARRAYSYM()->elementType();
+    ARRAYSYM *arrType = tree->type->asARRAYSYM();
+    int rank = arrType->rank;
+    TYPESYM * elemType = arrType->elementType();
 
     PSLOT wrappedValue;
     if (tree->flags & EXF_VALONSTACK) {
@@ -2683,7 +2691,7 @@ void ILGENREC::genArrayInit(EXPRARRINIT *tree, PVALUSED valUsed)
         putOpcode(CEE_NEWARR);
         emitTypeToken(elemType);
     } else {
-        genArrayCall(tree->type->asARRAYSYM(), rank, ARRAYMETH_CTOR);
+        genArrayCall(arrType, rank, ARRAYMETH_CTOR);
     }
 
     if (tree->args && (tree->flags & (EXF_ARRAYCONST | EXF_ARRAYALLCONST))) {
@@ -2711,12 +2719,11 @@ void ILGENREC::genArrayInit(EXPRARRINIT *tree, PVALUSED valUsed)
                     genIntConstant(rows[i]);
                 }
                 if (elemType->fundType() == FT_STRUCT) {
-                    il = CEE_LDELEMA;
                     if (rank == 1) {
-                        putOpcode(il);
+                        putOpcode(CEE_LDELEMA);
                         emitTypeToken(elemType);
                     } else {
-                        genArrayCall(tree->type->asARRAYSYM(), rank, ARRAYMETH_LOADADDR);
+                        genArrayCall(arrType, rank, ARRAYMETH_LOADADDR);
                     }
                     genExpr(elem);
                     putOpcode(CEE_STOBJ);
@@ -2731,8 +2738,10 @@ void ILGENREC::genArrayInit(EXPRARRINIT *tree, PVALUSED valUsed)
                     }
                     if ((rank == 1) && (il != CEE_ILLEGAL)) {
                         putOpcode(il);
+                        if (il == CEE_STELEM)
+                            emitTypeToken(elemType);
                     } else {
-                        genArrayCall(tree->type->asARRAYSYM(), rank, ARRAYMETH_STORE);
+                        genArrayCall(arrType, rank, ARRAYMETH_STORE);
                     }
                 }
             }
@@ -2763,10 +2772,13 @@ DONE:
 
 void ILGENREC::genCast(EXPRCAST * tree, PVALUSED valUsed)
 {
+    int key = tree->flags & (EXF_BOX | EXF_UNBOX | EXF_REFCHECK | EXF_CHECKOVERFLOW | EXF_INDEXEXPR | EXF_FORCE_BOX | EXF_FORCE_UNBOX);
 
-    int key = tree->flags & (EXF_BOX | EXF_UNBOX | EXF_REFCHECK | EXF_CHECKOVERFLOW | EXF_INDEXEXPR);
-
-    if (!(key & ~(EXF_BOX | EXF_INDEXEXPR)) && !valUsed) {
+	// Short-cut for unused expressions - simply generate the side effects
+	// of the expression instead.  (nb. I believe EXF_BOX is excluded because
+	// boxing can have unpredictable side effects because 
+	// constructors are called. )
+    if (!(key & ~(EXF_BOX | EXF_INDEXEXPR | EXF_FORCE_BOX)) && !valUsed) {
         genSideEffects(tree->p1);
         return;
     }
@@ -2780,10 +2792,10 @@ void ILGENREC::genCast(EXPRCAST * tree, PVALUSED valUsed)
     TYPESYM * fromType = tree->p1->type->underlyingType();
     TYPESYM * toType = tree->type->underlyingType();
 
-    if (key == EXF_BOX) {
+    if (key == EXF_BOX || key == EXF_FORCE_BOX) {
         genExpr(tree->p1);
         putOpcode(CEE_BOX);
-        emitTypeToken(tree->p1->type);
+	    emitTypeToken(tree->p1->type);
     } else if (key == EXF_INDEXEXPR) {
         genExpr(tree->p1);
         if (toType->fundType() == FT_U4) {
@@ -2794,6 +2806,10 @@ void ILGENREC::genCast(EXPRCAST * tree, PVALUSED valUsed)
             ASSERT(toType->fundType() == FT_U8);
             putOpcode(CEE_CONV_OVF_I_UN);
         }
+    } else if (key == EXF_FORCE_UNBOX) {
+		genExpr(tree->p1);  
+        putOpcode(CEE_UNBOX_ANY);
+        emitTypeToken(tree->type);
     } else {
         
         // This is null being cast to a pointer, change this into a zero instead...
@@ -2807,8 +2823,9 @@ void ILGENREC::genCast(EXPRCAST * tree, PVALUSED valUsed)
         case EXF_UNBOX:
             putOpcode(CEE_UNBOX);
             emitTypeToken(tree->type);
-            putOpcode(ILstackLoad[ft = tree->type->fundType()]);
-            if (ft == FT_STRUCT) {
+            il = ILstackLoad[ft = tree->type->fundType()];
+            putOpcode(il);
+            if (il == CEE_LDOBJ) {
                 emitTypeToken(toType);
             }
             break;
@@ -2883,8 +2900,9 @@ void ILGENREC::genQMark(EXPRBINOP * tree, PVALUSED valUsed)
 // generate code to create an array...
 void ILGENREC::genNewArray(EXPRBINOP * tree)
 {
-    int rank = tree->type->asARRAYSYM()->rank;
-    TYPESYM * elemType = tree->type->asARRAYSYM()->elementType();
+    ARRAYSYM *arrType = tree->type->asARRAYSYM();
+    int rank = arrType->rank;
+    TYPESYM * elemType = arrType->elementType();
 
     int oldStack = curStack;
 
@@ -2897,7 +2915,7 @@ void ILGENREC::genNewArray(EXPRBINOP * tree)
     }
 
     ASSERT(curStack > oldStack);
-    genArrayCall(tree->type->asARRAYSYM(), curStack - oldStack,ARRAYMETH_CTOR);
+    genArrayCall(arrType, curStack - oldStack,ARRAYMETH_CTOR);
 }
 
 
@@ -3445,7 +3463,7 @@ void ILGENREC::genFromAddress(PADDRESS addr, bool store, bool free)
     EXPR * tree = addr->expr;
     LOCSLOTINFO * slot;
     switch (tree->kind) {
-    case EK_FIELD:
+    case EK_FIELD: {
         ILCODE ilcode;
         if (tree->asFIELD()->field->isStatic) {
             ilcode = store ? CEE_STSFLD : CEE_LDSFLD;
@@ -3456,8 +3474,9 @@ void ILGENREC::genFromAddress(PADDRESS addr, bool store, bool free)
         if (tree->asFIELD()->field->isVolatile)
             putOpcode(CEE_VOLATILE); // add volatile prefix when accessing volatile fields
         putOpcode(ilcode);
-        emitFieldToken(tree->asFIELD()->field);
+        emitFieldToken(tree->asFIELD()->field, tree->asFIELD()->methodInType);
         break;
+    }
     case EK_VALUERA:
     case EK_INDIR:
         goto USEINDIRECTION;
@@ -3473,8 +3492,8 @@ USEINDIRECTION:
             FUNDTYPE ft = tree->type->fundType();
             ILCODE il = (store ? ILGENREC::ILstackStore : ILGENREC::ILstackLoad) [ft];
             putOpcode(il);
-            if (ft == FT_STRUCT) {
-                emitTypeToken(tree->type);
+            if (il == CEE_LDOBJ || il == CEE_STOBJ) {
+                emitTypeToken(tree->type); 
             }
         } else {
             ASSERT(addr->type == ADDR_NONE);
@@ -3483,18 +3502,30 @@ USEINDIRECTION:
         break;
         }
     case EK_ARRINDEX:
+    {
         arrayType = tree->asBIN()->p1->type->asARRAYSYM();
         if (tree->flags & EXF_ARRFLAT) {
             ASSERT(!store);
             genArrayCall(arrayType, 1, ARRAYMETH_GETAT); 
         } else {
-            if (tree->type->fundType() == FT_STRUCT) {
+            FUNDTYPE ft = tree->type->fundType();
+            if (ft == FT_STRUCT) {
                 putOpcode(store ? CEE_STOBJ : CEE_LDOBJ);
                 emitTypeToken(tree->type);
             } else {
-                switch (arrayType->rank) {
-                case 1:
-                    putOpcode((store ? ILGENREC::ILarrayStore : ILGENREC::ILarrayLoad) [tree->type->fundType()]);
+	            switch (arrayType->rank) {
+		        case 1:
+			        if (store) {
+				        ILCODE il = ILGENREC::ILarrayStore[ft];
+					    putOpcode(il);
+				        if (il == CEE_STELEM)
+					        emitTypeToken(tree->type); 
+					} else {
+						ILCODE il = ILGENREC::ILarrayLoad[ft];
+						putOpcode(il);
+						if (il == CEE_LDELEM)
+	                        emitTypeToken(tree->type); 
+		            }
                     break;
                 default:
                     genArrayCall(arrayType, arrayType->rank ? arrayType->rank : getArgCount(tree->asBIN()->p2), store ? ARRAYMETH_STORE : ARRAYMETH_LOAD);
@@ -3502,6 +3533,7 @@ USEINDIRECTION:
             }
         }
         break;
+    }
     case EK_PROP: 
         genPropInvoke(tree->asPROP(), addr, store);
         break;
@@ -3558,7 +3590,7 @@ METHPROPSYM * ILGENREC::getVarArgMethod(METHPROPSYM * sym, EXPR * args)
     SYMKIND kind = sym->kind;
     SYMKIND fakeKind = (SYMKIND)(kind + 1);
     ASSERT(fakeKind == SK_FAKEMETHSYM || fakeKind == SK_FAKEPROPSYM);
-    int mask = 1 << fakeKind;
+    symbmask_t mask = ((symbmask_t) 1) << fakeKind;
 
     METHPROPSYM * previous = compiler()->symmgr.LookupGlobalSym(sym->name, sym->parent, mask)->asMETHPROPSYM();
 
@@ -3589,7 +3621,7 @@ AGGSYM * ILGENREC::searchInterveningClasses(METHPROPSYM * sym)
     AGGSYM * base; // class we're currently searching.
     AGGSYM * foundSoFar = cls;  // intervening class found so far.
 
-    for (base = cls->baseClass; base != sym->parent; base = base->baseClass)
+    for (base = cls->baseClass->underlyingAggregate(); base != sym->parent; base = base->baseClass->underlyingAggregate())
     {   
         METHPROPSYM *symFound = compiler()->symmgr.LookupGlobalSym(sym->name, base, 1 << sym->kind)->asMETHPROPSYM();
         while (symFound && 
@@ -3620,16 +3652,16 @@ METHPROPSYM * ILGENREC::getBaseMethod(METHPROPSYM * sym)
     // or we hit the "real" method.
     base = searchInterveningClasses(sym);
     do {
-        if (base->baseClass == sym->parent) 
+        if (base->baseClass->underlyingAggregate() == sym->parent)
             return sym;
-        base = base->baseClass;
+        base = base->baseClass->underlyingAggregate();
     } while (base->getInputFile()->getOutputFile() == myOutfile);
 
     // We hit a class defined outside our output file first. Place the "fake" method on that class.
 
     SYMKIND kind = sym->kind;
     SYMKIND fakeKind = (SYMKIND)(kind + 1);
-    int mask = 1 << fakeKind;
+    symbmask_t mask = ((symbmask_t) 1) << fakeKind;
 
     ASSERT(fakeKind == SK_FAKEMETHSYM || fakeKind == SK_FAKEPROPSYM);
 
@@ -3693,7 +3725,7 @@ void ILGENREC::genPropInvoke(EXPRPROP* tree, PADDRESS addr, bool store)
 
     putOpcode(il);
 
-    emitMethodToken(meth);
+    emitMethodToken(meth, tree->methodInType);  // GENERICS: note, no method type parameters as properties may not be generic
 
     curStack -= meth->cParams;
 
@@ -3847,9 +3879,26 @@ __forceinline void ILGENREC::freeTemporary(PSLOT slot)
 
 
 // emit MD tokens of various types
-void ILGENREC::emitFieldToken(MEMBVARSYM * sym)
+void ILGENREC::emitFieldToken(MEMBVARSYM * sym, TYPESYM *methodInType)
 {
-    mdToken tok = compiler()->emitter.GetMembVarRef(sym);
+    mdToken tok;
+    // GENERICS: emit a field ref with a typeSpec parent whenever we use a non-static field in a generic
+    // class.
+    if (!sym->isStatic &&
+         methodInType && 
+         (methodInType->behavioralType()->kind == SK_AGGSYM) &&
+         (methodInType->behavioralType()->asAGGSYM()->cTypeFormals)) 
+    {
+        INSTAGGSYM *realMethodInType = (methodInType->kind == SK_INSTAGGSYM) ? methodInType->asINSTAGGSYM() : compiler()->symmgr.GetThisType(methodInType->asAGGSYM())->asINSTAGGSYM();
+        // Find the *unique* data structure recording this use of this field for this type application.
+        // Once the token is created we store the token in this structure.  The structure has to be unique
+        // to ensure we don't create the token twice.
+        INSTAGGMEMBVARSYM *cmethsym = compiler()->symmgr.GetInstAggMembVar(sym,realMethodInType);
+        tok = compiler()->emitter.GetMembVarRefAtConstructedType(cmethsym);
+    }
+    else {
+        tok = compiler()->emitter.GetMembVarRef(sym);
+    }
 #if DEBUG
 //    ASSERT(!inlineBB.sym);
     inlineBB.sym = sym;
@@ -3857,9 +3906,42 @@ void ILGENREC::emitFieldToken(MEMBVARSYM * sym)
     putDWORD(tok);
 }
 
-void ILGENREC::emitMethodToken(METHSYM * sym)
+
+void ILGENREC::emitMethodToken(METHSYM * sym, TYPESYM *methodInType, bool emitOpenParent, unsigned short cMethArgs, PTYPESYM *ppMethArgs)
 {
-    mdToken tok = compiler()->emitter.GetMethodRef(sym);
+
+    mdToken tok;
+
+    mdToken tkClassParent = (cls->cTypeFormals ? cls->tokenEmit : mdTokenNil);
+    mdToken tkMethodParent = (method->cTypeFormals ? method->tokenEmit : mdTokenNil);
+
+    // GENERICS: emit a method ref with a typeSpec parent whenever we use a non-static method in a generic
+    // class.
+    if (!sym->isStatic &&
+         methodInType && 
+         (methodInType->behavioralType()->kind == SK_AGGSYM) &&
+         (methodInType->behavioralType()->asAGGSYM()->cTypeFormals)) 
+    {
+        INSTAGGSYM *realMethodInType = (methodInType->kind == SK_INSTAGGSYM) ? methodInType->asINSTAGGSYM() : compiler()->symmgr.GetThisType(methodInType->asAGGSYM())->asINSTAGGSYM();
+        // Find the *unique* data structure recording this use of this method for this type application.
+        // Once the token is created we store the token in this structure. The structure has to be unique
+        // to ensure we don't create the token twice.
+		//
+        INSTAGGMETHSYM *cmethsym = compiler()->symmgr.GetInstAggMeth(sym,realMethodInType);
+        tok = compiler()->emitter.GetMethodRefAtConstructedType(cmethsym, tkClassParent, tkMethodParent);
+        if (cMethArgs) {
+            INSTAGGINSTMETHSYM *icmethsym = compiler()->symmgr.GetInstAggInstMeth(cmethsym,cMethArgs, ppMethArgs);
+            tok = compiler()->emitter.GetMethodInstantiation(icmethsym, icmethsym->getUnderlyingMeth()->tokenEmit, icmethsym->cMethArgs, icmethsym->ppMethArgs, &icmethsym->tokenEmit,  tkClassParent, tkMethodParent);
+        } 
+    }
+    else {
+        tok = compiler()->emitter.GetMethodRef(sym);
+        if (cMethArgs) {
+            INSTMETHSYM *imethsym = compiler()->symmgr.GetInstMeth(sym,cMethArgs, ppMethArgs);
+            tok = compiler()->emitter.GetMethodInstantiation(imethsym, imethsym->getUnderlyingMeth()->tokenEmit, imethsym->cMethArgs, imethsym->ppMethArgs, &imethsym->tokenEmit,  tkClassParent, tkMethodParent);
+        } 
+    }
+
 #if DEBUG
     inlineBB.sym = sym;
 #endif
@@ -3868,7 +3950,7 @@ void ILGENREC::emitMethodToken(METHSYM * sym)
 
 void ILGENREC::emitTypeToken(TYPESYM * sym)
 {
-    mdToken tok = compiler()->emitter.GetTypeRef(sym);
+    mdToken tok = compiler()->emitter.GetTypeRef(sym, false, (cls->cTypeFormals ? cls->tokenEmit : mdTokenNil) , (method->cTypeFormals ? method->tokenEmit : mdTokenNil));
 #if DEBUG
     inlineBB.sym = sym;
 #endif
@@ -4077,14 +4159,14 @@ void ILGENREC::genMemoryAddress(EXPR * tree, PSLOT * pslot, bool ptrAddr)
                 ASSERT(! tree->asFIELD()->field->isVolatile); // Should never access volatile field by address.
             }
         }
-        emitFieldToken(tree->asFIELD()->field);
+        emitFieldToken(tree->asFIELD()->field, tree->asFIELD()->methodInType);
         return;
     case EK_ARRINDEX:
         genExpr(tree->asBIN()->p1);
         genExpr(tree->asBIN()->p2);
         if ((type = tree->asBIN()->p1->type)->asARRAYSYM()->rank == 1) {
             putOpcode(CEE_LDELEMA);
-            emitTypeToken(type->asARRAYSYM()->elementType());
+            emitTypeToken(type->asARRAYSYM()->elementType()); 
         } else {
             genArrayCall(type->asARRAYSYM(), type->asARRAYSYM()->rank ? type->asARRAYSYM()->rank : getArgCount(tree->asBIN()->p2), ARRAYMETH_LOADADDR);
         }
@@ -4148,6 +4230,18 @@ AGAIN:
     }
 }
 
+// The purpose of this routine is to generate an address (normally realised as a value
+// on the stack) ready to access the given member (e.g. a field).
+// 
+// To access some members on value types we need to box first.  Without generics we could do
+// this by a simple comparison between the type of the object and the
+// type of the member we are accessing the object through.  
+//   i.e.         needBox = needsBoxing(member->parent, object->type);
+// was underneath just an equality test.  This coped with situations like
+// accessing an "Object" method on a value type.
+//
+// With generics the needsBoxing check has to compare the underlying aggregates, and to box
+// if these are different.
 void ILGENREC::genObjectPtr(EXPR * object, SYM * member, ADDRESS * addr)
 {
     
@@ -4194,7 +4288,7 @@ void ILGENREC::genObjectPtr(EXPR * object, SYM * member, ADDRESS * addr)
         
                 FREETEMP(addr->baseSlot);
 
-                ASSERT(!member->parent->asAGGSYM()->isStruct);
+                ASSERT(!member->parent->asTYPESYM()->underlyingAggregate()->isStruct);
 
                 // We need to box the address...
                 putOpcode(CEE_BOX);
@@ -4217,7 +4311,7 @@ void ILGENREC::genObjectPtr(EXPR * object, SYM * member, ADDRESS * addr)
 __forceinline unsigned ILGENREC::needsBoxing(PARENTSYM * parent, TYPESYM * object)
 {
     ASSERT(object->isStructType());
-    return parent != object;
+    return (parent != object->underlyingAggregate());
 }
 
 
@@ -4239,7 +4333,6 @@ void ILGENREC::genObjectPtr(EXPR * object, SYM * member, PSLOT * pslot)
             putOpcode(CEE_BOX);
             emitTypeToken(object->type);
         } else {
-
             genMemoryAddress(object, pslot);
         }
 
@@ -4270,7 +4363,7 @@ void ILGENREC::emitRefParam(EXPR * arg, PSLOT * curSlot)
 // isntance methods (exception base calls or structs) to get a null check.
 bool ILGENREC::callAsVirtual(METHSYM * meth, EXPR * object, bool isBaseCall)
 {
-    if (!meth->isStatic && !isBaseCall && object->type->fundType() == FT_REF) {
+    if (!meth->isStatic && !isBaseCall && (object->type->fundType() == FT_REF || object->type->fundType() == FT_VAR)) {
         // If it's a non-virtual method, and we KNOW the reference can't be null, then 
         // use a non-virtual call anyway, though.
         if (!meth->isVirtual && (object->flags & EXF_CANTBENULL))
@@ -4391,7 +4484,7 @@ void ILGENREC::genCall(EXPRCALL * tree, PVALUSED valUsed)
 
     putOpcode(ilcode);
 
-    emitMethodToken(func);
+    emitMethodToken(func, tree->methodInType, (ilcode == CEE_NEWOBJ), tree->cMethTypeArgs, tree->ppMethTypeArgs);
 
     curStack -= stackDiff;
     // eat the arguments off the stack
@@ -4445,8 +4538,8 @@ void ILGENREC::copyHandlers(COR_ILMETHOD_SECT_EH_CLAUSE_FAT * clauses)
         clauses->SetHandlerOffset(hi->handBegin->startOffset);
         clauses->SetHandlerLength(hi->handEnd->next->startOffset - clauses->GetHandlerOffset());
         if (hi->type) {
-            clauses->SetFlags(COR_ILEXCEPTION_CLAUSE_OFFSETLEN);
-            clauses->SetClassToken(compiler()->emitter.GetTypeRef(hi->type));
+            clauses->Flags = COR_ILEXCEPTION_CLAUSE_OFFSETLEN;
+            clauses->ClassToken = compiler()->emitter.GetTypeRef(hi->type, false, (cls->cTypeFormals ? cls->tokenEmit : mdTokenNil) , (method->cTypeFormals ? method->tokenEmit : mdTokenNil));
         } else {
             clauses->SetFlags((CorExceptionFlag) (COR_ILEXCEPTION_CLAUSE_FINALLY | COR_ILEXCEPTION_CLAUSE_OFFSETLEN));
             clauses->SetClassToken(NULL);
@@ -5690,8 +5783,9 @@ CEE_LDIND_I8, //    FT_U8,          // integral types
 CEE_LDIND_R4, //    FT_R4,
 CEE_LDIND_R8, //    FT_R8,          // floating types
 CEE_LDIND_REF,//    FT_REF,         // reference type
-CEE_LDOBJ  , //    FT_STRUCT,      // structure type
-CEE_LDIND_I,
+CEE_LDOBJ  ,  //    FT_STRUCT,      // structure type
+CEE_LDIND_I,  //    FT_PTR
+CEE_LDOBJ,    //    FT_VAR          // type variable
 };
 
 
@@ -5708,8 +5802,9 @@ CEE_STIND_I8, //    FT_U8,          // integral types
 CEE_STIND_R4, //    FT_R4,
 CEE_STIND_R8, //    FT_R8,          // floating types
 CEE_STIND_REF,//    FT_REF,         // reference type
-CEE_STOBJ  , //    FT_STRUCT,      // structure type
+CEE_STOBJ  ,  //    FT_STRUCT,      // structure type
 CEE_STIND_I,
+CEE_STOBJ,    //    FT_VAR,         // type variable
 };
 
 const ILCODE ILGENREC::ILarrayLoad[FT_COUNT] = {
@@ -5727,6 +5822,7 @@ CEE_LDELEM_R8, //    FT_R8,          // floating types
 CEE_LDELEM_REF,//    FT_REF,         // reference type
 CEE_ILLEGAL  , //    FT_STRUCT,      // structure type
 CEE_LDELEM_I,
+CEE_LDELEM,//    FT_VAR,         
 };
 
 const ILCODE ILGENREC::ILarrayStore[FT_COUNT] = {
@@ -5743,7 +5839,8 @@ CEE_STELEM_R4, //    FT_R4,
 CEE_STELEM_R8, //    FT_R8,          // floating types
 CEE_STELEM_REF,//    FT_REF,         // reference type
 CEE_ILLEGAL  , //    FT_STRUCT,      // structure type
-CEE_STELEM_I,
+CEE_STELEM_I,  //    FT_PTR  // FIXED BUG!!!!
+CEE_STELEM  //  FT_VAR,       
 };
 
 

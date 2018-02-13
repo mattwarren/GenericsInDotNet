@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -100,6 +105,8 @@ extern void (jit_call *FJit_pHlpSetField32) (CORINFO_Object*, CORINFO_FIELD_HAND
 extern void (jit_call *FJit_pHlpSetField64) (CORINFO_Object*, CORINFO_FIELD_HANDLE , __int64);
 extern void (jit_call *FJit_pHlpSetFieldObj) (CORINFO_Object*, CORINFO_FIELD_HANDLE , LPVOID);
 extern void* (jit_call *FJit_pHlpGetFieldAddress) (CORINFO_Object*, CORINFO_FIELD_HANDLE);
+extern CORINFO_GENERIC_HANDLE (jit_call *FJit_pHlpRuntimeHandle) (CORINFO_METHOD_HANDLE, unsigned, CORINFO_GENERIC_HANDLE*, CORINFO_CLASS_HANDLE);
+extern CORINFO_MethodPtr (jit_call *FJit_pHlpGenericVirtual) (CORINFO_METHOD_HANDLE, CORINFO_CLASS_HANDLE);
 
 extern void (jit_call *FJit_pHlpGetRefAny) (CORINFO_CLASS_HANDLE cls, void* refany);
 extern void (jit_call *FJit_pHlpEndCatch) ();
@@ -213,6 +220,18 @@ struct OpType {
             typeValClass,   //CORINFO_TYPE_VALUECLASS
             typeRef,     //CORINFO_TYPE_CLASS
             typeRefAny,  //CORINFO_TYPE_REFANY
+            
+            // Generic type variables only appear when we're doing 
+            // verification of generic code, in which case we're running
+            // in "import only" mode.  Annoyingly the "import only"
+            // mode of the JIT actually does a fair bit of compilation,
+            // so we have to trick the compiler into thinking it's compiling
+            // a real instantiation.  We do that by just pretending we're 
+            // compiling the "object" instantiation of the code, i.e. by 
+            // turing all generic type variables refs, except for a few
+            // choice places to do with verification, where we use 
+            // verification types and CLASS_HANDLEs to track the difference.
+            typeRef,     // CORINFO_TYPE_VAR
         };
         _ASSERTE((typeI4 > typeI2) && (typeI1 > typeU1) && (typeU2 > typeU1));
         _ASSERTE(toOpStackType[CORINFO_TYPE_REFANY] == typeRefAny);  //spot check table
@@ -518,6 +537,18 @@ public:
     /* release all of the compilation contexts at shutdown */
     static void Terminate();
 
+    // Given a type token, generate code that will evaluate to the correct type
+    // handle representation of that token. This might require run-time lookup if the
+    // enclosing method is shared between instantiations and the token refers to a 
+    // type spec that contains type variables.
+    void TokenToHandle(unsigned annotatedToken, 
+                       CORINFO_CLASS_HANDLE& tokenType,
+                       bool helperType);
+
+    void TokenToHandleHelper(unsigned annotatedToken,
+                             CORINFO_GENERICHANDLE_RESULT result,
+                             bool helperType);
+
     /* compute the size of an argument based on machine chip */
     unsigned int computeArgSize(CorInfoType argType, CORINFO_ARG_LIST_HANDLE argSig, CORINFO_SIG_INFO* sig);
 
@@ -651,6 +682,7 @@ private:
     FJitResult compileCEE_STELEM_R4();
     FJitResult compileCEE_STELEM_R8();
     FJitResult compileCEE_STELEM_REF();
+    FJitResult compileCEE_STELEM();
     FJitResult compileCEE_LDELEM_U1();
     FJitResult compileCEE_LDELEM_U2();
     FJitResult compileCEE_LDELEM_U4();
@@ -662,6 +694,7 @@ private:
     FJitResult compileCEE_LDELEM_R4();
     FJitResult compileCEE_LDELEM_R8();
     FJitResult compileCEE_LDELEM_REF();
+    FJitResult compileCEE_LDELEM();
     FJitResult compileCEE_LDELEMA();
     FJitResult compileCEE_CEQ();
     FJitResult compileCEE_CGT();
@@ -708,6 +741,7 @@ private:
     FJitResult compileCEE_LDTOKEN();
     FJitResult compileCEE_BOX();
     FJitResult compileCEE_UNBOX();
+    FJitResult compileCEE_UNBOX_ANY();
     FJitResult compileCEE_ISINST();
     FJitResult compileCEE_JMP();
     FJitResult compileCEE_RET();
@@ -788,7 +822,8 @@ private:
     int verifyArguments( CORINFO_SIG_INFO  & sig, int popCount, bool tailCall );
     int verifyThisPtr( CORINFO_CLASS_HANDLE & instanceClassHnd,  CORINFO_CLASS_HANDLE targetClass, 
                         int popCount, bool tailCall );
-    int verifyDelegate( CORINFO_SIG_INFO  & sig, CORINFO_METHOD_HANDLE methodHnd, unsigned char* codePtr, 
+    int verifyDelegate( CORINFO_SIG_INFO  & sig, CORINFO_CLASS_HANDLE targetClass,
+                        unsigned int token, unsigned char* codePtr, 
                         unsigned DelStartDelta,int popCount);
     int verifyHandlers();
     FJitResult verificationFailure( INDEBUG(char * ErrorMessage) );
@@ -849,6 +884,7 @@ private:
     unsigned char*  storedStartIP;                           // used to produce relocatable absolute jumps          
     signed          ilrel;
     unsigned        DelegateStart;
+    unsigned int    delegateMethodRef;
     unsigned        InstStart;
     ULONG32         cSequencePoints;
     unsigned int    offsetVarArgToken;

@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -7220,10 +7225,8 @@ void Thread::AllocateStaticFieldObjRefPtrs(FieldDesc *pFD, MethodTable *pMT, LPV
 
         // Extract the type of the field
         TypeHandle  th;        
-        PCCOR_SIGNATURE pSig;
-        DWORD       cSig;
-        pFD->GetSig(&pSig, &cSig);
-        FieldSig sig(pSig, pFD->GetModule());
+        MetaSig sig(pFD);
+	sig.NextArg();
 
         OBJECTREF throwable = NULL;
         GCPROTECT_BEGIN(throwable);
@@ -7232,7 +7235,7 @@ void Thread::AllocateStaticFieldObjRefPtrs(FieldDesc *pFD, MethodTable *pMT, LPV
             COMPlusThrow(throwable);
         GCPROTECT_END();
 
-        OBJECTREF obj = AllocateObject(th.AsClass()->GetMethodTable());
+        OBJECTREF obj = AllocateObject(th.GetMethodTable());
         SetObjectReference( pObjRef, obj, GetAppDomain() );                      
     }
 
@@ -7345,10 +7348,8 @@ BOOL Thread::GetStaticFieldAddressSpecial(
             {
                 // Extract the type of the field
                 TypeHandle  th;        
-                PCCOR_SIGNATURE pSig;
-                DWORD       cSig;
-                pFD->GetSig(&pSig, &cSig);
-                FieldSig sig(pSig, pFD->GetModule());
+                MetaSig sig(pFD);
+		sig.NextArg();
     
                 OBJECTREF throwable = NULL;
                 GCPROTECT_BEGIN(throwable);
@@ -7357,7 +7358,7 @@ BOOL Thread::GetStaticFieldAddressSpecial(
                     COMPlusThrow(throwable);
                 GCPROTECT_END();
 
-                OBJECTREF obj = AllocateObject(th.AsClass()->GetMethodTable());
+                OBJECTREF obj = AllocateObject(th.GetMethodTable());
                 pObjRef = (OBJECTREF*)CalculateAddressForManagedStatic(*pSlot, NULL);
                 SetObjectReference( pObjRef, obj, GetAppDomain() );                      
             }

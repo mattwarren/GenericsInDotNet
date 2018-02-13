@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -658,13 +663,15 @@ EE_ILEXCEPTION_CLAUSE*  EEJitManager::GetNextEHClause(METHODTOKEN MethodToken,
     return pExceptions->EHClause((unsigned) *pEnumState - 2);
 }
 
-void EEJitManager::ResolveEHClause(METHODTOKEN MethodToken,
+TypeHandle EEJitManager::ResolveEHClause(METHODTOKEN MethodToken,
                               //unsigned clauseNumber,
                               EH_CLAUSE_ENUMERATOR* pEnumState,
-                              EE_ILEXCEPTION_CLAUSE* pEHClauseOut)
+                              EE_ILEXCEPTION_CLAUSE* pEHClauseOut,
+                              CrawlFrame *pCf)
 {
     Module *pModule = NULL;
     EE_ILEXCEPTION* pExceptions;
+    TypeHandle typeHnd = TypeHandle();
 
     pExceptions = ((CodeHeader*)MethodToken)->phdrJitEHInfo;
     pModule = ((CodeHeader*)MethodToken)->hdrMDesc->GetModule();
@@ -674,22 +681,37 @@ void EEJitManager::ResolveEHClause(METHODTOKEN MethodToken,
     _ASSERTE(IsTypedHandler(pClause));
 
     m_pCodeHeapCritSec->Enter();
-    // check first as if has already been resolved then token will have been replaced with EEClass
-    if (! HasCachedEEClass(pClause)) {
+    // check first as if has already been resolved then token will have been replaced with TypeHandle
+    if (! HasCachedTypeHandle(pClause)) {
         // Resolve to class if defined in an *already loaded* scope.
         NameHandle name(pModule, (mdToken)pClause->ClassToken);
         name.SetTokenNotToLoad(tdAllTypes);
-        TypeHandle typeHnd = pModule->GetClassLoader()->LoadTypeHandle(&name);
-        if (!typeHnd.IsNull()) {
-            pClause->pEEClass = typeHnd.GetClass();
-            SetHasCachedEEClass(pClause);
+
+        TypeHandle* classInst   = NULL;
+        TypeHandle* methodInst  = NULL;
+        if (pCf)
+        {
+            TypeHandle  owner;
+            owner       = Generics::GetFrameOwner(pCf);
+            classInst   = pCf->GetFunction()->GetClassInstantiation(owner);
+            methodInst  = pCf->GetFunction()->GetMethodInstantiation();
+        }
+            
+        typeHnd = pModule->GetClassLoader()->LoadTypeHandle(&name, NULL, classInst, classInst);
+
+        if (classInst == NULL && !typeHnd.IsNull())
+        {
+            pClause->exnType = typeHnd.AsMethodTable();
+            SetHasCachedTypeHandle(pClause);
         }
     }
-    if (HasCachedEEClass(pClause))
+    if (HasCachedTypeHandle(pClause))
         // only copy if actually resolved it. Either we did it or another thread did
         copyExceptionClause(pEHClauseOut, pClause);
 
     m_pCodeHeapCritSec->Leave();
+
+    return typeHnd;
 }
 
 

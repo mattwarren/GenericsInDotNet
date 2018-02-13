@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -18,7 +23,7 @@
 // Debugger runtime controller routines.
 //
 //*****************************************************************************
-
+ 
 #include "stdafx.h"
 #include "comsystem.h"
 #include "debugdebugger.h"
@@ -203,7 +208,7 @@ void DebuggerPatchTable::ClearPatchesFromModule(Module *pModule)
          patch != NULL;
          patch = GetNextPatch(&f))
     {
-        if (patch->dji != (DebuggerJitInfo*)DebuggerJitInfo::DJI_VERSION_INVALID && 
+        if (patch->dji != (DebuggerJitInfo*)DebuggerJitInfo::DJI_INVALID && 
             patch->dji->m_fd->GetModule() == pModule)
         {
             LOG((LF_CORDB, LL_EVERYTHING, "Removing patch 0x%x\n", 
@@ -245,7 +250,7 @@ Debugger::Debugger()
     m_stopped(FALSE),
     m_unrecoverableError(FALSE),
     m_ignoreThreadDetach(FALSE),
-    m_pJitInfos(NULL),
+    m_pMethodInfos(NULL),
     m_eventHandlingEvent(NULL),
     m_syncingForAttach(SYNC_STATE_0),
     m_threadsAtUnsafePlaces(0),
@@ -274,29 +279,45 @@ Debugger::~Debugger()
 {
     HASHFIND info;
 
-    if (m_pJitInfos != NULL)
+    if (m_pMethodInfos != NULL)
     {
-        for (DebuggerJitInfo *dji = m_pJitInfos->GetFirstJitInfo(&info);
-         dji != NULL;
-             dji = m_pJitInfos->GetNextJitInfo(&info))
-    {
-        LOG((LF_CORDB, LL_EVERYTHING, "D::~D: delete DJI 0x%x\n", dji));
+        for (DebuggerMethodInfo *dmi = m_pMethodInfos->GetFirstMethodInfo(&info);
+         dmi != NULL;
+             dmi = m_pMethodInfos->GetNextMethodInfo(&info))
+		{
+			LOG((LF_CORDB, LL_EVERYTHING, "D::~D: delete DMI 0x%x\n", dmi));
 
-        DebuggerJitInfo *djiPrev = NULL;
+			DebuggerMethodInfo *dmiPrev = NULL;
 
-        while(dji != NULL)
-        {
-            djiPrev = dji->m_prevJitInfo;
-            
-            TRACE_FREE(dji);
-                DeleteInteropSafe(dji);
-            
-            dji = djiPrev;
-        }
-    }
+			while(dmi != NULL)
+			{
+				dmiPrev = dmi->m_prevMethodInfo;
 
-        DeleteInteropSafe(m_pJitInfos);
-        m_pJitInfos = NULL;
+				if (dmi->m_latestJitInfo != NULL)
+				{
+					DebuggerJitInfo *dji = dmi->m_latestJitInfo;
+
+					while(dji != NULL)
+					{
+						DebuggerJitInfo *djiPrev = dji->m_prevJitInfo;
+
+						TRACE_FREE(dji);
+						DeleteInteropSafe(dji);
+
+						dji = djiPrev;
+					}
+
+				}
+
+				TRACE_FREE(dmi);
+				DeleteInteropSafe(dmi);
+
+				dmi = dmiPrev;
+			}
+		}
+
+        DeleteInteropSafe(m_pMethodInfos);
+        m_pMethodInfos = NULL;
     }
 
     if (m_pModules != NULL)
@@ -360,20 +381,20 @@ Debugger::~Debugger()
     // We leak this in V1
 }
 
-// Checks if the JitInfos table has been allocated, and if not does so.
-HRESULT Debugger::CheckInitJitInfoTable()
+// Checks if the MethodInfos table has been allocated, and if not does so.
+HRESULT Debugger::CheckInitMethodInfoTable()
 {
-    if (m_pJitInfos == NULL)
+    if (m_pMethodInfos == NULL)
     {
-        DebuggerJitInfoTable *pJitInfos = new (interopsafe) DebuggerJitInfoTable();
-        _ASSERTE(pJitInfos);
+        DebuggerMethodInfoTable *pMethodInfos = new (interopsafe) DebuggerMethodInfoTable();
+        _ASSERTE(pMethodInfos);
 
-        if (pJitInfos == NULL)
+        if (pMethodInfos == NULL)
             return (E_OUTOFMEMORY);
 
-        if (InterlockedCompareExchangePointer((PVOID *)&m_pJitInfos, (PVOID)pJitInfos, NULL) != NULL)
+        if (InterlockedCompareExchangePointer((PVOID *)&m_pMethodInfos, (PVOID)pMethodInfos, NULL) != NULL)
         {
-            DeleteInteropSafe(pJitInfos);
+            DeleteInteropSafe(pMethodInfos);
         }
     }
 
@@ -420,57 +441,58 @@ HRESULT Debugger::CheckInitPendingFuncEvalTable()
     return (S_OK);
 }
 
-#ifdef _DEBUG_DJI_TABLE
+
+#ifdef _DEBUG_DMI_TABLE
 // Returns the number of (official) entries in the table
-ULONG DebuggerJitInfoTable::CheckDjiTable(void)
+ULONG DebuggerMethodInfoTable::CheckDmiTable(void)
 {
 	USHORT cApparant = 0;
 	USHORT cOfficial = 0;
 
     if (NULL != m_pcEntries)
     {
-    	DebuggerJitInfoEntry *dcp;
+    	DebuggerMethodInfoEntry *dcp;
     	int i = 0;
     	while (i++ <m_iEntries)
     	{
-    		dcp = (DebuggerJitInfoEntry*)&(((DebuggerJitInfoEntry *)m_pcEntries)[i]);
+    		dcp = (DebuggerMethodInfoEntry*)&(((DebuggerMethodInfoEntry *)m_pcEntries)[i]);
             if(dcp->pFD != 0 && 
                dcp->pFD != (MethodDesc*)0xcdcdcdcd &&
-               dcp->ji != NULL)
+               dcp->mi != NULL)
             {
                 cApparant++;
                 
-                _ASSERTE( dcp->pFD == dcp->ji->m_fd );
-				LOG((LF_CORDB, LL_INFO1000, "DJIT::CDT:Entry:0x%x ji:0x%x\nPrevs:\n",
-					dcp, dcp->ji));
-				DebuggerJitInfo *dji = dcp->ji->m_prevJitInfo;
+                _ASSERTE( dcp->pFD == dcp->mi->m_fd );
+				LOG((LF_CORDB, LL_INFO1000, "DMIT::CDT:Entry:0x%x mi:0x%x\nPrevs:\n",
+					dcp, dcp->mi));
+				DebuggerMethodInfo *dmi = dcp->mi->m_prevMethodInfo;
 				
-				while(dji != NULL)
+				while(dmi != NULL)
 				{
-					LOG((LF_CORDB, LL_INFO1000, "\t0x%x\n", dji));
-					dji = dji->m_prevJitInfo;
+					LOG((LF_CORDB, LL_INFO1000, "\t0x%x\n", dmi));
+					dmi = dmi->m_prevMethodInfo;
 				}
-				dji = dcp->ji->m_nextJitInfo;
+				dmi = dcp->mi->m_nextMethodInfo;
 				
-				LOG((LF_CORDB, LL_INFO1000, "Nexts:\n", dji));
-				while(dji != NULL)
+				LOG((LF_CORDB, LL_INFO1000, "Nexts:\n", dmi));
+				while(dmi != NULL)
 				{
-					LOG((LF_CORDB, LL_INFO1000, "\t0x%x\n", dji));
-					dji = dji->m_nextJitInfo;
+					LOG((LF_CORDB, LL_INFO1000, "\t0x%x\n", dmi));
+					dmi = dmi->m_nextMethodInfo;
 				}
 				
-				LOG((LF_CORDB, LL_INFO1000, "DJIT::CDT:DONE\n",
-					dcp, dcp->ji));
+				LOG((LF_CORDB, LL_INFO1000, "DMIT::CDT:DONE\n",
+					dcp, dcp->mi));
 			}
         }
 
     	if (m_piBuckets == 0)
     	{
-        	LOG((LF_CORDB, LL_INFO1000, "DJIT::CDT: The table is officially empty!\n"));
+        	LOG((LF_CORDB, LL_INFO1000, "DMIT::CDT: The table is officially empty!\n"));
         	return cOfficial;
         }
         
-		LOG((LF_CORDB, LL_INFO1000, "DJIT::CDT:Looking for official entries:\n"));
+		LOG((LF_CORDB, LL_INFO1000, "DMIT::CDT:Looking for official entries:\n"));
 
 	    USHORT iNext = m_piBuckets[0];
 		USHORT iBucket = 1;
@@ -482,10 +504,10 @@ ULONG DebuggerJitInfoTable::CheckDjiTable(void)
                 cOfficial++;
 	        
 	            psEntry = EntryPtr(iNext);
-				dcp = ((DebuggerJitInfoEntry *)psEntry);
+				dcp = ((DebuggerMethodInfoEntry *)psEntry);
 
-				LOG((LF_CORDB, LL_INFO1000, "\tEntry:0x%x ji:0x%x @idx:0x%x @bucket:0x%x\n",
-					dcp, dcp->ji, iNext, iBucket));
+				LOG((LF_CORDB, LL_INFO1000, "\tEntry:0x%x mi:0x%x @idx:0x%x @bucket:0x%x\n",
+					dcp, dcp->mi, iNext, iBucket));
 
 				iNext = psEntry->iNext;
 			}
@@ -497,13 +519,12 @@ ULONG DebuggerJitInfoTable::CheckDjiTable(void)
 	            break;
 		}            
 
-		LOG((LF_CORDB, LL_INFO1000, "DJIT::CDT:Finished official entries: ****************"));
+		LOG((LF_CORDB, LL_INFO1000, "DMIT::CDT:Finished official entries: ****************"));
     }
 
     return cOfficial;
 }
-#endif // _DEBUG_DJI_TABLE
-
+#endif // _DEBUG_DMI_TABLE
 //
 // Startup initializes any necessary debugger objects, including creating
 // and starting the Runtime Controller thread. Once the RC thread is started
@@ -830,34 +851,48 @@ static void _dumpVarNativeInfo(ICorJitInfo::NativeVarInfo* vni)
 /******************************************************************************
  *
  ******************************************************************************/
-DebuggerJitInfo *Debugger::CreateJitInfo(MethodDesc *fd)
+DebuggerMethodInfo *Debugger::CreateMethodInfo(Module *module, mdMethodDef md)
 {
-    //
-    // Create a jit info struct to hold info about this function.
-    //
-//    CHECK_DJI_TABLE_DEBUGGER;
+    DebuggerMethodInfo *mi = new (interopsafe) DebuggerMethodInfo(module, md);
+    TRACE_ALLOC(mi);
 
+    if (mi == NULL) 
+        return NULL;
     //
+    // Lock a mutex when changing the table.
     //
-    DebuggerJitInfo *ji = new (interopsafe) DebuggerJitInfo(fd);
+    HRESULT hr;
+    hr =g_pDebugger->InsertAtHeadOfList( mi);
+    
+    if (FAILED(hr))
+    {
+        DeleteInteropSafe(mi);
+        return NULL;
+    }
+    return mi;
+}
+
+DebuggerJitInfo *Debugger::CreateJitInfo(DebuggerMethodInfo *mi, MethodDesc *fd)
+{
+    DebuggerJitInfo *ji = new (interopsafe) DebuggerJitInfo(mi, fd);
 
     TRACE_ALLOC(ji);
-
+    
     if (ji != NULL )
     {
         //
         // Lock a mutex when changing the table.
         //
         HRESULT hr;
-        hr =g_pDebugger->InsertAtHeadOfList( ji );
-
+        hr =g_pDebugger->AddJitInfo( ji);
+        
         if (FAILED(hr))
         {
             DeleteInteropSafe(ji);
             return NULL;
         }
     }
-
+    
     return ji;
 }
 
@@ -1021,7 +1056,7 @@ HRESULT DebuggerJitInfo::SetBoundaries(ULONG32 cMap, ICorDebugInfo::OffsetMappin
         // Keep in mind that if we have an instrumented code translation
         // table, we may have asked for completely different IL offsets
         // than the user thinks we did.....
-        m->ilOffset = TranslateToInstIL(pMapEntry->ilOffset,
+        m->ilOffset = m_methodInfo->TranslateToInstIL(pMapEntry->ilOffset,
                                         bInstrumentedToOriginal);
 
         // Grab the source into the separate array.
@@ -1118,7 +1153,7 @@ HRESULT DebuggerJitInfo::SetBoundaries(ULONG32 cMap, ICorDebugInfo::OffsetMappin
             LOG((LF_CORDB, LL_INFO1000000,
                  "D::sB: 0x%04x (Real:0x%04x) --> 0x%08x -- 0x%08x",
                  m_sequenceMap[i].ilOffset,
-                 TranslateToInstIL(m_sequenceMap[i].ilOffset,
+                 m_methodInfo->TranslateToInstIL(m_sequenceMap[i].ilOffset,
                                    bOriginalToInstrumented),
                  m_sequenceMap[i].nativeStartOffset,
                  m_sequenceMap[i].nativeEndOffset));
@@ -1170,30 +1205,35 @@ void Debugger::JITBeginning(MethodDesc* fd, bool trackJITInfo)
     if (CORDBUnrecoverableError(this) || !trackJITInfo)
         goto Exit;
 
-    LOG((LF_CORDB,LL_INFO10000,"De::JITBeg: %s::%s\n", 
-        fd->m_pszDebugClassName,fd->m_pszDebugMethodName));
+    LOG((LF_CORDB,LL_INFO10000,"De::JITBeg: %s::%s, i.e. %s\n", 
+        fd->m_pszDebugClassName,fd->m_pszDebugMethodName, fd->m_pszDebugMethodSignature));
 
     // We don't necc. want to create another DJI.  In particular, if
     // 1) we're reJITting pitched code then we don't want to create
     // yet another DJI.
     //
     //
-    DebuggerJitInfo * prevJi;
-    prevJi = GetJitInfo(fd, NULL);
+    DebuggerMethodInfo *prevMi;
+	DebuggerJitInfo * prevJi;
+    prevJi = GetJitInfo(fd, NULL, &prevMi);
     
 #ifdef LOGGING      
     if (prevJi != NULL )
-        LOG((LF_CORDB,LL_INFO10000,"De::JITBeg: Got DJI 0x%x, "
-            "from 0x%x to 0x%x\n",prevJi, prevJi->m_addrOfCode, 
+        LOG((LF_CORDB,LL_INFO10000,"De::JITBeg: Got DJI 0x%x and DMI 0x%x, "
+            "from 0x%x to 0x%x,\n",prevJi, prevMi, prevJi->m_addrOfCode, 
             prevJi->m_addrOfCode+prevJi->m_sizeOfCode));
 #endif //LOGGING
 
+	if (prevMi == NULL) {
+		prevMi = CreateMethodInfo(fd->GetModule(), fd->GetMemberDef());
+	}
     // If this is a re-JIT, then bail now before fresh or EnC stuff
     // If this is a JIT that has been begun by the profiler, then
     // don't create another one...
-    if (!((prevJi != NULL) && ((prevJi->m_codePitched == true) ||
+    if (!((prevMi != NULL) &&
+		  (prevJi != NULL) && ((prevJi->m_codePitched == true) ||
                                (prevJi->m_jitComplete == false))))
-        CreateJitInfo(fd);
+        CreateJitInfo(prevMi,fd);
 
 Exit:    
     STOP_DBG_PERF();
@@ -1219,7 +1259,7 @@ void Debugger::JITComplete(MethodDesc* fd, BYTE* newAddress, SIZE_T sizeOfCode, 
         goto Exit;
 
     LOG((LF_CORDB, LL_INFO100000,
-         "D::JitComplete: address of methodDesc 0x%x (%s::%s)"
+         "De::JITComplete: address of methodDesc 0x%x (%s::%s)"
          "jitted code is 0x%08x, Size::0x%x \n",fd,
          fd->m_pszDebugClassName,fd->m_pszDebugMethodName,
          newAddress, sizeOfCode));
@@ -1281,12 +1321,12 @@ void Debugger::JITComplete(MethodDesc* fd, BYTE* newAddress, SIZE_T sizeOfCode, 
             _ASSERTE(SUCCEEDED(hr));
         }
 
-        if (SUCCEEDED(hr = CheckInitJitInfoTable()))
+        if (SUCCEEDED(hr = CheckInitMethodInfoTable()))
         {
             _ASSERTE(ji->m_fd != NULL);
-            if (!m_pJitInfos->EnCRemapSentForThisVersion(ji->m_fd->GetModule(),
+            if (!m_pMethodInfos->EnCRemapSentForThisVersion(ji->m_fd->GetModule(),
                                                          ji->m_fd->GetMemberDef(),
-                                                         ji->m_nVersion))
+                                                         ji->m_methodInfo->m_nVersion))
             {
                 LOG((LF_CORDB,LL_INFO10000,"De::JITCo: Haven't yet remapped this,"
                     "so go ahead & send the event\n"));
@@ -1402,7 +1442,7 @@ SIZE_T Debugger::GetArgCount(MethodDesc *fd,BOOL *fVarArg)
     // picking the sig apart ourselves.)
     PCCOR_SIGNATURE pCallSig = fd->GetSig();
 
-    MetaSig *msig = new (interopsafe) MetaSig(pCallSig, g_pEEInterface->MethodDescGetModule(fd), MetaSig::sigMember);
+    MetaSig *msig = new (interopsafe) MetaSig(pCallSig, g_pEEInterface->MethodDescGetModule(fd), NULL, NULL, MetaSig::sigMember);
 
     // Get the arg count.
     UINT32 NumArguments = msig->NumFixedArgs();
@@ -1437,86 +1477,127 @@ SIZE_T Debugger::GetArgCount(MethodDesc *fd,BOOL *fVarArg)
             head of the DebuggerJitInfo list, whether it's been
             JITted or not.
  ******************************************************************************/
-DebuggerJitInfo *Debugger::GetJitInfo(MethodDesc *fd, 
-                                      const BYTE *pbAddr,
-                                      bool fByVersion)
+
+DebuggerJitInfo *Debugger::GetJitInfo(MethodDesc *fd, const BYTE *pbAddr, DebuggerMethodInfo **pMethInfo )
 {
-    DebuggerJitInfo *info = NULL;
+    DebuggerMethodInfo *dmi = NULL;
+    DebuggerJitInfo *dji = NULL;
 
     LockJITInfoMutex();
 
-//    CHECK_DJI_TABLE_DEBUGGER;
+    //    CHECK_DJI_TABLE_DEBUGGER;
     
-    if (m_pJitInfos != NULL)
-        info = m_pJitInfos->GetJitInfo(fd);
-    
-   
+    // Find the DJI via the DMI
+	//
+	if (fd != NULL && m_pMethodInfos != NULL)
+	{
+		//        CHECK_DMI_TABLE;
+		dmi = GetMethodInfo(fd->GetModule(), fd->GetMemberDef());
+
+		if (dmi != NULL && dmi->m_latestJitInfo != NULL)
+		{
+			for (dji = dmi->m_latestJitInfo; dji != NULL; dji = dji->m_prevJitInfo)
+			{
+				if (dji->m_fd == fd)
+					break;
+			}
+			LOG((LF_CORDB, LL_INFO1000, "D::GJI: for md:0x%x (%s::%s), got dmi:0x%x, but no DJI found\n",
+				fd, fd->m_pszDebugClassName, fd->m_pszDebugMethodName, 
+				dmi));
+
+		}
+
+	}
+
+	LOG((LF_CORDB, LL_INFO1000, "D::GJI: for md:0x%x (%s::%s), got dmi:0x%x, dji:0x%x, latest dji:0x%x, latest fd:0x%x, prev dji:0x%x\n",
+		fd, fd->m_pszDebugClassName, fd->m_pszDebugMethodName, 
+		dmi, dji, (dmi?dmi->m_latestJitInfo:0),
+		((dmi && dmi->m_latestJitInfo)?dmi->m_latestJitInfo->m_fd:0),
+		(dji?dji->m_prevJitInfo:0)));
+
+	if (dmi == NULL && fd != NULL) {
+		dmi = CreateMethodInfo(fd->GetModule(), fd->GetMemberDef());
+		LOG((LF_CORDB, LL_INFO1000, "D::GJI: created DMI for md:0x%x (%s::%s), dmi:0x%x\n",
+			fd, fd->m_pszDebugClassName, fd->m_pszDebugMethodName, 
+			dmi));
+	}
+
 
     // If code pitching is enabled the address may be invalid
     if ( g_pEEInterface->GetEEState() & EEDebugInterface::EE_STATE_CODE_PITCHING )
     {
-        // Couldn't find info by address, but since ENC &&
-        // pitching don't work together, we know that we'll
-        // have only one version anyways.
-        if (m_pJitInfos != NULL)
-           info = m_pJitInfos->GetJitInfo(fd);
+        //dji = GetJitInfo(fd, NULL);
+            LOG((LF_CORDB, LL_INFO1000, "*** *** DJI not found, but we're "
+                "pitching, so use 0x%x as DJI\n", dji ));
 
-        LOG((LF_CORDB, LL_INFO1000, "*** *** DJI not found, but we're "
-                                    "pitching, so use 0x%x as DJI\n", info ));
-
-        _ASSERTE(info == NULL || fd == info->m_fd);
+            _ASSERTE(dji == NULL || fd == dji->m_fd);
     }
-    else if (fByVersion)
-        info = info->GetJitInfoByVersionNumber((SIZE_T)pbAddr, GetVersionNumber(fd));
-    else
-    {
-        if (pbAddr != NULL )
-        {
-            info = info->GetJitInfoByAddress(pbAddr);
-            
-            if (info == NULL) //may have been given address of a thunk
-            {
-                LOG((LF_CORDB,LL_INFO1000,"Couldn't find a DJI by address 0x%x, "
-                    "so it might be a stub or thunk\n", pbAddr));
-                TraceDestination trace;
 
-                g_pEEInterface->TraceStub(pbAddr, &trace);
-                if ((trace.type == TRACE_MANAGED) &&
-                    (pbAddr != trace.address))
-                {
-                    LOG((LF_CORDB,LL_INFO1000,"Address thru thunk"
-                        ": 0x%x\n", trace.address));
-                    info = g_pDebugger->GetJitInfo(fd,trace.address);
-                }
-#ifdef LOGGING  
-                else
-                {
-                    _ASSERTE( trace.type != TRACE_UNJITTED_METHOD ||
-                            fd == (MethodDesc*)trace.address);
-                    LOG((LF_CORDB,LL_INFO1000,"Address not thunked - "
-                        "must be to unJITted method, or normal managed "
-                        "method lacking a DJI!\n"));
-                }
-#endif //LOGGING
+    if (dji != NULL && pbAddr != NULL )
+    {
+        dji = dji->GetJitInfoByAddress(pbAddr);
+        if (dji == NULL) //may have been given address of a thunk
+        {
+            LOG((LF_CORDB,LL_INFO1000,"Couldn't find a DJI by address 0x%x, "
+				"so it might be a stub or thunk\n", pbAddr));
+            TraceDestination trace;	
+            g_pEEInterface->TraceStub(pbAddr, &trace);
+            if ((trace.type == TRACE_MANAGED) && (pbAddr != trace.address))
+            {
+                LOG((LF_CORDB,LL_INFO1000,"Address thru thunk: 0x%x\n", trace.address));
+                dji = g_pDebugger->GetJitInfo(fd,trace.address);
             }
+#ifdef LOGGING  
+            else
+            {
+                _ASSERTE( trace.type != TRACE_UNJITTED_METHOD ||
+                    fd == (MethodDesc*)trace.address);
+                LOG((LF_CORDB,LL_INFO1000,"Address not thunked - "
+                    "must be to unJITted method, or normal managed "
+                    "method lacking a DJI!\n"));
+            }
+#endif //LOGGING
         }
     }
     
-    if (info != NULL)
+    if (dji != NULL)
     {
-        info->SortMap();
+        dji->SortMap();
         LOG((LF_CORDB,LL_INFO10000, "D::GJI: found dji 0x%x for %s::%s "
             "(start,size):(0x%x,0x%x) nVer:0x%x\n",
-            info, info->m_fd->m_pszDebugClassName,
-            info->m_fd->m_pszDebugMethodName,
-            (ULONG)info->m_addrOfCode, 
-            (ULONG)info->m_sizeOfCode, 
-            (ULONG)info->m_nVersion));
+            dji, dji->m_fd->m_pszDebugClassName,
+            dji->m_fd->m_pszDebugMethodName,
+            (ULONG)dji->m_addrOfCode, 
+            (ULONG)dji->m_sizeOfCode, 
+            (ULONG)dji->m_methodInfo->m_nVersion));
     }   
     UnlockJITInfoMutex();
 
-    return info;
+    if (pMethInfo)
+        *pMethInfo = dmi;
+    return dji;
 }
+
+
+DebuggerMethodInfo *Debugger::GetMethodInfo(Module *pModule, mdMethodDef token, SIZE_T version,
+									bool fByVersion)
+{
+    DebuggerMethodInfo *info = NULL;
+
+    LockJITInfoMutex();
+
+	if (m_pMethodInfos != NULL)
+		info = m_pMethodInfos->GetMethodInfo(pModule, token);
+
+	if (info && fByVersion)
+		info= info->GetMethodInfoByVersionNumber(version, GetVersionNumber(pModule,token));
+
+	UnlockJITInfoMutex();
+
+	return info;
+
+}
+
 
 /******************************************************************************
  * GetILToNativeMapping returns a map from IL offsets to native
@@ -1575,6 +1656,14 @@ DebuggerJitInfo::~DebuggerJitInfo()
         DeleteInteropSafe(m_varNativeInfo);
     }
 
+    LOG((LF_CORDB,LL_EVERYTHING, "DJI::~DJI : deleted at 0x%x\n", this));
+}
+
+/******************************************************************************
+ *
+ ******************************************************************************/
+DebuggerMethodInfo::~DebuggerMethodInfo()
+{
     TRACE_FREE(m_OldILToNewIL);
     if (m_OldILToNewIL != NULL)
     {
@@ -1589,7 +1678,7 @@ DebuggerJitInfo::~DebuggerJitInfo()
         DeleteInteropSafe(m_pDcq);
     }
 
-    LOG((LF_CORDB,LL_EVERYTHING, "DJI::~DJI : deleted at 0x%x\n", this));
+    LOG((LF_CORDB,LL_EVERYTHING, "DMI::~DMI : deleted at 0x%x\n", this));
 }
 
 /******************************************************************************
@@ -1711,12 +1800,18 @@ void Debugger::getBoundaries(CORINFO_METHOD_HANDLE ftn,
         return;
     }
 
-    // Grab the JIT info struct for this method.
-    DebuggerJitInfo *ji = GetJitInfo(md, NULL);
+    // Grab the JIT info struct for this method.  Create if needed, as this
+	// may be called before JITBeginning.
+    DebuggerMethodInfo *dmi = NULL;
+	DebuggerJitInfo *ji = GetJitInfo(md, NULL, &dmi);
 
-    // This may be called before JITBeginning in a compilation domain
+	_ASSERTE(md != NULL);
+	// This may be called before JITBeginning in a compilation domain, hence create Method and Jit Info if needed.
+    if (dmi == NULL)
+		dmi = CreateMethodInfo(md->GetModule(), md->GetMemberDef());
+	_ASSERTE(dmi != NULL);
     if (ji == NULL)
-        ji = CreateJitInfo(md);
+        ji = CreateJitInfo(dmi, md);
 
     _ASSERTE(ji != NULL); // to pitch, must first jit ==> it must exist
 
@@ -1781,13 +1876,13 @@ void Debugger::getBoundaries(CORINFO_METHOD_HANDLE ftn,
 
                         // Translate the IL offets based on an
                         // instrumented IL map if one exists.
-                        if (ji->m_cInstrumentedILMap > 0)
+                        if (ji->m_methodInfo->m_cInstrumentedILMap > 0)
                         {
                             for (SIZE_T i = 0; i < n; i++)
                             {
                                 long origOffset = *p;
                                 
-                                *p = ji->TranslateToInstIL(
+                                *p = ji->m_methodInfo->TranslateToInstIL(
                                                       origOffset,
                                                       bOriginalToInstrumented);
 
@@ -1850,7 +1945,7 @@ void Debugger::getBoundaries(CORINFO_METHOD_HANDLE ftn,
 // debugger what the IL to native map (the sequence map) is.  The
 // information is stored in an array of DebuggerILToNativeMap
 // structures, which is stored in the DebuggerJitInfo obtained
-// from the DebuggerJitInfoTable.  The DebuggerJitInfo is placed
+// from the DebuggerMethodInfoTable.  The DebuggerJitInfo is placed
 // there by the call to JitBeginning.
  ******************************************************************************/
 void Debugger::setBoundaries(CORINFO_METHOD_HANDLE ftn, ULONG32 cMap,
@@ -1905,17 +2000,25 @@ void Debugger::getVars(CORINFO_METHOD_HANDLE ftn, ULONG32 *cVars, ILVarInfo **va
 
     //
     //
-    DebuggerJitInfo *ji;
-    ji = GetJitInfo((MethodDesc*)ftn,NULL);
+    DebuggerMethodInfo *dmi;
+	DebuggerJitInfo *ji;
+	_ASSERTE(ftn != NULL);
+    ji = GetJitInfo((MethodDesc*)ftn,NULL, &dmi);
 
     // This may be called before JITBeginning in a compilation domain
-    if (ji == NULL)
-        ji = CreateJitInfo((MethodDesc*)ftn);
+	if (dmi == NULL) 
+	{
+		dmi = CreateMethodInfo(((MethodDesc*)ftn)->GetModule(), ((MethodDesc*)ftn)->GetMemberDef());
+	}
+		
+	_ASSERTE(dmi != NULL);
+    if (dmi != NULL && ji == NULL)
+        ji = CreateJitInfo(dmi,(MethodDesc*)ftn);
 
     _ASSERTE( ji != NULL ); // to pitch, must first jit ==> it must exist
     LOG((LF_CORDB,LL_INFO10000,"De::gV: Got DJI 0x%x\n",ji));
 
-    if (ji != NULL)
+    if (dmi != NULL && ji != NULL)
     {
         // Just tell the JIT to extend everything.
         *extendOthers = true;
@@ -2016,7 +2119,8 @@ HRESULT Debugger::SetIP( bool fCanSetIPOnly, Thread *thread,Module *module,
     HRESULT hr = S_OK;
     HRESULT hrAdvise = S_OK;
     
-    MethodDesc *pFD = NULL;
+    //<REVIEW> See comments below:
+    //MethodDesc *pFD = NULL;</REVIEW>
     DWORD offIL;
     CorDebugMappingResult map;
     DWORD whichIgnore;
@@ -2060,44 +2164,58 @@ HRESULT Debugger::SetIP( bool fCanSetIPOnly, Thread *thread,Module *module,
     // Implicit Caveat: We need to be the active frame.
     csi.GetStackInfo(thread, NULL, &Ctx, false);
 
-    pFD = g_pEEInterface->LookupMethodDescFromToken(
-        module,mdMeth);
-    _ASSERTE( pFD != NULL );
-    _ASSERTE( dji == NULL || dji->m_fd == pFD);
+    // <REVIEW> This assumed non-generic code.  I believe the
+	// DebugggerJitInfo (== nativeCodeVersionToken) from the right-side should never
+	// be NULL
+    //pFD = g_pEEInterface->LookupMethodDescFromToken(
+    //    module,mdMeth);
+    //_ASSERTE( pFD != NULL );
+    //_ASSERTE( dji == NULL || dji->m_fd == pFD);</REVIEW>
+	_ASSERTE(dji != NULL);
 
-    if (dji == NULL )
-    {
-        dji = GetJitInfo( pFD, NULL );
-        LOG((LF_CORDB, LL_INFO1000, "D::SIP:Not given token "
-                "from right side - GJI returned 0x%x!\n", dji));
-    }
+    //REVIEW>
+    //if (dji == NULL )
+    //{
+    //    dji = GetJitInfo( pFD, NULL );
+    //    LOG((LF_CORDB, LL_INFO1000, "D::SIP:Not given token "
+    //            "from right side - GJI returned 0x%x!\n", dji));
+    //}
+    //
+    // Cutting the above also involves cutting what follows.  I'm pretty
+	// darn certain that the right-side never sends the SetIP information
+	// without the CodeVersionToken being set to something reasonable.  But then the
+	// code below looks like it was written for a particular situation which may be
+	// very important - I've checked everything that seems related to "attaching"
+	// but still can't work out how we would end up here.  </REVIEW>
 
-    if (dji == NULL) //we don't have info about this method - attach scenario
-    {
-        if (fIsIL)
-        {
-            LOG((LF_CORDB, LL_INFO1000, "D::SIP:Couldn't obtain version info -"
-            "SetIP by IL offset can't work\n"));
-            hrAdvise = WORST_HR(hrAdvise, CORDBG_E_SET_IP_IMPOSSIBLE);
-            goto LExit;
-        }
-
-        LOG((LF_CORDB, LL_INFO1000, "D::SIP:Couldn't obtain version info - "
-                "SetIP by native offset proceeding via GetFunctionAddress\n"));
-                
-        pbBase = (BYTE*)g_pEEInterface->GetFunctionAddress(pFD);
-        if (pbBase == NULL)
-        {
-            LOG((LF_CORDB, LL_INFO1000, "D::SIP:GetFnxAddr failed!\n"));
-            hrAdvise = WORST_HR(hrAdvise, CORDBG_E_SET_IP_IMPOSSIBLE);
-            goto LExit;
-        }
-        dwSize = (DWORD)g_pEEInterface->GetFunctionSize(pFD);
-        
-        offNat = offsetTo;
-        pbDest = pbBase + offsetTo;
-    }
-    else
+	_ASSERTE(dji != NULL);
+    //<REVIEW>
+    //if (dji == NULL) //we don't have info about this method - attach scenario
+    //{
+    //    if (fIsIL)
+    //    {
+    //        LOG((LF_CORDB, LL_INFO1000, "D::SIP:Couldn't obtain version info -"
+    //        "SetIP by IL offset can't work\n"));
+    //        hrAdvise = WORST_HR(hrAdvise, CORDBG_E_SET_IP_IMPOSSIBLE);
+    //        goto LExit;
+    //    }
+    //
+    //    LOG((LF_CORDB, LL_INFO1000, "D::SIP:Couldn't obtain version info - "
+    //            "SetIP by native offset proceeding via GetFunctionAddress\n"));
+    //            
+    //    pbBase = (BYTE*)g_pEEInterface->GetFunctionAddress(pFD);
+    //    if (pbBase == NULL)
+    //    {
+    //        LOG((LF_CORDB, LL_INFO1000, "D::SIP:GetFnxAddr failed!\n"));
+    //        hrAdvise = WORST_HR(hrAdvise, CORDBG_E_SET_IP_IMPOSSIBLE);
+    //        goto LExit;
+    //    }
+    //    dwSize = (DWORD)g_pEEInterface->GetFunctionSize(pFD);
+    //    
+    //    offNat = offsetTo;
+    //    pbDest = pbBase + offsetTo;
+    //}
+    //else</REVIEW>
     {
         LOG((LF_CORDB, LL_INFO1000, "D::SIP:Got version info fine\n"));
 
@@ -2389,7 +2507,7 @@ HRESULT Debugger::GetVariablesFromOffset(MethodDesc       *pMD,
         ULONG cbSig;
         PCCOR_SIGNATURE sig = pMD->GetModule()->GetMDImport()->GetSigFromToken(mdLocalSig, &cbSig);
 
-        pLocals = new MetaSig(sig, pMD->GetModule(), FALSE, MetaSig::sigLocalVars);
+        pLocals = new MetaSig(sig, pMD->GetModule(), NULL, NULL, FALSE, MetaSig::sigLocalVars);
         while((cet = pLocals->NextArg()) != ELEMENT_TYPE_END)
         {
             if (cet == ELEMENT_TYPE_VALUETYPE)
@@ -2544,7 +2662,7 @@ void Debugger::SetVariablesAtOffset(MethodDesc       *pMD,
         ULONG cbSig;
         PCCOR_SIGNATURE sig = pMD->GetModule()->GetMDImport()->GetSigFromToken(mdLocalSig, &cbSig);
 
-        pLocals = new MetaSig(sig, pMD->GetModule(), FALSE, MetaSig::sigLocalVars);
+        pLocals = new MetaSig(sig, pMD->GetModule(), NULL, NULL, FALSE, MetaSig::sigLocalVars);
     }        
 #ifdef _DEBUG
     else   
@@ -2932,60 +3050,60 @@ DWORD DebuggerJitInfo::MapNativeOffsetToIL(DWORD nativeOffset,
     return 0;
 }
 
-DebuggerJitInfo *DebuggerJitInfo::GetJitInfoByVersionNumber(SIZE_T nVer,
+DebuggerMethodInfo *DebuggerMethodInfo::GetMethodInfoByVersionNumber(SIZE_T nVer,
                                                             SIZE_T nVerMostRecentlyEnC)
 {
-    DebuggerJitInfo *dji = this;
-    DebuggerJitInfo *djiMostRecent = NULL;
-    SIZE_T nVerMostRecent = DJI_VERSION_FIRST_VALID;
+    DebuggerMethodInfo *dmi = this;
+    DebuggerMethodInfo *dmiMostRecent = NULL;
+    SIZE_T nVerMostRecent = DebuggerMethodInfo::DMI_VERSION_FIRST_VALID;
 
-    while( dji != NULL )
+    while( dmi != NULL )
     {
-        if (dji->m_nVersion == nVer && nVer>=DJI_VERSION_FIRST_VALID)
+        if (dmi->m_nVersion == nVer && nVer>=DebuggerMethodInfo::DMI_VERSION_FIRST_VALID)
         {
             // we've found the one we're after, so stop here
-            LOG((LF_CORDB,LL_INFO10000, "DJI:GJIBVN: We've found an exact "
+            LOG((LF_CORDB,LL_INFO10000, "dmi:GJIBVN: We've found an exact "
                 "match for ver 0x%x\n", nVer));
             break;
         }
 
-        if ((nVer==DJI_VERSION_MOST_RECENTLY_JITTED ||
-             nVer==DJI_VERSION_MOST_RECENTLY_EnCED)
-            && dji->m_nVersion >= nVerMostRecent)// &&dji->m_jitComplete==false
+        if ((nVer==DebuggerMethodInfo::DMI_VERSION_MOST_RECENTLY_JITTED ||
+             nVer==DebuggerMethodInfo::DMI_VERSION_MOST_RECENTLY_EnCED)
+            && dmi->m_nVersion >= nVerMostRecent)// &&dmi->m_jitComplete==false
         {
-            LOG((LF_CORDB,LL_INFO10000, "DJI:GJIBVN: Found a version, perhaps "
-                "most recent?0x%x, ver:0x%x\n", dji, dji->m_nVersion));
-            nVerMostRecent = dji->m_nVersion;
-            djiMostRecent = dji;
+            LOG((LF_CORDB,LL_INFO10000, "dmi:GJIBVN: Found a version, perhaps "
+                "most recent?0x%x, ver:0x%x\n", dmi, dmi->m_nVersion));
+            nVerMostRecent = dmi->m_nVersion;
+            dmiMostRecent = dmi;
         }
-        dji = dji->m_prevJitInfo;
+        dmi = dmi->m_prevMethodInfo;
     }
 
-    if (nVer==DJI_VERSION_MOST_RECENTLY_JITTED)
+    if (nVer==DebuggerMethodInfo::DMI_VERSION_MOST_RECENTLY_JITTED)
     {
-        dji = djiMostRecent;
-        LOG((LF_CORDB,LL_INFO10000, "DJI:GJIBVN: Asked for most recently JITted. "
-            "Found 0x%x, Ver#:0x%x\n", dji, nVerMostRecent));
+        dmi = dmiMostRecent;
+        LOG((LF_CORDB,LL_INFO10000, "dmi:GJIBVN: Asked for most recently JITted. "
+            "Found 0x%x, Ver#:0x%x\n", dmi, nVerMostRecent));
     }
 
-    if (nVer==DJI_VERSION_MOST_RECENTLY_EnCED &&
-        djiMostRecent != NULL &&
-        nVerMostRecentlyEnC==djiMostRecent->m_nVersion)
+    if (nVer==DebuggerMethodInfo::DMI_VERSION_MOST_RECENTLY_EnCED &&
+        dmiMostRecent != NULL &&
+        nVerMostRecentlyEnC==dmiMostRecent->m_nVersion)
     {
-        dji = djiMostRecent;
-        LOG((LF_CORDB,LL_INFO10000, "DJI:GJIBVN: Asked for most recently EnCd. "
-            "Found 0x%x, Ver#:0x%x\n", dji, nVerMostRecent));
+        dmi = dmiMostRecent;
+        LOG((LF_CORDB,LL_INFO10000, "dmi:GJIBVN: Asked for most recently EnCd. "
+            "Found 0x%x, Ver#:0x%x\n", dmi, nVerMostRecent));
     }
 
 #ifdef LOGGING
-    if (dji == NULL)
+    if (dmi == NULL)
     {
-        LOG((LF_CORDB,LL_INFO10000, "DJI:GJIBVN couldn't find a "
-            "DJI corresponding to ver 0x%x\n", nVer));
+        LOG((LF_CORDB,LL_INFO10000, "dmi:GJIBVN couldn't find a "
+            "dmi corresponding to ver 0x%x\n", nVer));
     }
 #endif //LOGGING
 
-    return dji;
+    return dmi;
 }
 
 
@@ -2993,7 +3111,12 @@ DebuggerJitInfo *DebuggerJitInfo::GetJitInfoByAddress(const BYTE *pbAddr )
 {
     DebuggerJitInfo *dji = this;
 
-    // If it's not NULL, but not in the range m_addrOfCode to end of function,
+#ifdef LOGGING
+    LOG((LF_CORDB,LL_INFO10000,"DJI:GJIBA finding DJI "
+            "corresponding to addr 0x%x, starting with 0x%x\n", pbAddr, dji));
+#endif //LOGGING
+
+	// If it's not NULL, but not in the range m_addrOfCode to end of function,
     //  then get the previous one.
     while( dji != NULL && 
             !(dji->m_addrOfCode<=PTR_TO_CORDB_ADDRESS(pbAddr) && 
@@ -3022,11 +3145,11 @@ DebuggerJitInfo *DebuggerJitInfo::GetJitInfoByAddress(const BYTE *pbAddr )
 //  then we must have been EnC'd twice without getting JITted, so we should
 //  create a new DJI, load the EnCIL map into it, and then put it at the
 //  head of the list (ie, in front of this DJI).
-HRESULT DebuggerJitInfo::LoadEnCILMap(UnorderedILMap *ilMap)
+HRESULT DebuggerMethodInfo::LoadEnCILMap(UnorderedILMap *ilMap)
 {
     if (m_OldILToNewIL==NULL)
     {
-        LOG((LF_CORDB,LL_INFO10000,"DJI::LEnCILM:Map for 0x%x!\n",this));
+        LOG((LF_CORDB,LL_INFO10000,"DMI::LEnCILM:Map for 0x%x!\n",this));
         
         _ASSERTE( m_cOldILToNewIL==0 );
         if (ilMap != NULL )
@@ -3054,26 +3177,26 @@ HRESULT DebuggerJitInfo::LoadEnCILMap(UnorderedILMap *ilMap)
     }
     else
     {  
-        LOG((LF_CORDB,LL_INFO10000, "DJI::LEnCILM: Found existing "
+        LOG((LF_CORDB,LL_INFO10000, "DMI::LEnCILM: Found existing "
             "map, extending chain after 0x%x\n", this));
 
-        _ASSERTE( m_nextJitInfo == NULL );
-        DebuggerJitInfo *dji = new (interopsafe) DebuggerJitInfo(m_fd);
-        if (NULL == dji)
+        _ASSERTE( m_nextMethodInfo == NULL );
+        DebuggerMethodInfo *dmi = new (interopsafe) DebuggerMethodInfo(this->m_module, this->m_token);
+        if (NULL == dmi)
             return E_OUTOFMEMORY;
 
-        HRESULT hr = dji->LoadEnCILMap( ilMap );
+        HRESULT hr = dmi->LoadEnCILMap( ilMap );
         if (FAILED(hr))
             return hr;
             
-        hr = g_pDebugger->InsertAtHeadOfList( dji );
-        _ASSERTE( m_nextJitInfo == dji);
-        _ASSERTE( this == dji->m_prevJitInfo);
+        hr = g_pDebugger->InsertAtHeadOfList( dmi );
+        _ASSERTE( m_nextMethodInfo == dmi);
+        _ASSERTE( this == dmi->m_prevMethodInfo);
         return hr;
     }
 }
 
-SIZE_T DebuggerJitInfo::TranslateToInstIL(SIZE_T offOrig, bool fOrigToInst)
+SIZE_T DebuggerMethodInfo::TranslateToInstIL(SIZE_T offOrig, bool fOrigToInst)
 {
     if (m_cInstrumentedILMap == 0 || 
         ((int)offOrig < 0))
@@ -3169,7 +3292,7 @@ HRESULT Debugger::MapAndBindFunctionPatches(DebuggerJitInfo *djiNew,
     mdMethodDef md =                fd->GetMemberDef();
 
     LOG((LF_CORDB,LL_INFO10000,"D::MABFP: All BPs will be mapped to "
-        "Ver:0x%04x (DJI:0x%08x)\n", djiNew?djiNew->m_nVersion:0, djiNew));
+        "Ver:0x%04x (DJI:0x%08x)\n", djiNew?djiNew->m_methodInfo->m_nVersion:0, djiNew));
 
     // First lock the patch table so it doesn't move while we're
     //  examining it.
@@ -3213,7 +3336,7 @@ HRESULT Debugger::MapAndBindFunctionPatches(DebuggerJitInfo *djiNew,
         //
         // If neither of these is true, then we're EnCing and looking at
         // a patch that we don't want to bind - skip this patch
-        if (dcp->dji != (DebuggerJitInfo*)DebuggerJitInfo::DJI_VERSION_INVALID && 
+        if (dcp->dji != (DebuggerJitInfo*)DebuggerJitInfo::DJI_INVALID && 
             !(dcp->controller->GetDCType() == DEBUGGER_CONTROLLER_BREAKPOINT||
               dcp->controller->GetDCType() == DEBUGGER_CONTROLLER_STEPPER)
             )
@@ -3224,7 +3347,7 @@ HRESULT Debugger::MapAndBindFunctionPatches(DebuggerJitInfo *djiNew,
         }
 
         // The patch is for a 'BindFunctionPatches' call, but it's already bound
-        if (dcp->dji == (DebuggerJitInfo*)DebuggerJitInfo::DJI_VERSION_INVALID && 
+        if (dcp->dji == (DebuggerJitInfo*)DebuggerJitInfo::DJI_INVALID && 
             dcp->address != NULL )
         {
             goto LNextLoop;
@@ -3316,7 +3439,7 @@ HRESULT Debugger::MapPatchToDJI( DebuggerControllerPatch *dcp,DebuggerJitInfo *d
     SIZE_T ilOffsetNew;
     SIZE_T natOffsetNew;
 
-    DebuggerJitInfo *djiCur; //for walking the list
+    DebuggerMethodInfo *dmiCur; //for walking the list
 
     bool fNormalMapping = true;
     CorDebugMappingResult mapping;
@@ -3331,21 +3454,22 @@ HRESULT Debugger::MapPatchToDJI( DebuggerControllerPatch *dcp,DebuggerJitInfo *d
         return S_OK;
     }
 
-    // Grab the version it actually belongs to, then bring it forward
-    djiCur = dcp->dji;
-
-    if (djiCur == NULL) //then the BP has been mapped forwards into the
+	// Grab the version it actually belongs to, then bring it forward
+    if (dcp->dji == NULL) //then the BP has been mapped forwards into the
     {   // current version, or we're doing a BindFunctionPatches.  Either
         // way, we simply want the most recent version
-        djiCur = g_pDebugger->GetJitInfo( djiTo->m_fd, NULL);
+        DebuggerJitInfo *djiCur = g_pDebugger->GetJitInfo( djiTo->m_fd, NULL);
         dcp->dji = djiCur;
     }
+	_ASSERTE(dcp->dji != NULL);
+    dmiCur = dcp->dji->m_methodInfo;
     
-    _ASSERTE( NULL != djiCur );
+    _ASSERTE( NULL != dmiCur );
 
-    // If the source and destination is the same, then this method
+	//
+	// If the source and destination is the same, then this method
     // decays into BindFunctionPatch's BindPatch function
-    if (djiCur == djiTo )
+	if (dmiCur == djiTo->m_methodInfo )
     {
         if (DebuggerController::BindPatch(dcp, 
                                           (const BYTE*)djiTo->m_addrOfCode, 
@@ -3367,13 +3491,16 @@ HRESULT Debugger::MapPatchToDJI( DebuggerControllerPatch *dcp,DebuggerJitInfo *d
     }
     
     LOG((LF_CORDB,LL_INFO10000,"D::MPTDJI: From pid 0x%x, "
-        "Ver:0x%04x (DJI:0x%08x) to Ver:0x%04x (DJI:0x%08x)\n", 
-        dcp->pid, djiCur->m_nVersion,djiCur,djiTo->m_nVersion, djiTo));
+        "Ver:0x%04x (DMI:0x%08x) to Ver:0x%04x (DJI:0x%08x)\n", 
+        dcp->pid, dmiCur->m_nVersion,dmiCur,djiTo->m_methodInfo->m_nVersion, djiTo));
 
     // Grab the original IL offset
     if (dcp->native == TRUE)
     {
-        ilOffsetOld = djiCur->MapNativeOffsetToIL(dcp->offset,&mapping,
+		// <REVIEW>GENERICS: this is one case where using native code points
+		// on generic functions won't effect all JitInfos </REVIEW>
+		_ASSERTE(dmiCur->m_latestJitInfo);
+		ilOffsetOld = dmiCur->m_latestJitInfo->MapNativeOffsetToIL(dcp->offset,&mapping,
                             &which);
         LOG((LF_CORDB,LL_INFO10000, "D::MPTDJI: offset is native0x%x, "
             "mapping to IL 0x%x mapping:0x%x, which:0x%x\n", 
@@ -3387,14 +3514,14 @@ HRESULT Debugger::MapPatchToDJI( DebuggerControllerPatch *dcp,DebuggerJitInfo *d
             ilOffsetOld));
     }               
 
-    fMappingForwards = (djiCur->m_nVersion<djiTo->m_nVersion)?(TRUE):(FALSE);
+    fMappingForwards = (dmiCur->m_nVersion<djiTo->m_methodInfo->m_nVersion)?(TRUE):(FALSE);
 #ifdef LOGGING
     if (fMappingForwards)
         LOG((LF_CORDB,LL_INFO1000,"D::MPTDJI: Mapping forwards from 0x%x to 0x%x!\n", 
-            djiCur->m_nVersion,djiTo->m_nVersion));
+            dmiCur->m_nVersion,djiTo->m_methodInfo->m_nVersion));
     else
         LOG((LF_CORDB,LL_INFO1000,"D::MPTDJI: Mapping backwards from 0x%x to 0x%x!\n", 
-            djiCur->m_nVersion,djiTo->m_nVersion));
+            dmiCur->m_nVersion,djiTo->m_methodInfo->m_nVersion));
 #endif //LOGGING
 
     ilOffsetNew = ilOffsetOld;
@@ -3405,12 +3532,12 @@ HRESULT Debugger::MapPatchToDJI( DebuggerControllerPatch *dcp,DebuggerJitInfo *d
     {
         BOOL fAccurateIgnore;
         MapThroughVersions( ilOffsetOld, 
-                            djiCur,
+                            dmiCur,
                             &ilOffsetNew, 
-                            djiTo, 
+							djiTo->m_methodInfo, 
                             fMappingForwards,
                             &fAccurateIgnore);
-        djiCur = djiTo;
+		dmiCur = djiTo->m_methodInfo;
     }
     
     // Translate IL --> Native, if we want to
@@ -3419,14 +3546,14 @@ HRESULT Debugger::MapPatchToDJI( DebuggerControllerPatch *dcp,DebuggerJitInfo *d
         if (fNormalMapping)
         {
             natOffsetNew = djiTo->MapILOffsetToNative(ilOffsetNew, &irrelevant2);
-            LOG((LF_CORDB,LL_INFO10000, "D::MPTDJI: Mapping IL 0x%x (ji:0x%08x) "
-                "to native offset 0x%x\n", ilOffsetNew, djiCur, natOffsetNew));
+            LOG((LF_CORDB,LL_INFO10000, "D::MPTDJI: Mapping IL 0x%x (mi:0x%08x) "
+                "to native offset 0x%x\n", ilOffsetNew, dmiCur, natOffsetNew));
         }
         else
         {
             natOffsetNew = djiTo->MapSpecialToNative(mapping, which, &irrelevant2);
-            LOG((LF_CORDB,LL_INFO10000, "D::MPTDJI: Mapping special 0x%x (ji:0x%8x) "
-                "to native offset 0x%x\n", mapping, djiCur, natOffsetNew));
+            LOG((LF_CORDB,LL_INFO10000, "D::MPTDJI: Mapping special 0x%x (mi:0x%8x) "
+                "to native offset 0x%x\n", mapping, dmiCur, natOffsetNew));
         }
 
         DebuggerBreakpoint *dbp = (DebuggerBreakpoint*)dcp->controller;
@@ -3456,34 +3583,34 @@ HRESULT Debugger::MapPatchToDJI( DebuggerControllerPatch *dcp,DebuggerJitInfo *d
  *
  ******************************************************************************/
 HRESULT Debugger::MapThroughVersions( SIZE_T fromIL, 
-    DebuggerJitInfo *djiFrom,  
+    DebuggerMethodInfo *dmiFrom,  
     SIZE_T *toIL, 
-    DebuggerJitInfo *djiTo, 
+    DebuggerMethodInfo *dmiTo, 
     BOOL fMappingForwards,
     BOOL *fAccurate)
 {
 #ifdef LOGGING
     if (fMappingForwards)
         LOG((LF_CORDB,LL_INFO1000000, "D:MTV: From 0x%x (ver:0x%x) forwards to"
-            " ver 0x%x\n", fromIL, djiFrom->m_nVersion, djiTo->m_nVersion));
+            " ver 0x%x\n", fromIL, dmiFrom->m_nVersion, dmiTo->m_nVersion));
     else
         LOG((LF_CORDB,LL_INFO1000000, "D:MTV: From 0x%x (ver:0x%x) backwards to"
-            " ver 0x%x\n", fromIL, djiFrom->m_nVersion, djiTo->m_nVersion));
+            " ver 0x%x\n", fromIL, dmiFrom->m_nVersion, dmiTo->m_nVersion));
 #endif //LOGGING
 
     _ASSERTE(fAccurate != NULL);
     
-    DebuggerJitInfo *djiCur = djiFrom;
+    DebuggerMethodInfo *dmiCur = dmiFrom;
     HRESULT hr = S_OK;
     (*fAccurate) = TRUE;
     BOOL fAccurateTemp = TRUE;
     *toIL = fromIL; 
     
-    while (djiCur != djiTo && djiCur != NULL)
+    while (dmiCur != dmiTo && dmiCur != NULL)
     {
         hr = g_pDebugger->MapOldILToNewIL(fMappingForwards,
-                                          djiCur->m_OldILToNewIL,
-            djiCur->m_OldILToNewIL+djiCur->m_cOldILToNewIL,
+                                          dmiCur->m_OldILToNewIL,
+            dmiCur->m_OldILToNewIL+dmiCur->m_cOldILToNewIL,
                                           fromIL, 
                                           toIL,
                                           &fAccurateTemp);      
@@ -3496,16 +3623,16 @@ HRESULT Debugger::MapThroughVersions( SIZE_T fromIL,
             break;
         }
         
-        LOG((LF_CORDB,LL_INFO10000, "D::MPTDJI: Mapping IL 0x%x (ji:0x%08x) "
-            "to IL 0x%x (ji:0x%08x)\n", fromIL, djiCur, *toIL, 
-            djiCur->m_nextJitInfo));
+        LOG((LF_CORDB,LL_INFO10000, "D::MPTDJI: Mapping IL 0x%x (dmi:0x%08x) "
+            "to IL 0x%x (dmi:0x%08x)\n", fromIL, dmiCur, *toIL, 
+            dmiCur->m_nextMethodInfo));
             
         fromIL = *toIL;
 
         if (fMappingForwards)
-            djiCur = djiCur->m_nextJitInfo;
+            dmiCur = dmiCur->m_nextMethodInfo;
         else
-            djiCur = djiCur->m_prevJitInfo;
+            dmiCur = dmiCur->m_prevMethodInfo;
     }
     return hr;
 }
@@ -4027,14 +4154,11 @@ void Debugger::SendEncRemapEvents(UnorderedEnCRemapArray *pEnCRemapInfo)
     for (USHORT i = 0; i < cEvents; i++)
     {
         DebuggerModule *pDM = (DebuggerModule *)rgRemap[i].m_debuggerModuleToken;
-        MethodDesc* pFD = g_pEEInterface->LookupMethodDescFromToken(
-                pDM->m_pRuntimeModule, 
+        SIZE_T nVersionCur = GetVersionNumber(pDM->m_pRuntimeModule, 
                 rgRemap[i].m_funcMetadataToken);
-        _ASSERTE(pFD != NULL);
-        SIZE_T nVersionCur = GetVersionNumber(pFD);
 
-        if (m_pJitInfos != NULL && !m_pJitInfos->EnCRemapSentForThisVersion(pFD->GetModule(),
-                                                    pFD->GetMemberDef(), 
+        if (m_pMethodInfos != NULL && !m_pMethodInfos->EnCRemapSentForThisVersion(pDM->m_pRuntimeModule, 
+                rgRemap[i].m_funcMetadataToken, 
                                                     nVersionCur))
         {
             ipce = m_pRCThread->GetIPCEventSendBuffer(IPC_TARGET_OUTOFPROC);
@@ -4050,8 +4174,7 @@ void Debugger::SendEncRemapEvents(UnorderedEnCRemapArray *pEnCRemapInfo)
             ipce->EnCRemap.localSigToken = rgRemap[i].m_localSigToken;
 
             LOG((LF_CORDB, LL_INFO10000, "D::SEnCRE: Sending remap for "
-                "unjitted %s::%s MD:0x%x, debuggermodule:0x%x nVerCur:0x%x\n", 
-                pFD->m_pszDebugClassName, pFD->m_pszDebugMethodName,
+                "unseen %s::%s MD:0x%x, debuggermodule:0x%x nVerCur:0x%x\n", 
                 ipce->EnCRemap.funcMetadataToken, 
                 ipce->EnCRemap.debuggerModuleToken,
                 nVersionCur));
@@ -4060,9 +4183,9 @@ void Debugger::SendEncRemapEvents(UnorderedEnCRemapArray *pEnCRemapInfo)
             m_pRCThread->SendIPCEvent(IPC_TARGET_OUTOFPROC);
 
             // Remember not to send this event again if we can help it...
-            m_pJitInfos->SetVersionNumberLastRemapped(pFD->GetModule(),
-                                                    pFD->GetMemberDef(),
-                                                    nVersionCur);
+            m_pMethodInfos->SetVersionNumberLastRemapped(pDM->m_pRuntimeModule, 
+				rgRemap[i].m_funcMetadataToken,
+				nVersionCur);
         }
     }
 
@@ -4116,21 +4239,17 @@ void Debugger::LockAndSendEnCRemapEvent(MethodDesc *pFD,
 
         // lotsa' args, just to get the local signature token, in case
         // we have to create the CordbFunction object on the right side.
-        MethodDesc *pFDTemp;
         BYTE  *codeStartIgnore;
         unsigned int codeSizeIgnore;
         
         GetFunctionInfo(
              pRuntimeModule,
              ipce->EnCRemap.funcMetadataToken,
-             &pFDTemp,
              &(ipce->EnCRemap.RVA),
              &codeStartIgnore,
              &codeSizeIgnore,
              &(ipce->EnCRemap.localSigToken) );
 
-        _ASSERTE(pFD == pFDTemp);
-        
         LOG((LF_CORDB, LL_INFO10000, "D::LASEnCRE: %s::%s fAcc:0x%x"
             "dmod:0x%x, methodDef:0x%x localsigtok:0x%x RVA:0x%x\n",
             pFD->m_pszDebugClassName, pFD->m_pszDebugMethodName,
@@ -4318,29 +4437,30 @@ BOOL Debugger::SyncAllThreads()
 /******************************************************************************
  *
  ******************************************************************************/
-SIZE_T Debugger::GetVersionNumber(MethodDesc *fd)
+SIZE_T Debugger::GetVersionNumber(Module *pModule, mdMethodDef token)
 {
+    //_ASSERTE(fd != NULL);
     LockJITInfoMutex();
 
     SIZE_T ver;
-    if (m_pJitInfos != NULL && 
-        fd != NULL)
-        ver = m_pJitInfos->GetVersionNumber(fd->GetModule(), fd->GetMemberDef());
+    if (m_pMethodInfos != NULL)
+        ver = m_pMethodInfos->GetVersionNumber(pModule, token);
     else
-        ver = DebuggerJitInfo::DJI_VERSION_FIRST_VALID;
+        ver = DebuggerMethodInfo::DMI_VERSION_FIRST_VALID;
 
     UnlockJITInfoMutex();
 
     return ver;
 }
 
+
 /******************************************************************************
- * If nVersionRemapped == DJI_VERSION_INVALID (0), then we'll set the 
+ * If nVersionRemapped == DMI_VERSION_INVALID (0), then we'll set the 
  * last remapped version to whatever the current version number is.
  ******************************************************************************/
 void Debugger::SetVersionNumberLastRemapped(MethodDesc *fd, SIZE_T nVersionRemapped)
 {
-    _ASSERTE(nVersionRemapped >=  DebuggerJitInfo::DJI_VERSION_FIRST_VALID);
+    _ASSERTE(nVersionRemapped >=  DebuggerMethodInfo::DMI_VERSION_FIRST_VALID);
     if (fd == NULL)
         return;
 
@@ -4348,12 +4468,12 @@ void Debugger::SetVersionNumberLastRemapped(MethodDesc *fd, SIZE_T nVersionRemap
 #ifdef _DEBUG
     HRESULT hr =
 #endif
-    CheckInitJitInfoTable();
+    CheckInitMethodInfoTable();
 #ifdef _DEBUG
     VERIFY(SUCCEEDED(hr));
 #endif
-    _ASSERTE(m_pJitInfos != NULL);
-    m_pJitInfos->SetVersionNumberLastRemapped(fd->GetModule(), 
+    _ASSERTE(m_pMethodInfos != NULL);
+    m_pMethodInfos->SetVersionNumberLastRemapped(fd->GetModule(), 
                                             fd->GetMemberDef(), 
                                             nVersionRemapped);
     UnlockJITInfoMutex();
@@ -4367,7 +4487,7 @@ HRESULT Debugger::IncrementVersionNumber(Module *pModule, mdMethodDef token)
     LOG((LF_CORDB,LL_INFO10000,"D::INV:About to increment version number\n"));
 
     LockJITInfoMutex();
-    HRESULT hr = m_pJitInfos->IncrementVersionNumber(pModule, token);
+    HRESULT hr = m_pMethodInfos->IncrementVersionNumber(pModule, token);
     UnlockJITInfoMutex();
 
     return hr;
@@ -6318,12 +6438,10 @@ void Debugger::DestructModule(Module *pModule)
     }
 
     
-    if (m_pJitInfos != NULL)
-    {
-        LockJITInfoMutex();
-        m_pJitInfos->ClearMethodsOfModule(pModule);
-        UnlockJITInfoMutex();
-    }
+	LockJITInfoMutex();
+	if (m_pMethodInfos != NULL)
+		m_pMethodInfos->ClearMethodsOfModule(pModule);
+	UnlockJITInfoMutex();
 }
 
 /******************************************************************************
@@ -6587,7 +6705,7 @@ void Debugger::FuncEvalComplete(Thread* pThread, DebuggerEval *pDE)
     ipce->FuncEvalComplete.successful = pDE->m_successful;
     ipce->FuncEvalComplete.aborted = pDE->m_aborted;
     ipce->FuncEvalComplete.resultAddr = &(pDE->m_result);
-    ipce->FuncEvalComplete.resultType = pDE->m_resultType;
+	ipce->FuncEvalComplete.resultType = pDE->m_resultType;
 
     // We must adjust the result address to point to the right place
     unsigned size = GetSizeForCorElementType(pDE->m_resultType);
@@ -6618,7 +6736,6 @@ void Debugger::FuncEvalComplete(Thread* pThread, DebuggerEval *pDE)
 // metadata.
 //
 HRESULT Debugger::GetFunctionInfo(Module *pModule, mdToken functionToken,
-                                  MethodDesc **ppFD,
                                   ULONG *pRVA,
                                   BYTE  **pCodeStart,
                                   unsigned int *pCodeSize,
@@ -6626,63 +6743,62 @@ HRESULT Debugger::GetFunctionInfo(Module *pModule, mdToken functionToken,
 {
     HRESULT hr = S_OK;
 
-    // First, lets see if we've got a MethodDesc for this function.
-    MethodDesc* pFD =
-        g_pEEInterface->LookupMethodDescFromToken(pModule, functionToken);
+	DWORD implFlags;
 
-    if (pFD != NULL)
-    {
-        LOG((LF_CORDB, LL_INFO10000, "D::GFI: fd found.\n"));
+// Get the RVA and impl flags for this method.
+	hr = g_pEEInterface->GetMethodImplProps(pModule,
+		functionToken,
+		pRVA,
+		&implFlags);
 
-        // If this is not IL, then this function was called in error.
-        if(!pFD->IsIL())
-            return(CORDBG_E_FUNCTION_NOT_IL);
+	if (SUCCEEDED(hr))
+	{
+		// If the RVA is 0 or it's native, then the method is not IL
+		if (*pRVA == 0)
+		{
+			LOG((LF_CORDB,LL_INFO100000, "D::GFI: Function is not IL - *pRVA == NULL!\n"));
+			//return (CORDBG_E_FUNCTION_NOT_IL);
+			// Sanity check this....
+			MethodDesc* pFD =
+				g_pEEInterface->LookupMethodDescFromToken(pModule, functionToken);
 
-        COR_ILMETHOD_DECODER header(g_pEEInterface->MethodDescGetILHeader(pFD));
-        
-        *ppFD = pFD;
-        *pRVA = g_pEEInterface->MethodDescGetRVA(pFD);
-        *pCodeStart = const_cast<BYTE*>(header.Code);
-        *pCodeSize = header.GetCodeSize();
-        // I don't see why COR_ILMETHOD_DECODER doesn't simply set this field to 
-        // be mdSignatureNil in the absence of a local signature, but since it sets
-        // LocalVarSigTok to zero, we have to set it to what we expect - mdSignatureNil.
-        *pLocalSigToken = (header.GetLocalVarSigTok())?(header.GetLocalVarSigTok()):(mdSignatureNil);
-    }
-    else
-    {
-        LOG((LF_CORDB, LL_INFO10000, "D::GFI: fd not found.\n"));
+			if(!pFD || !pFD->IsIL())
+			{
+				LOG((LF_CORDB,LL_INFO100000, "D::GFI: And the MD agrees..\n"));
+				return(CORDBG_E_FUNCTION_NOT_IL);
+			}
+			else
+			{
+				LOG((LF_CORDB,LL_INFO100000, "D::GFI: But the MD says it's IL..\n"));
+			}
 
-        *ppFD = NULL; // no MethodDesc yet...
+			if (pFD != NULL && g_pEEInterface->MethodDescGetRVA(pFD) == 0)
+			{
+				LOG((LF_CORDB,LL_INFO100000, "D::GFI: Actually, MD says RVA is 0 too - keep going...!\n"));
+			}
+		}
+		if (IsMiNative(implFlags)) 
+		{
+			LOG((LF_CORDB,LL_INFO100000, "D::GFI: Function is not IL - IsMiNative!\n"));
+			return (CORDBG_E_FUNCTION_NOT_IL);
+		}
 
-        DWORD implFlags;
+		// The IL Method Header is at the given RVA in this module.
+		// GENERICS: Calling ResolveILRVA is wrong in the case of in-memory modules.
+		// Calling GetILCode is simpler anyway.
+		//COR_ILMETHOD *ilMeth = (COR_ILMETHOD*) pModule->ResolveILRVA(*pRVA, FALSE);
+		COR_ILMETHOD *ilMeth = (COR_ILMETHOD*) pModule->GetILCode(*pRVA);
+		COR_ILMETHOD_DECODER header(ilMeth);
 
-        // Get the RVA and impl flags for this method.
-        hr = g_pEEInterface->GetMethodImplProps(pModule,
-                                                functionToken,
-                                                pRVA,
-                                                &implFlags);
-
-        if (SUCCEEDED(hr))
-        {
-            // If the RVA is 0 or it's native, then the method is not IL
-            if (*pRVA == 0 || IsMiNative(implFlags))
-                return (CORDBG_E_FUNCTION_NOT_IL);
-
-            // The IL Method Header is at the given RVA in this module.
-            COR_ILMETHOD *ilMeth = (COR_ILMETHOD*) pModule->ResolveILRVA(*pRVA, FALSE);
-            COR_ILMETHOD_DECODER header(ilMeth);
-
-            // Snagg the IL code info.
-            *pCodeStart = const_cast<BYTE*>(header.Code);
-            *pCodeSize = header.GetCodeSize();
+		// Snagg the IL code info.
+		*pCodeStart = const_cast<BYTE*>(header.Code);
+		*pCodeSize = header.CodeSize;
 
             if (header.GetLocalVarSigTok() != NULL)
                 *pLocalSigToken = header.GetLocalVarSigTok();
             else
                 *pLocalSigToken = mdSignatureNil;
         }
-    }
     
     return hr;
 }
@@ -6946,13 +7062,9 @@ LetThreadsGo:
             }
             else
             {
-                MethodDesc *pFD = g_pEEInterface->LookupMethodDescFromToken(
-                        module->m_pRuntimeModule, 
-                        event->BreakpointData.funcMetadataToken);
+                DebuggerMethodInfo *dmi = m_pMethodInfos->GetMethodInfo(module->m_pRuntimeModule, 
+                event->BreakpointData.funcMetadataToken);
 
-                DebuggerJitInfo *pDji = NULL;
-                if ( NULL != pFD )
-                    pDji = GetJitInfo(pFD, NULL );
                 {
                     BOOL fSucceed;
                     // If we haven't been either JITted or EnC'd yet, then
@@ -6964,7 +7076,7 @@ LetThreadsGo:
                                            (AppDomain *)event->appDomainToken,
                                            event->BreakpointData.offset,  
                                            !event->BreakpointData.isIL, 
-                                           pDji,
+                                           dmi,
                                            &fSucceed,
                                            FALSE);
                     TRACE_ALLOC(bp); 
@@ -6981,8 +7093,8 @@ LetThreadsGo:
                     hr = E_OUTOFMEMORY;
                 }
                 
-                LOG((LF_CORDB,LL_INFO10000,"\tBP Add: DJI:0x%x BPTOK:"
-                    "0x%x, tok=0x%08x, offset=0x%x, isIL=%d\n", pDji, bp,
+                LOG((LF_CORDB,LL_INFO10000,"\tBP Add: DMI:0x%x BPTOK:"
+                    "0x%x, tok=0x%08x, offset=0x%x, isIL=%d\n", dmi, bp,
                      event->BreakpointData.funcMetadataToken,
                      event->BreakpointData.offset,  
                      event->BreakpointData.isIL));
@@ -7307,16 +7419,94 @@ LetThreadsGo:
         {
             //
             //
-            _ASSERTE(!m_pModules->IsDebuggerModuleDeleted(
-                (DebuggerModule *)event->GetClassInfo.classDebuggerModuleToken));
+            EEClass *pClass = NULL;
+			bool fInstantiatedType = false;
+			if (event->GetClassInfo.debuggerModuleToken != NULL) 
+			{
+				_ASSERTE(event->GetClassInfo.typeHandle == NULL);
+
+				LOG((LF_CORDB, LL_INFO10000, "D::GASCI: getting info for 0x%08x 0x%0x8.\n",
+					event->GetClassInfo.debuggerModuleToken, event->GetClassInfo.metadataToken));
+
+				_ASSERTE(!m_pModules->IsDebuggerModuleDeleted(
+					(DebuggerModule *)event->GetClassInfo.debuggerModuleToken));
+
+				// Find the class given its module and token. The class must be loaded.
+				DebuggerModule *pDebuggerModule = (DebuggerModule*) event->GetClassInfo.debuggerModuleToken;
+
+				pClass = g_pEEInterface->FindLoadedClass(pDebuggerModule->m_pRuntimeModule, event->GetClassInfo.metadataToken);
+				fInstantiatedType = false;
+			}
+			else if (event->GetClassInfo.typeHandle != NULL) 
+			{
+				_ASSERTE(event->GetClassInfo.debuggerModuleToken == NULL);
+
+				LOG((LF_CORDB, LL_INFO10000, "D::GASCI: getting info for type handle 0x%08x.\n",
+					event->GetClassInfo.typeHandle));
+
+				TypeHandle th(event->GetClassInfo.typeHandle);
+				pClass = th.GetClass();
+				fInstantiatedType = true;
+			}
+			_ASSERTE(pClass != NULL);
 
             GetAndSendClassInfo(
                                m_pRCThread,
-                               event->GetClassInfo.classDebuggerModuleToken,
-                               event->GetClassInfo.classMetadataToken,
+                               pClass,
+                               fInstantiatedType,
                                (AppDomain *)event->appDomainToken,
                                mdFieldDefNil,
                                NULL,
+                               iWhich);
+        }
+        break;
+
+    case DB_IPCE_GET_TYPE_HANDLE_PARAMS:
+        {
+            //
+            //
+            GetAndSendTypeHandleParams(
+                               m_pRCThread,
+                               (AppDomain *)event->appDomainToken,
+                               event->GetTypeHandleParams.typeHandle,
+                               iWhich);
+        }
+        break;
+
+    case DB_IPCE_GET_EXPANDED_TYPE_INFO:
+        {
+            //
+            //
+            GetAndSendExpandedTypeInfo(
+                               m_pRCThread,
+                               (AppDomain *)event->appDomainToken,
+                               event->ExpandType.typeHandle,
+                               iWhich);
+        }
+        break;
+
+    case DB_IPCE_GET_TYPE_HANDLE:
+        {
+            //
+            //
+            GetAndSendTypeHandle(
+                               m_pRCThread,
+                               (AppDomain *)event->appDomainToken,
+                               &event->GetTypeHandle.typeData,
+                               event->GetTypeHandle.typarCount,
+                               &event->GetTypeHandle.tyParData[0],
+                               iWhich);
+        }
+        break;
+
+    case DB_IPCE_GET_METHOD_DESC_REPPARAMS:
+        {
+            //
+            //
+            GetAndSendMethodDescParams(
+                               m_pRCThread,
+                               (AppDomain *)event->appDomainToken,
+                               event->GetMethodDescParams.methodDesc,
                                iWhich);
         }
         break;
@@ -7335,13 +7525,10 @@ LetThreadsGo:
         {
             //
             //
-            _ASSERTE(!m_pModules->IsDebuggerModuleDeleted(
-                (DebuggerModule *)event->GetJITInfo.funcDebuggerModuleToken));
 
             GetAndSendJITInfo(
                                m_pRCThread,
-                               event->GetJITInfo.funcMetadataToken,
-                               event->GetJITInfo.funcDebuggerModuleToken,
+                               (DebuggerJitInfo *)event->GetJITInfo.nativeCodeVersionToken,
                                (AppDomain *)event->appDomainToken,
                                iWhich);
         }
@@ -7357,12 +7544,16 @@ LetThreadsGo:
             mdToken localSigToken;
             BOOL fSentEvent = FALSE;
             void *appDomainToken = event->appDomainToken;
+			DebuggerJitInfo *ji = NULL;
 
             DebuggerModule* pDebuggerModule =
-                (DebuggerModule*) event->GetCodeData.funcDebuggerModuleToken;
+				(DebuggerModule*) event->GetCodeData.funcDebuggerModuleToken;
 
             if (m_pModules->IsDebuggerModuleDeleted(pDebuggerModule))
-                hr = CORDBG_E_MODULE_NOT_LOADED;
+			{
+                LOG((LF_CORDB,LL_INFO100000, "D::HIPCE: Module is not loaded!\n"));
+				hr = CORDBG_E_MODULE_NOT_LOADED;
+			}
             else
             {
 
@@ -7370,132 +7561,157 @@ LetThreadsGo:
                 HRESULT hr = GetFunctionInfo(
                                      pDebuggerModule->m_pRuntimeModule,
                                      event->GetCodeData.funcMetadataToken,
-                                     (MethodDesc**) &fd, &RVA,
+									 &RVA,
                                      (BYTE**) &code, &codeSize,
                                      &localSigToken);
 
-                if (SUCCEEDED(hr))
-                {
-                    DebuggerJitInfo *ji = (DebuggerJitInfo *)
-                                            event->GetCodeData.CodeVersionToken;
+				if (SUCCEEDED(hr))
+				{
+					DebuggerMethodInfo *mi = (DebuggerMethodInfo *)
+						event->GetCodeData.ilCodeVersionToken;
 
-                    // No DJI? Lets see if one has been created since the
-                    // original data was sent to the Right Side...
-                    if (ji == NULL)
-                        ji = GetJitInfo( 
-                            fd, 
-                            (const BYTE*)DebuggerJitInfo::DJI_VERSION_FIRST_VALID, 
-                            true );
+					// No DMI? Lets see if one has been created since the
+					// original data was sent to the Right Side...
+					if (mi == NULL)
+						mi = GetMethodInfo(pDebuggerModule->m_pRuntimeModule,
+						event->GetCodeData.funcMetadataToken,
+						DebuggerMethodInfo::DMI_VERSION_FIRST_VALID, 
+						true );
 
-                    // If the code has been pitched, then we simply tell
-                    // the Right Side we can't get the code.
-                    if (ji != NULL && ji->m_codePitched)
-                    {
-                        _ASSERTE( ji->m_prevJitInfo == NULL );
-                        
-                        // The code that the right side is asking for has
-                        // been pitched since the last time it was referenced.
-                        DebuggerIPCEvent *result =
-                            m_pRCThread->GetIPCEventSendBuffer(iWhich);
-                            
-                        InitIPCEvent(result, 
-                                     DB_IPCE_GET_CODE_RESULT,
-                                     GetCurrentThreadId(),
-                                     appDomainToken);
-                        result->hr = CORDBG_E_CODE_NOT_AVAILABLE;
-                        
-                        fSentEvent = TRUE; //The event is 'sent' in-proc AND oop
-                        if (iWhich ==IPC_TARGET_OUTOFPROC)
-                        {
-                            m_pRCThread->SendIPCEvent(iWhich);
-                        }
-                    } 
-                    else
-                    {
-                        if (!event->GetCodeData.il)
-                        {
+					if (!event->GetCodeData.il)
+					{
+						LOG((LF_CORDB,LL_INFO100000, "D::HIPCE: asked for native code...\n"));
+
+						// This path is executed when we're fetching the native code.
+						ji = (DebuggerJitInfo *)
+							event->GetCodeData.nativeCodeVersionToken;
+
+						// If the code has been pitched, then we simply tell
+						// the Right Side we can't get the code.
+						if (ji == NULL || ji->m_codePitched)
+						{
+							_ASSERTE(ji == NULL ||  ji->m_prevJitInfo == NULL );
+
+							// The code that the right side is asking for has
+							// been pitched since the last time it was referenced.
+							DebuggerIPCEvent *result =
+								m_pRCThread->GetIPCEventSendBuffer(iWhich);
+
+							InitIPCEvent(result, 
+								DB_IPCE_GET_CODE_RESULT,
+								GetCurrentThreadId(),
+								appDomainToken);
+							result->hr = CORDBG_E_CODE_NOT_AVAILABLE;
+
+							fSentEvent = TRUE; //The event is 'sent' in-proc AND oop
+							if (iWhich ==IPC_TARGET_OUTOFPROC)
+							{
+								m_pRCThread->SendIPCEvent(iWhich);
+							}
+							code = NULL;
+						} 
+						else 
+						{
+							fd = ji->m_fd;
                             _ASSERTE(fd != NULL);
 
                             // Grab the function address from the most
                             // reasonable place.
-                            if ((ji != NULL) && ji->m_jitComplete)
+                            if (ji->m_jitComplete)
                                 code = (const BYTE*)ji->m_addrOfCode;
                             else
                                 code = g_pEEInterface->GetFunctionAddress(fd);
-                            
-                            _ASSERTE(code != NULL);
-                        }
-                        
-                        const BYTE *cStart = code + event->GetCodeData.start;
-                        const BYTE *c = cStart;
-                        const BYTE *cEnd = code + event->GetCodeData.end;
 
-                        _ASSERTE(c < cEnd);
+							_ASSERTE(code != NULL);
+						}
+					}
+					if (code != NULL) 
+					{
 
-                        DebuggerIPCEvent *result = NULL;
-                        DebuggerIPCEvent *resultT = NULL;
+						const BYTE *cStart = code + event->GetCodeData.start;
+						const BYTE *c = cStart;
+						const BYTE *cEnd = code + event->GetCodeData.end;
 
-                        while (c < cEnd && 
-                            (!result || result->hr != E_OUTOFMEMORY))
-                        {
-                            if (c == cStart || iWhich == IPC_TARGET_OUTOFPROC)
-                                resultT = result = m_pRCThread->GetIPCEventSendBuffer(iWhich);
-                            else
-                            {
-                                resultT = m_pRCThread->
-                                    GetIPCEventSendBufferContinuation(result);
-                                if (resultT != NULL)
-                                    result = resultT;
-                            }
-                            
-                            if (resultT == NULL)
-                            {
-                                result->hr = E_OUTOFMEMORY;
-                            }
-                            else
-                            {
+						_ASSERTE(c < cEnd);
+
+						DebuggerIPCEvent *result = NULL;
+						DebuggerIPCEvent *resultT = NULL;
+
+						while (c < cEnd && 
+							(!result || result->hr != E_OUTOFMEMORY))
+						{
+							LOG((LF_CORDB,LL_INFO100000, "D::HIPCE: preparing to send one block code...\n"));
+							if (c == cStart || iWhich == IPC_TARGET_OUTOFPROC)
+								resultT = result = m_pRCThread->GetIPCEventSendBuffer(iWhich);
+							else
+							{
+								resultT = m_pRCThread->
+									GetIPCEventSendBufferContinuation(result);
+								if (resultT != NULL)
+									result = resultT;
+							}
+
+							if (resultT == NULL)
+							{
+								LOG((LF_CORDB,LL_INFO100000, "D::HIPCE: resultT == NULL!\n"));
+								result->hr = E_OUTOFMEMORY;
+							}
+							else
+							{
                                 InitIPCEvent(result, 
                                              DB_IPCE_GET_CODE_RESULT,
                                              GetCurrentThreadId(),
                                              appDomainToken);
-                                result->GetCodeData.start = c - code;
-                            
-                                BYTE *p = &result->GetCodeData.code;
-                                BYTE *pMax = ((BYTE *) result) + CorDBIPC_BUFFER_SIZE;
+								result->GetCodeData.start = c - code;
 
-                                SIZE_T size = pMax - p;
+								BYTE *p = &result->GetCodeData.code;
+								BYTE *pMax = ((BYTE *) result) + CorDBIPC_BUFFER_SIZE;
 
-                                if ((SIZE_T)(cEnd - c) < size)
-                                    size = cEnd - c;
+								SIZE_T size = pMax - p;
 
-                                result->GetCodeData.end = result->GetCodeData.start + size;
+								if ((SIZE_T)(cEnd - c) < size)
+									size = cEnd - c;
 
-                                memcpy(p, c, size);
-                                c += size;
+								result->GetCodeData.end = result->GetCodeData.start + size;
 
-                                DebuggerController::UnapplyPatchesInCodeCopy(
+								memcpy(p, c, size);
+								c += size;
+
+                                if (ji)
+									DebuggerController::UnapplyPatchesInCodeCopy(
                                                      pDebuggerModule->m_pRuntimeModule,
                                                      event->GetCodeData.funcMetadataToken,
                                                      ji,
-                                                     fd,
                                                      !event->GetCodeData.il,
                                                      p,
                                                      result->GetCodeData.start,
                                                      result->GetCodeData.end);
-                            }
-                            
-                            fSentEvent = TRUE; //The event is 'sent' in-proc AND oop
-                            if (iWhich ==IPC_TARGET_OUTOFPROC)
-                            {
-                                LOG((LF_CORDB,LL_INFO10000, "D::HIPCE: Get code sending"
-                                    "to LS addr:0x%x\n", c));
-                                m_pRCThread->SendIPCEvent(iWhich);
-                                LOG((LF_CORDB,LL_INFO10000, "D::HIPCE: Code Sent\n"));
-                            }
-                        }
-                    }
-                }
-            }
+							}
+
+							fSentEvent = TRUE; //The event is 'sent' in-proc AND oop
+							if (iWhich ==IPC_TARGET_OUTOFPROC)
+							{
+								LOG((LF_CORDB,LL_INFO10000, "D::HIPCE: Get code sending"
+									"to LS addr:0x%x\n", c));
+								m_pRCThread->SendIPCEvent(iWhich);
+								LOG((LF_CORDB,LL_INFO10000, "D::HIPCE: Code Sent\n"));
+							}
+						}
+					}
+#ifdef LOGGING
+					else 
+					{
+						LOG((LF_CORDB,LL_INFO100000, "D::HIPCE: code is NULL...\n"));
+					}
+#endif
+				}
+#ifdef LOGGING
+				else 
+				{
+					LOG((LF_CORDB,LL_INFO100000, "D::HIPCE: GetFunctionInfo failed!\n"));
+				}
+#endif
+			}
             
             // Something went wrong, so tell the right side so it's not left
             // hanging.
@@ -7648,7 +7864,7 @@ LetThreadsGo:
                                     (Thread*)event->SetIP.debuggerThreadToken,
                                     pModule,
                                     event->SetIP.mdMethod,
-                                    (DebuggerJitInfo*)event->SetIP.versionToken,
+                                    (DebuggerJitInfo*)event->SetIP.nativeCodeVersionToken,
                                     event->SetIP.offset, 
                                     event->SetIP.fIsIL,
                                     event->SetIP.firstExceptionHandler);
@@ -7806,8 +8022,7 @@ LetThreadsGo:
             
             event->hr = SetValueClass(event->SetValueClass.oldData,
                                       event->SetValueClass.newData,
-                                      event->SetValueClass.classMetadataToken,
-                                      event->SetValueClass.classDebuggerModuleToken);
+                                      &event->SetValueClass.type);
       
             // Send the result of how the set reference went.
             m_pRCThread->SendIPCReply(iWhich);
@@ -7969,10 +8184,8 @@ LetThreadsGo:
         break;
 
     case DB_IPCE_GET_SYNC_BLOCK_FIELD:
-        GetAndSendSyncBlockFieldInfo(event->GetSyncBlockField.debuggerModuleToken,
-                                     event->GetSyncBlockField.classMetadataToken,
-                                     (Object *)event->GetSyncBlockField.pObject,
-                                     event->GetSyncBlockField.objectType,
+        GetAndSendSyncBlockFieldInfo((Object *)event->GetSyncBlockField.pObject,
+                                     &event->GetSyncBlockField.objectTypeData,
                                      event->GetSyncBlockField.offsetToVars,
                                      event->GetSyncBlockField.fldToken,
                                      (BYTE *)event->GetSyncBlockField.staticVarBase,
@@ -7994,10 +8207,8 @@ LetThreadsGo:
 // After a class has been loaded, if a field has been added via EnC'd, 
 // we'll have to jump through some hoops to get at it.
 //
-HRESULT Debugger::GetAndSendSyncBlockFieldInfo(void *debuggerModuleToken,
-                                               mdTypeDef classMetadataToken,
-                                               Object *pObject,
-                                               CorElementType objectType,
+HRESULT Debugger::GetAndSendSyncBlockFieldInfo(Object *pObject,
+                                               DebuggerIPCE_BasicTypeData *objType,
                                                SIZE_T offsetToVars,
                                                mdFieldDef fldToken,
                                                BYTE *staticVarBase,
@@ -8005,12 +8216,12 @@ HRESULT Debugger::GetAndSendSyncBlockFieldInfo(void *debuggerModuleToken,
                                                IpcTarget iWhich)
 {
     LOG((LF_CORDB, LL_INFO100000, "D::GASSBFI: dmtok:0x%x Obj:0x%x, objType"
-        ":0x%x, offset:0x%x\n", debuggerModuleToken, pObject, objectType,
+		":0x%x, offset:0x%x\n", objType->debuggerModuleToken, pObject, objType->elementType,
         offsetToVars));
 
     DebuggerModule *dm;
     
-    dm = (DebuggerModule *)(debuggerModuleToken);
+    dm = (DebuggerModule *)(objType->debuggerModuleToken);
      
     HRESULT hr = S_OK;
 
@@ -8021,12 +8232,17 @@ HRESULT Debugger::GetAndSendSyncBlockFieldInfo(void *debuggerModuleToken,
     {
         FieldDesc *pFD = NULL;
 
+        // Find the class given its module and token. The class must be loaded.
+        DebuggerModule *pDebuggerModule = (DebuggerModule*) objType->debuggerModuleToken;
+    
+        EEClass *pClass = g_pEEInterface->FindLoadedClass(pDebuggerModule->m_pRuntimeModule, objType->metadataToken);
+
         // Note that GASCI will scribble over both the data in the incoming
         // mesage, and the outgoing message, so don't bother to prep the reply
         // before calling this.
         hr = GetAndSendClassInfo(rcThread,
-                                 debuggerModuleToken,
-                                 classMetadataToken,
+                                 pClass,
+								 true,
                                  dm->m_pAppDomain,
                                  fldToken,
                                  &pFD, //OUT
@@ -8061,42 +8277,30 @@ HRESULT Debugger::GetAndSendSyncBlockFieldInfo(void *debuggerModuleToken,
 
 
         // We'll get the sig out of the metadata on the right side
-        currentFieldData->fldFullSigSize = 0;
+        //currentFieldData->fldFullSigValid = 0;
         currentFieldData->fldFullSig = NULL;
         
-        PCCOR_SIGNATURE pSig = NULL;
-        DWORD cSig = 0;
+		// <REVIEW> GENERICS: The is passes back the field sig as a single byte type, e.g.
+		// OBJECT etc.  I can't image why we don't just refetch the type on the other
+		// side - the only possible reasons are legacy code or performance, to reduce
+		// the number of metadata calls.  I'd prefer to just get rid of this, don't
+		// pass any signature back, and get the sig from the right-side just
+		// like we do for locals and arguments - after all, the FieldDescGetSig call
+		// just goes straight to the metadata anyway, just like we will on the right-side,
+		// so I can't see any win here.  
+        //PCCOR_SIGNATURE pSig = NULL;
+        //DWORD cSig = 0;
+        //
+        //g_pEEInterface->FieldDescGetSig(pFD, &pSig, &cSig);
+        //_ASSERTE(*pSig == IMAGE_CEE_CS_CALLCONV_FIELD);
+        //++pSig;
+        //
+        //ULONG cb = _skipFunkyModifiersInSignature(pSig);
+        //pSig = &pSig[cb];
+        //
+        //currentFieldData->fldType = (CorElementType) *pSig; </REVIEW>
+		currentFieldData->fldEnCAvailable = true;
 
-        g_pEEInterface->FieldDescGetSig(pFD, &pSig, &cSig);
-        _ASSERTE(*pSig == IMAGE_CEE_CS_CALLCONV_FIELD);
-        ++pSig;
-        
-        ULONG cb = _skipFunkyModifiersInSignature(pSig);
-        pSig = &pSig[cb];
-        
-        currentFieldData->fldType = (CorElementType) *pSig;
-
-        if (pFD->IsStatic())
-        {
-            if (pFD->IsThreadStatic())
-            {
-                // fldOffset is used to store the pointer directly, so that
-                // we can get it out in the right side.
-                currentFieldData->fldOffset = (SIZE_T)pORField;
-            }
-            else if (pFD->IsContextStatic())
-            {
-                _ASSERTE(!"NYI!");
-            }
-            else
-            {
-                // fldOffset is computed to work correctly with GetStaticFieldValue
-                // which computes:
-                // addr of pORField = staticVarBase + offsetToFld
-                currentFieldData->fldOffset = pORField - staticVarBase;
-            }
-        }
-        else
         {
             // fldOffset is computed to work correctly with GetFieldValue
             // which computes:
@@ -8140,142 +8344,178 @@ HRESULT Debugger::GetAndSendFunctionData(DebuggerRCThread* rcThread,
     // Setup the event that we'll be sending the results in.
     DebuggerIPCEvent* event = rcThread->GetIPCEventReceiveBuffer(iWhich);
     InitIPCEvent(event, 
-                 DB_IPCE_FUNCTION_DATA_RESULT, 
+                 DB_IPCE_GET_FUNCTION_DATA_RESULT, 
                  0,
                  (void *)(AppDomain *)bd);
-    event->FunctionDataResult.funcMetadataToken = funcMetadataToken;
-    event->FunctionDataResult.funcDebuggerModuleToken =
-        funcDebuggerModuleToken;
-    event->FunctionDataResult.funcRVA = 0;
-    event->FunctionDataResult.classMetadataToken = mdTypeDefNil;
-    event->FunctionDataResult.ilStartAddress = NULL;
-    event->FunctionDataResult.ilSize = 0;
-    event->FunctionDataResult.ilnVersion = DJI_VERSION_INVALID;
-    event->FunctionDataResult.nativeStartAddressPtr = NULL;
-    event->FunctionDataResult.nativeSize = 0;
-    event->FunctionDataResult.nativenVersion = DJI_VERSION_INVALID;
-    event->FunctionDataResult.CodeVersionToken = NULL;
-    event->FunctionDataResult.nVersionMostRecentEnC = DJI_VERSION_INVALID;
-    
-#ifdef DEBUG
-    event->FunctionDataResult.nativeOffset = 0xdeadbeef;
-        // Since Populate doesn't create a CordbNativeFrame, we don't
-        // need the nativeOffset field to contain anything valid...
-#endif //DEBUG
-    event->FunctionDataResult.localVarSigToken = mdSignatureNil;
-    event->FunctionDataResult.ilToNativeMapAddr = NULL;
-    event->FunctionDataResult.ilToNativeMapSize = 0;
 
-    MethodDesc *pFD=NULL;
+	
+	HRESULT hr = GetFuncData(funcMetadataToken, pDebuggerModule, nVersion, &(event->FunctionData.basicData));
 
-    HRESULT hr = GetFunctionInfo(
-          pDebuggerModule->m_pRuntimeModule,
-         funcMetadataToken, &pFD,
-         (ULONG*)&event->FunctionDataResult.funcRVA,
-         (BYTE**) &event->FunctionDataResult.ilStartAddress,
-         (unsigned int *) &event->FunctionDataResult.ilSize,
-         &event->FunctionDataResult.localVarSigToken);
+	// <REVIEW>  To make sure we don't break V1 behaviour, e.g. GetNativeCode,
+	// we return the most recent blob of native code for the version of the method that
+	// we happen to have seen.  For non-generic methods
+	// there will only be one, but for generic code there may be others we are
+	// ignoring.</REVIEW>
+	if (SUCCEEDED(hr)) 
+	{
+		DebuggerMethodInfo *dmi = GetMethodInfo(pDebuggerModule->m_pRuntimeModule, funcMetadataToken, nVersion, true);
 
-    
-    if (SUCCEEDED(hr))
-    {
-        if (pFD != NULL)
-        {
-            DebuggerJitInfo *ji = GetJitInfo(pFD, (const BYTE*)nVersion, true);
-            
-            if (ji != NULL && ji->m_jitComplete)
-            {
-                LOG((LF_CORDB, LL_INFO10000, "EE:D::GASFD: JIT info found.\n"));
-                
-                // Send over the native info
-                // Note that m_addrOfCode may be NULL (if the code was pitched)
-                event->FunctionDataResult.nativeStartAddressPtr = 
-                    &(ji->m_addrOfCode);
-
-                // We should use the DJI rather than GetFunctionSize because
-                // LockAndSendEnCRemapEvent will stop us at a point
-                // that's prior to the MethodDesc getting updated, so it will
-                // look as though the method hasn't been JITted yet, even
-                // though we may get the LockAndSendEnCRemapEvent as a result
-                // of a JITComplete callback
-                event->FunctionDataResult.nativeSize = ji->m_sizeOfCode;
-
-                event->FunctionDataResult.nativenVersion = ji->m_nVersion;
-                event->FunctionDataResult.CodeVersionToken = (void*)ji;
-
-                // Pass back the pointers to the sequence point map so
-                // that the RIght Side can copy it out if needed.
-                _ASSERTE(ji->m_sequenceMapSorted);
-                
-                event->FunctionDataResult.ilToNativeMapAddr =
-                    ji->m_sequenceMap;
-                event->FunctionDataResult.ilToNativeMapSize =
-                    ji->m_sequenceMapCount;
-            }
-            else
-            {
-                event->FunctionDataResult.CodeVersionToken = NULL;
-            }
-
-            SIZE_T nVersionMostRecentlyEnCd = GetVersionNumber(pFD);
-    
-            event->FunctionDataResult.nVersionMostRecentEnC = nVersionMostRecentlyEnCd;
-
-            // There's no way to do an EnC on a method with an IL body without 
-            // providing IL, so either we can't get the IL, or else the version
-            // number of the IL is the same as the most recently EnC'd version.
-            event->FunctionDataResult.ilnVersion = nVersionMostRecentlyEnCd;
-
-            // Send back the typeDef token for the class that this
-            // function belongs to.
-            event->FunctionDataResult.classMetadataToken =
-                pFD->GetClass()->GetCl();
-
-            LOG((LF_CORDB, LL_INFO10000, "D::GASFD: function is class. "
-                 "0x%08x\n",
-                 event->FunctionDataResult.classMetadataToken));
-        }
-        else
-        {
-            // No MethodDesc, so the class hasn't been loaded yet.
-            // Get the class this method is in.
-            mdToken tkParent;
-            
-            hr = g_pEEInterface->GetParentToken(
-                                          pDebuggerModule->m_pRuntimeModule,
-                                          funcMetadataToken,
-                                          &tkParent);
-
-            if (SUCCEEDED(hr))
-            {
-                _ASSERTE(TypeFromToken(tkParent) == mdtTypeDef);
-            
-                event->FunctionDataResult.classMetadataToken = tkParent;
-
-                LOG((LF_CORDB, LL_INFO10000, "D::GASFD: function is class. "
-                     "0x%08x\n",
-                     event->FunctionDataResult.classMetadataToken));
-            }
-        }
-    }
-
-    // If we didn't get the MethodDesc, then we didn't get the version
-    // number b/c it was never set (the DJI tables are indexed by MethodDesc)
-    if (pFD == NULL)
-    {
-        event->FunctionDataResult.nVersionMostRecentEnC = DebuggerJitInfo::DJI_VERSION_FIRST_VALID;
-        event->FunctionDataResult.ilnVersion = DebuggerJitInfo::DJI_VERSION_FIRST_VALID;
-    }
-    
+		if (dmi != NULL && dmi->m_latestJitInfo != NULL && 
+			dmi->m_latestJitInfo->m_jitComplete && 
+			dmi->m_latestJitInfo->m_fd != NULL) 
+		{
+			hr = GetJITFuncData(dmi->m_latestJitInfo->m_fd, &(event->FunctionData.possibleNativeData));
+		}
+		else 
+		{
+			// It's OK if we don't find any suitable JitInfo - the native code will
+			// just be unavailable.
+			event->FunctionData.possibleNativeData.nativeCodeVersionToken = NULL;
+		}
+	}
     event->hr = hr;
     
-    LOG((LF_CORDB, LL_INFO10000, "D::GASFD: sending result->nSAP:0x%x\n",
-            event->FunctionDataResult.nativeStartAddressPtr));
+    LOG((LF_CORDB, LL_INFO10000, "D::GASFD: sending result\n"));
 
     // Send off the data to the right side.
     hr = rcThread->SendIPCReply(iWhich);
     
     return hr;
+}
+
+//
+// GetFuncData gets part of the data for a function.
+//
+HRESULT Debugger::GetFuncData(mdMethodDef funcMetadataToken,
+                              DebuggerModule* pDebuggerModule,
+                             SIZE_T nVersion,
+                             DebuggerIPCE_FuncData *data)
+{
+    LOG((LF_CORDB, LL_INFO10000, "D::GASFD: getting function data for "
+         "0x%08x 0x%08x.\n", funcMetadataToken, pDebuggerModule));
+
+    _ASSERTE(pDebuggerModule != NULL);
+    _ASSERTE(funcMetadataToken != NULL);
+
+    _ASSERTE(pDebuggerModule->m_pRuntimeModule != NULL);
+
+    data->funcMetadataToken = funcMetadataToken;
+	data->funcDebuggerModuleToken = pDebuggerModule;
+    data->funcRVA = 0;
+    data->classMetadataToken = mdTypeDefNil;
+    data->ilStartAddress = NULL;
+    data->ilSize = 0;
+    data->ilnVersion = DMI_VERSION_INVALID;
+	data->nVersionMostRecentEnC = DMI_VERSION_INVALID;
+
+	data->localVarSigToken = mdSignatureNil;
+
+    HRESULT hr = GetFunctionInfo(
+          pDebuggerModule->m_pRuntimeModule,
+         funcMetadataToken,
+          (ULONG *)&data->funcRVA,
+         (BYTE**) &data->ilStartAddress,
+         (unsigned int *) &data->ilSize,
+         &data->localVarSigToken);
+
+    if (SUCCEEDED(hr))
+    {
+		DebuggerMethodInfo *ji = GetMethodInfo(pDebuggerModule->m_pRuntimeModule, funcMetadataToken, nVersion, true);
+
+		// NOTE: ji may be NULL - that's OK
+
+		SIZE_T nVersionMostRecentlyEnCd = GetVersionNumber(pDebuggerModule->m_pRuntimeModule, funcMetadataToken);
+		data->nVersionMostRecentEnC = nVersionMostRecentlyEnCd;
+
+		// There's no way to do an EnC on a method with an IL body without 
+		// providing IL, so either we can't get the IL, or else the version
+		// number of the IL is the same as the most recently EnC'd version.
+		data->ilnVersion = nVersionMostRecentlyEnCd;
+		data->CodeVersionToken = (void*)ji;
+
+		// Get the class this method is in.
+		mdToken tkParent;
+
+		hr = g_pEEInterface->GetParentToken(
+			pDebuggerModule->m_pRuntimeModule,
+			funcMetadataToken,
+			&tkParent);
+
+		if (SUCCEEDED(hr))
+		{
+			_ASSERTE(TypeFromToken(tkParent) == mdtTypeDef);
+			data->classMetadataToken = tkParent;
+			LOG((LF_CORDB, LL_INFO10000, "D::GASFD: function is class. "
+				"0x%08x\n",
+				data->classMetadataToken));
+		}
+	}
+    return hr;
+}
+
+
+//
+// GetJITFunctionData gets the JIT-related data for a function.
+//
+HRESULT Debugger::GetJITFuncData(MethodDesc *pFD,
+                                 DebuggerIPCE_JITFuncData *data)
+{
+    LOG((LF_CORDB, LL_INFO10000, "D::GJFD: getting JIT function data for "
+         "0x%08x.\n", pFD));
+
+    data->nativeStartAddressPtr = NULL;
+    data->nativeSize = 0;
+    data->methodDesc = NULL;
+    data->nativeCodeVersionToken = NULL;
+    
+#ifdef DEBUG
+    data->nativeOffset = 0xdeadbeef;
+        // Since Populate doesn't create a CordbNativeFrame, we don't
+        // need the nativeOffset field to contain anything valid...
+#endif //DEBUG
+    data->ilToNativeMapAddr = NULL;
+    data->ilToNativeMapSize = 0;
+
+	if (pFD) {
+		// GENERICS: methodDesc gets set for instantiations of generic methods and
+		// instance methods inside generic classes.
+		data->methodDesc = pFD->HasClassOrMethodInstantiation() ? pFD : NULL;
+		DebuggerJitInfo *ji = GetJitInfo(pFD, NULL);
+
+		if (ji != NULL && ji->m_jitComplete)
+		{
+			LOG((LF_CORDB, LL_INFO10000, "EE:D::GASFD: JIT info found.\n"));
+
+			// Send over the native info
+			// Note that m_addrOfCode may be NULL (if the code was pitched)
+			data->nativeStartAddressPtr = 
+				&(ji->m_addrOfCode);
+
+			// We should use the DJI rather than GetFunctionSize because
+			// LockAndSendEnCRemapEvent will stop us at a point
+			// that's prior to the MethodDesc getting updated, so it will
+			// look as though the method hasn't been JITted yet, even
+			// though we may get the LockAndSendEnCRemapEvent as a result
+			// of a JITComplete callback
+			data->nativeSize = ji->m_sizeOfCode;
+
+			data->nativeCodeVersionToken = (void*)ji;
+
+			// Pass back the pointers to the sequence point map so
+			// that the RIght Side can copy it out if needed.
+			_ASSERTE(ji->m_sequenceMapSorted);
+
+			data->ilToNativeMapAddr =
+				ji->m_sequenceMap;
+			data->ilToNativeMapSize =
+				ji->m_sequenceMapCount;
+		}
+		else
+		{
+			data->nativeCodeVersionToken = NULL;
+		}
+	}
+    return S_OK;
 }
 
 
@@ -8309,6 +8549,286 @@ void Debugger::EnsureModuleLoadedForInproc(
     _ASSERTE (*pobjClassDebuggerModuleToken != NULL);
 }
 
+
+void Debugger::TypeHandleToBasicTypeInfo(AppDomain *pAppDomain, TypeHandle th, DebuggerIPCE_BasicTypeData *res, IpcTarget iWhich) 
+{
+	LOG((LF_CORDB, LL_INFO10000, "D::THTBTI: converting left-side type handle to basic right-side type info, ELEMENT_TYPE: %d.\n", th.GetSigCorElementType()));
+	res->elementType = th.GetSigCorElementType();
+    switch (res->elementType) 
+	{
+	case ELEMENT_TYPE_ARRAY:
+	case ELEMENT_TYPE_SZARRAY:
+	case ELEMENT_TYPE_PTR:
+	case ELEMENT_TYPE_FNPTR:
+	case ELEMENT_TYPE_BYREF:
+		res->typeHandle = th.AsPtr();
+		res->metadataToken = mdTokenNil;
+		res->debuggerModuleToken = NULL;
+		break;
+
+	case ELEMENT_TYPE_CLASS:
+	case ELEMENT_TYPE_VALUETYPE:
+		{
+			res->typeHandle = th.HasInstantiation() ? th.AsPtr() : NULL; // only set if instantiated
+			EEClass *cl = th.GetClass();
+			res->metadataToken = cl->GetCl();
+			res->debuggerModuleToken = (void*) LookupModule(cl->GetModule(), pAppDomain);
+            EnsureModuleLoadedForInproc(&res->debuggerModuleToken, 
+                     cl, pAppDomain, iWhich);
+			break;
+		}
+
+	default:
+		res->typeHandle = NULL;
+		res->metadataToken = mdTokenNil;
+		res->debuggerModuleToken = NULL;
+		break;
+	}
+	return;
+}
+
+void Debugger::TypeHandleToExpandedTypeInfo(BOOL boxed, AppDomain *pAppDomain, TypeHandle th, 
+									  DebuggerIPCE_ExpandedTypeData *res, IpcTarget iWhich)
+
+{
+	LOG((LF_CORDB, LL_INFO10000, "D::THTETI: converting left-side type handle to expanded right-side type info, ELEMENT_TYPE: %d.\n", th.GetSigCorElementType()));
+	res->elementType = th.GetSigCorElementType();
+    switch (res->elementType) 
+	{
+	case ELEMENT_TYPE_ARRAY:
+	case ELEMENT_TYPE_SZARRAY:
+	    _ASSERTE(th.IsArray());
+		res->ArrayTypeData.arrayRank = th.AsArray()->GetRank();
+		TypeHandleToBasicTypeInfo(pAppDomain, th.AsArray()->GetElementTypeHandle(), &(res->ArrayTypeData.arrayTypeArg), iWhich);
+		break;
+
+    case ELEMENT_TYPE_PTR:
+	case ELEMENT_TYPE_BYREF:
+		_ASSERTE(th.IsTypeDesc());
+		TypeHandleToBasicTypeInfo(pAppDomain, th.AsTypeDesc()->GetTypeParam(), &(res->UnaryTypeData.unaryTypeArg), iWhich);
+		break;
+
+	case ELEMENT_TYPE_VALUETYPE:
+		if (boxed) 
+         	res->elementType = ELEMENT_TYPE_CLASS;
+		// drop through
+
+	case ELEMENT_TYPE_CLASS:
+		{
+treatAllValueClassesAsBoxed:
+			res->ClassTypeData.typeHandle = th.HasInstantiation() ? th.AsPtr() : NULL; // only set if instantiated
+			EEClass *cl = th.GetClass();
+			res->ClassTypeData.metadataToken = cl->GetCl();
+			res->ClassTypeData.debuggerModuleToken = (void*) LookupModule(cl->GetModule(), pAppDomain);
+            EnsureModuleLoadedForInproc(&res->ClassTypeData.debuggerModuleToken, 
+                     cl, pAppDomain, iWhich);
+            _ASSERTE (res->ClassTypeData.debuggerModuleToken != NULL);
+			break;
+		}
+
+	case ELEMENT_TYPE_VALUEARRAY:
+		_ASSERTE(!"unimplemented!");
+		break;	
+
+	case ELEMENT_TYPE_FNPTR:
+		{
+			res->NaryTypeData.typeHandle = th.AsPtr();
+			break;
+		}
+
+	default: 
+		// The element type is sufficient, unless the type is effectively a "boxed"
+		// value type...
+		if (boxed) 
+		{
+         	res->elementType = ELEMENT_TYPE_CLASS;
+			goto treatAllValueClassesAsBoxed;
+		}
+		break;
+	}
+	LOG((LF_CORDB, LL_INFO10000, "D::THTETI: converted left-side type handle to expanded right-side type info, res->ClassTypeData.typeHandle = 0x%08x.\n", res->ClassTypeData.typeHandle));
+	return;
+}
+
+
+HRESULT Debugger::BasicTypeInfoToTypeHandle(bool canLoad, DebuggerIPCE_BasicTypeData *data, TypeHandle *pRes) 
+{
+	LOG((LF_CORDB, LL_INFO10000, "D::BTITTH: expanding basic right-side type to left-side type, ELEMENT_TYPE: %d.\n", data->elementType));
+	HRESULT hr = S_OK;
+	*pRes = TypeHandle();
+    switch (data->elementType) 
+	{
+	case ELEMENT_TYPE_ARRAY:
+	case ELEMENT_TYPE_SZARRAY:
+	case ELEMENT_TYPE_PTR:
+	case ELEMENT_TYPE_BYREF:
+		_ASSERTE(data->typeHandle != NULL);
+		*pRes = TypeHandle(data->typeHandle);
+		break;
+
+	case ELEMENT_TYPE_CLASS:
+	case ELEMENT_TYPE_VALUETYPE:
+		{
+			if (data->typeHandle) {
+				*pRes = TypeHandle(data->typeHandle);
+				break;
+			}
+			DebuggerModule *pDebuggerModule = (DebuggerModule*) data->debuggerModuleToken;
+
+			EEClass *pClass = 
+				canLoad ? g_pEEInterface->FindLoadedClass(pDebuggerModule->m_pRuntimeModule, data->metadataToken)
+				        : g_pEEInterface->FindLoadedClass(pDebuggerModule->m_pRuntimeModule, data->metadataToken);;
+			if (pClass == NULL) 
+			{
+				LOG((LF_CORDB, LL_INFO10000, "D::ETITTH: class isn't loaded.\n"));
+				hr = CORDBG_E_CLASS_NOT_LOADED;
+				return hr;
+			}
+				
+			_ASSERTE(pClass->GetNumGenericArgs() == 0);
+			TypeHandle th(pClass);
+			*pRes = th;
+			break;
+		}
+	case ELEMENT_TYPE_VALUEARRAY:
+		_ASSERTE(!"unimplemented!");
+		break;	
+	case ELEMENT_TYPE_FNPTR:
+		{
+			_ASSERTE(data->typeHandle != NULL);
+			*pRes = TypeHandle(data->typeHandle);
+			break;
+		}
+	case ELEMENT_TYPE_OBJECT:
+		{
+			TypeHandle th(g_pObjectClass->GetClass());
+			*pRes = th;
+		}
+	case ELEMENT_TYPE_STRING:
+		{
+			TypeHandle th(g_pStringClass->GetClass());
+			*pRes = th;
+		}
+
+    default:
+		MethodTable *m = g_Mscorlib.GetElementType(data->elementType);
+        if (m == NULL)
+            return CORDBG_E_CLASS_NOT_LOADED;
+        *pRes = TypeHandle(m);
+        break;
+	}
+	return hr;
+}
+
+HRESULT Debugger::ExpandedTypeInfoToTypeHandle(bool canLoad,DebuggerIPCE_ExpandedTypeData *data, unsigned int typarCount, DebuggerIPCE_BasicTypeData *typars, TypeHandle *pRes) 
+{
+    LOG((LF_CORDB, LL_INFO10000, "D::ETITTH: expanding right-side type to left-side type, ELEMENT_TYPE: %d.\n", data->elementType));
+    HRESULT hr = S_OK;
+
+    *pRes = TypeHandle();
+    switch (data->elementType) 
+    {
+    case ELEMENT_TYPE_ARRAY:
+    case ELEMENT_TYPE_SZARRAY:
+        {
+            TypeHandle typar;
+            _ASSERTE(typarCount = 1);
+            IfFailRet(BasicTypeInfoToTypeHandle(canLoad, &(typars[0]), &typar));
+            *pRes = g_pEEInterface->FindLoadedArrayType(data->elementType, typar, data->ArrayTypeData.arrayRank);
+            return hr;
+        }
+
+    case ELEMENT_TYPE_PTR:
+    case ELEMENT_TYPE_BYREF:
+        {
+            TypeHandle typar;
+            _ASSERTE(typarCount = 1);
+            IfFailRet (BasicTypeInfoToTypeHandle(canLoad, &(typars[0]), &typar));
+            *pRes = g_pEEInterface->FindLoadedPointerOrByrefType(data->elementType, typar);
+            return hr;
+        }
+
+
+    case ELEMENT_TYPE_CLASS:
+    case ELEMENT_TYPE_VALUETYPE:
+        {
+            DebuggerModule *pDebuggerModule = (DebuggerModule*) data->ClassTypeData.debuggerModuleToken;
+
+            EEClass *pClass =             g_pEEInterface->FindLoadedClass(pDebuggerModule->m_pRuntimeModule, data->ClassTypeData.metadataToken);
+
+            // If we can't find the class, return the proper HR to the right side. Note: if the class is not a value class and
+            // the class is also not restored, then we must pretend that the class is still not loaded. We are gonna let
+            // unrestored value classes slide, though, and special case access to the class's parent below.
+            if (pClass == NULL)
+            {
+                LOG((LF_CORDB, LL_INFO10000, "D::ETITTH: class isn't loaded.\n"));
+                return CORDBG_E_CLASS_NOT_LOADED;
+            }
+
+            TypeHandle tycon(pClass);
+            if (typarCount == 0) 
+            {
+                *pRes = tycon;
+                return S_OK;
+            }
+
+            if (typarCount != pClass->GetNumGenericArgs())
+            {
+                LOG((LF_CORDB, LL_INFO10000, "D::ETITTH: wrong number of type parameters, %d given, %d expected\n", typarCount, pClass->GetNumGenericArgs()));
+                _ASSERTE(typarCount == pClass->GetNumGenericArgs());
+                return E_FAIL;
+            }
+
+            TypeHandle *inst = (TypeHandle *) _alloca(sizeof(TypeHandle) * typarCount);
+            for (unsigned int i = 0; i < typarCount; i++) 
+            { 
+                hr = BasicTypeInfoToTypeHandle(canLoad,&typars[i], &inst[i]);
+                if (FAILED(hr)) 
+                    return hr;
+            }
+            TypeHandle res = g_pEEInterface->FindLoadedInstantiation(tycon, inst, typarCount);
+            if (res.IsNull())
+            {
+                hr = CORDBG_E_CLASS_NOT_LOADED;
+                return hr;
+            }
+            *pRes = res;
+            return hr;
+        }
+
+    case ELEMENT_TYPE_VALUEARRAY:
+        _ASSERTE(!"unimplemented!");
+        return E_FAIL;	
+
+    case ELEMENT_TYPE_FNPTR:
+        {
+            TypeHandle *inst = (TypeHandle *) _alloca(sizeof(TypeHandle) * typarCount);
+            for (unsigned int i = 0; i < typarCount; i++) 
+            { 
+                 hr = BasicTypeInfoToTypeHandle(canLoad,&typars[i], &inst[i]);
+                 if (FAILED(hr)) 
+                     return hr;
+            }
+            TypeHandle res = g_pEEInterface->FindLoadedFnptrType(inst, typarCount);
+            if (res.IsNull())
+            {
+                 hr = CORDBG_E_CLASS_NOT_LOADED;
+                 return hr;
+            }
+            *pRes = res;
+            return hr;
+        }
+    default:
+        LOG((LF_CORDB, LL_INFO10000, "D::ETITTH: strange element type %d.\n", data->elementType));
+        _ASSERTE(!"unexpected: should never have to convert this kind of element type to a type handle!");
+
+        *pRes = TypeHandle();
+
+        return E_FAIL;
+    }
+
+}
+
 //
 // GetAndSendObjectInfo gets the necessary data for an object and
 // sends it back to the right side.
@@ -8330,6 +8850,9 @@ HRESULT Debugger::GetAndSendObjectInfo(DebuggerRCThread* rcThread,
     Object *objPtr = NULL;
     void *objRef;
         
+	_ASSERTE (objectType != ELEMENT_TYPE_WITH);
+    _ASSERTE (objectType != ELEMENT_TYPE_VAR);
+    _ASSERTE (objectType != ELEMENT_TYPE_MVAR);
     // Setup the event that we'll be sending the results in.
     DebuggerIPCEvent* event = rcThread->GetIPCEventReceiveBuffer(iWhich);
     InitIPCEvent(event, 
@@ -8342,9 +8865,7 @@ HRESULT Debugger::GetAndSendObjectInfo(DebuggerRCThread* rcThread,
     oi->objRefBad = false;
     oi->objSize = 0;
     oi->objOffsetToVars = 0;
-    oi->objectType = objectType;
-    oi->objClassMetadataToken = mdTypeDefNil;
-    oi->objClassDebuggerModuleToken = NULL;
+    oi->objTypeData.elementType = objectType;
     oi->nstructInfo.size = 0;
     oi->nstructInfo.ptr = NULL;
     oi->objToken = NULL;
@@ -8364,17 +8885,7 @@ HRESULT Debugger::GetAndSendObjectInfo(DebuggerRCThread* rcThread,
             // The objectRefAddress really points to a TypedByRef struct.
             TypedByRef *ra = (TypedByRef*) objectRefAddress;
 
-            // Grab the class. This will be NULL if its an array ref type.
-            EEClass *cl = ra->type.AsClass();
-            if (cl != NULL)
-            {
-                // If we have a non-array class, pass back the class
-                // token and module.
-                oi->objClassMetadataToken = cl->GetCl();
-                oi->objClassDebuggerModuleToken =
-                    (void*) LookupModule(cl->GetModule(), pAppDomain);
-                _ASSERTE (oi->objClassDebuggerModuleToken != NULL);
-            }
+            TypeHandleToBasicTypeInfo(pAppDomain, ra->type, &(oi->typedByrefInfo.typedByrefType), iWhich);
 
             // The reference to the object is in the data field of the TypedByRef.
             oi->objRef = ra->data;
@@ -8382,8 +8893,8 @@ HRESULT Debugger::GetAndSendObjectInfo(DebuggerRCThread* rcThread,
             LOG((LF_CORDB, LL_INFO10000, "D::GASOI: sending REFANY result: "
                  "ref=0x%08x, cls=0x%08x, mod=0x%08x\n",
                  oi->objRef,
-                 oi->objClassMetadataToken,
-                 oi->objClassDebuggerModuleToken));
+                 oi->typedByrefInfo.typedByrefType.metadataToken,
+                 oi->typedByrefInfo.typedByrefType.debuggerModuleToken));
 
             // Send off the data to the right side.
             plainSend = true;
@@ -8430,10 +8941,13 @@ HRESULT Debugger::GetAndSendObjectInfo(DebuggerRCThread* rcThread,
         }
         
         EEClass *objClass = objPtr->GetClass();
+        TypeHandle objTypeHandle = objPtr->GetTypeHandle();
         pMT = objPtr->GetMethodTable();
 
         // Try to verify the integrity of the object. This is not fool proof.
-        if (pMT != objClass->GetMethodTable())
+        // GENERICS: Do NOT do this comparison for objects that are instances
+        // of generic classes, as we are duplicating vtables.
+        if (objTypeHandle.GetNumGenericArgs() == 0 && pMT != objClass->GetMethodTable())
         {
             LOG((LF_CORDB, LL_INFO10000, "D::GASOI: MT's don't match.\n"));
 
@@ -8446,47 +8960,15 @@ HRESULT Debugger::GetAndSendObjectInfo(DebuggerRCThread* rcThread,
         oi->objOffsetToVars =
             (UINT_PTR)((Object*)objPtr)->GetData() - (UINT_PTR)objPtr;
 
+        TypeHandleToExpandedTypeInfo(true, pAppDomain, objTypeHandle, &(oi->objTypeData), iWhich);
         // If this is a string object, set the type to ELEMENT_TYPE_STRING.
         if (g_pEEInterface->IsStringObject((Object*)objPtr))
-            oi->objectType = ELEMENT_TYPE_STRING;
-        else
-        {
-            if (objClass->IsArrayClass())
-            {
-                // If this is an array object, set its type appropiatley.
-                ArrayClass *ac = (ArrayClass*)objClass;
+            oi->objTypeData.elementType = ELEMENT_TYPE_STRING;
 
-                //
-                //
-                //
-                if (ac->GetRank() == 1)
-                    oi->objectType = ELEMENT_TYPE_SZARRAY;
-                else
-                    oi->objectType = ELEMENT_TYPE_ARRAY;
-            }
-            else
-            {
-                // Its not an array class... but if the element type
-                // indicates array, then we have an Object in place of
-                // an Array, so we need to change the element type
-                // appropiatley.
-                if ((oi->objectType == ELEMENT_TYPE_ARRAY) ||
-                    (oi->objectType == ELEMENT_TYPE_SZARRAY))
-                {
-                    oi->objectType = ELEMENT_TYPE_CLASS;
-                }
-                else if (oi->objectType == ELEMENT_TYPE_STRING)
-                {
-                    // Well, we thought we had a string, but it turns
-                    // out its not an array, nor is it a string. So
-                    // we'll just assume the basic object and go from
-                    // there.
-                    oi->objectType = ELEMENT_TYPE_CLASS;
-                }
-            }
-        }
-        
-        switch (oi->objectType)
+        //Note that the next element type may be different from
+        // (objTypeHandle.GetSigCorElementType()) when we have a boxed
+        // value.
+        switch (oi->objTypeData.elementType) 
         {
         case ELEMENT_TYPE_STRING:
             {
@@ -8501,27 +8983,13 @@ HRESULT Debugger::GetAndSendObjectInfo(DebuggerRCThread* rcThread,
                     (UINT_PTR) g_pEEInterface->StringObjectGetBuffer(so) -
                     (UINT_PTR) objPtr;
 
-                // Pass back the object's class
-                oi->objClassMetadataToken = objClass->GetCl();
-                oi->objClassDebuggerModuleToken =
-                    (void*) LookupModule(objClass->GetModule(), pAppDomain);
-
-                EnsureModuleLoadedForInproc(&oi->objClassDebuggerModuleToken, 
-                    objClass, pAppDomain, iWhich);
             }
 
             break;
 
         case ELEMENT_TYPE_CLASS:
         case ELEMENT_TYPE_OBJECT:
-            // Pass back the object's class
-            oi->objClassMetadataToken = objClass->GetCl();
-            oi->objClassDebuggerModuleToken =
-                (void*) LookupModule(objClass->GetModule(), pAppDomain);
-
-            EnsureModuleLoadedForInproc(&oi->objClassDebuggerModuleToken, 
-                objClass, pAppDomain, iWhich);
-            
+            // the type carries all the necessary nifo. in these cases.
             break;
 
         //
@@ -8540,6 +9008,7 @@ HRESULT Debugger::GetAndSendObjectInfo(DebuggerRCThread* rcThread,
 
                 ArrayBase *arrPtr = (ArrayBase*)objPtr;
                 
+                oi->arrayInfo.rank = arrPtr->GetRank();  // this is also returned in the type information for the array - we return both for sanity checking...
                 oi->arrayInfo.componentCount = arrPtr->GetNumComponents();
                 oi->arrayInfo.offsetToArrayBase =
                     (UINT_PTR)arrPtr->GetDataPtr() - (UINT_PTR)arrPtr;
@@ -8558,45 +9027,24 @@ HRESULT Debugger::GetAndSendObjectInfo(DebuggerRCThread* rcThread,
                     oi->arrayInfo.offsetToLowerBounds = 0;
                 }
                 
-                oi->arrayInfo.rank = arrPtr->GetRank();
                 oi->arrayInfo.elementSize =
                     arrPtr->GetMethodTable()->GetComponentSize();
-                oi->arrayInfo.elementType =
-                    g_pEEInterface->ArrayGetElementType(arrPtr);
 
-                // If the element type is a value type, then we have
-                // an array of value types. Adjust the element's class
-                // accordingly.
-                if (oi->arrayInfo.elementType == ELEMENT_TYPE_VALUETYPE)
-                {
-                    // For value class elements, we must pass the
-                    // exact class of the elements back to the
-                    // Right Side for proper dereferencing.
-                    EEClass *cl = arrPtr->GetElementTypeHandle().GetClass();
-
-                    oi->objClassMetadataToken = cl->GetCl();
-                    oi->objClassDebuggerModuleToken = (void*) LookupModule(
-                                                                cl->GetModule(),
-                                                                pAppDomain);
-
-                    EnsureModuleLoadedForInproc(&oi->objClassDebuggerModuleToken, 
-                        cl, pAppDomain, iWhich);
-                }
-                
                 LOG((LF_CORDB, LL_INFO10000, "D::GASOI: array info: "
-                     "baseOff=%d, lowerOff=%d, upperOff=%d, cnt=%d, rank=%d, "
+					"baseOff=%d, lowerOff=%d, upperOff=%d, cnt=%d, rank=%d, rank (2) = %d,"
                      "eleSize=%d, eleType=0x%02x\n",
                      oi->arrayInfo.offsetToArrayBase,
                      oi->arrayInfo.offsetToLowerBounds,
                      oi->arrayInfo.offsetToUpperBounds,
                      oi->arrayInfo.componentCount,
                      oi->arrayInfo.rank,
+                     oi->objTypeData.ArrayTypeData.arrayRank,
                      oi->arrayInfo.elementSize,
-                     oi->arrayInfo.elementType));
+                     oi->objTypeData.ArrayTypeData.arrayTypeArg.elementType));
             }
         
             break;
-            
+
         default:
             ASSERT(!"Invalid object type!");
         }
@@ -8645,10 +9093,10 @@ HRESULT Debugger::GetAndSendObjectInfo(DebuggerRCThread* rcThread,
 }
 
 //
-// GetAndSendClassInfo gets the necessary data for an Class and
+// GetAndSendClassInfo gets the necessary data for a Class or constructed type and
 // sends it back to the right side.
 //
-// This method operates in one of two modes - the "send class info"
+// This method operates in one of two modes - the "send class or type info"
 // mode, and "find me the field desc" mode, which is used by 
 // GetAndSendSyncBlockFieldInfo to get a FieldDesc for a specific
 // field.  If fldToken is mdFieldDefNil, then we're in 
@@ -8657,17 +9105,19 @@ HRESULT Debugger::GetAndSendObjectInfo(DebuggerRCThread* rcThread,
 //      We indicate success by setting *pFD to nonNULL, failure by
 //      setting *pFD to NULL.
 //
+//
+// Sometimes we need to get information about a constructed type, rather than
+// a class.  In this case, GetAndSendClassInfo is passed the representative EEClass
+// for the set of constructed types that share layouts.
+//
 HRESULT Debugger::GetAndSendClassInfo(DebuggerRCThread* rcThread,
-                                      void* classDebuggerModuleToken,
-                                      mdTypeDef classMetadataToken,
+                                      EEClass *pClass,
+									  BOOL fInstantiatedType,
                                       AppDomain *pAppDomain,
                                       mdFieldDef fldToken,
                                       FieldDesc **pFD, //OUT
                                       IpcTarget iWhich)
 {
-    LOG((LF_CORDB, LL_INFO10000, "D::GASCI: getting info for 0x%08x 0x%0x8.\n",
-         classDebuggerModuleToken, classMetadataToken));
-
     HRESULT hr = S_OK;
 
     _ASSERTE( fldToken == mdFieldDefNil || pFD != NULL);
@@ -8685,11 +9135,7 @@ HRESULT Debugger::GetAndSendClassInfo(DebuggerRCThread* rcThread,
     // Setup the event that we will return the results in
     DebuggerIPCEvent* event= rcThread->GetIPCEventSendBuffer(iWhich);
     InitIPCEvent(event, DB_IPCE_GET_CLASS_INFO_RESULT, 0, pAppDomain);
-    
-    // Find the class given its module and token. The class must be loaded.
-    DebuggerModule *pDebuggerModule = (DebuggerModule*) classDebuggerModuleToken;
-    
-    EEClass *pClass = g_pEEInterface->FindLoadedClass(pDebuggerModule->m_pRuntimeModule, classMetadataToken);
+  
 
     // If we can't find the class, return the proper HR to the right side. Note: if the class is not a value class and
     // the class is also not restored, then we must pretend that the class is still not loaded. We are gonna let
@@ -8716,37 +9162,47 @@ HRESULT Debugger::GetAndSendClassInfo(DebuggerRCThread* rcThread,
             parentIFCount = pClass->GetParentClass()->GetNumInstanceFields();
 
     unsigned int IFCount = pClass->GetNumInstanceFields() - parentIFCount;
-    unsigned int SFCount = pClass->GetNumStaticFields();
+	unsigned int SFCount = fInstantiatedType ? 0 : pClass->GetNumStaticFields();
     unsigned int totalFields = IFCount + SFCount;
     unsigned int fieldCount = 0;
 
     event->GetClassInfoResult.isValueClass = (pClass->IsValueClass() != 0);
-    event->GetClassInfoResult.objectSize = pClass->GetNumInstanceFieldBytes();
+    event->GetClassInfoResult.typarCount = pClass->GetNumGenericArgs();
+	// For Generic classes you must get the object size via the type handle, which
+	// will get you to the right EEClass for the particular instantiation
+	// you're working with...
+	event->GetClassInfoResult.objectSize = 
+		(event->GetClassInfoResult.typarCount && !fInstantiatedType)
+		? 0 
+		: pClass->GetNumInstanceFieldBytes();
 
-    if (classMetadataToken == COR_GLOBAL_PARENT_TOKEN)
-    {
-        // The static var base for the global class in a module is really just the Module's base address.
-        event->GetClassInfoResult.staticVarBase = pClass->GetModule()->GetPEFile()->GetBase();
-    }
-    else if (pClass->IsShared())
-    {
-        // For shared classes, we have to lookup the static var base for the app domain that we're currently working in.
-        DomainLocalClass *pLocalClass = pClass->GetDomainLocalClassNoLock(pDebuggerModule->m_pAppDomain);
+    if (!fInstantiatedType) 
+	{
+		if (pClass->GetCl() == COR_GLOBAL_PARENT_TOKEN)
+		{
+			// The static var base for the global class in a module is really just the Module's base address.
+			event->GetClassInfoResult.staticVarBase = pClass->GetModule()->GetPEFile()->GetBase();
+		}
+		else if (pClass->IsShared())
+		{
+			// For shared classes, we have to lookup the static var base for the app domain that we're currently working in.
+			DomainLocalClass *pLocalClass = pClass->GetDomainLocalClassNoLock(pAppDomain);
 
-        if (pLocalClass)
-            event->GetClassInfoResult.staticVarBase = pLocalClass->GetStaticSpace();
-        else
-            event->GetClassInfoResult.staticVarBase = NULL;
-    }
-    else
-    {
-        // For normal, non-shared classes, the static var base if just the class's vtable. Note: the class must be
-        // restored for its statics to be available!
-        if (pClass->IsRestored())
-            event->GetClassInfoResult.staticVarBase = pClass->GetVtable();
-        else
-            event->GetClassInfoResult.staticVarBase = NULL;
-    }
+			if (pLocalClass)
+				event->GetClassInfoResult.staticVarBase = pLocalClass->GetStaticSpace();
+			else
+				event->GetClassInfoResult.staticVarBase = NULL;
+		}
+		else
+		{
+			// For normal, non-shared classes, the static var base if just the class's vtable. Note: the class must be
+			// restored for its statics to be available!
+			if (pClass->IsRestored())
+				event->GetClassInfoResult.staticVarBase = pClass->GetVtable();
+			else
+				event->GetClassInfoResult.staticVarBase = NULL;
+		}
+	}
     
     event->GetClassInfoResult.instanceVarCount = IFCount;
     event->GetClassInfoResult.staticVarCount = SFCount;
@@ -8758,7 +9214,7 @@ HRESULT Debugger::GetAndSendClassInfo(DebuggerRCThread* rcThread,
     
     LOG((LF_CORDB, LL_INFO10000, "D::GASCI: total fields=%d.\n", totalFields));
     
-    FieldDescIterator fdIterator(pClass, FieldDescIterator::INSTANCE_FIELDS | FieldDescIterator::STATIC_FIELDS);
+	FieldDescIterator fdIterator(pClass, fInstantiatedType ? FieldDescIterator::INSTANCE_FIELDS : (FieldDescIterator::INSTANCE_FIELDS | FieldDescIterator::STATIC_FIELDS));
     FieldDesc* fd;
 
     while ((fd = fdIterator.Next()) != NULL)
@@ -8774,9 +9230,14 @@ HRESULT Debugger::GetAndSendClassInfo(DebuggerRCThread* rcThread,
             else
                 continue;
         }
-        
+
+
+
         currentFieldData->fldIsStatic = (fd->IsStatic() == TRUE);
         currentFieldData->fldIsPrimitive = (fd->IsPrimitive() == TRUE);
+        // See notes below in GetSynField...  The right-side may as well get
+  	    // the metadata, unless I'm very much mistaken.
+        currentFieldData->fldFullSig = NULL;
         
         {
             // Otherwise, we'll simply grab the info & send it back.
@@ -8788,20 +9249,22 @@ HRESULT Debugger::GetAndSendClassInfo(DebuggerRCThread* rcThread,
             currentFieldData->fldIsRVA = (fd->IsRVA() == TRUE);
             currentFieldData->fldIsContextStatic = (fd->IsContextStatic() == TRUE);
 
-            PCCOR_SIGNATURE pSig = NULL;
-            DWORD cSig = 0;
-
-            g_pEEInterface->FieldDescGetSig(fd, &pSig, &cSig);
-            _ASSERTE(*pSig == IMAGE_CEE_CS_CALLCONV_FIELD);
-            ++pSig;
-            
-            ULONG cb = _skipFunkyModifiersInSignature(pSig);
-            pSig = &pSig[cb];
-            
-            currentFieldData->fldType = (CorElementType) *pSig;
+            // See notes below in GetSynField...  The right-side may as well get
+			// the metadata, unless I'm very much mistaken.
+			//PCCOR_SIGNATURE pSig = NULL;
+            //DWORD cSig = 0;
+            //
+            //g_pEEInterface->FieldDescGetSig(fd, &pSig, &cSig);
+            //_ASSERTE(*pSig == IMAGE_CEE_CS_CALLCONV_FIELD);
+            //++pSig;
+            //
+            //ULONG cb = _skipFunkyModifiersInSignature(pSig);
+            //pSig = &pSig[cb];
+            //
+            currentFieldData->fldEnCAvailable = true;
         }
         
-        _ASSERTE( currentFieldData->fldType != ELEMENT_TYPE_CMOD_REQD);
+        //_ASSERTE( currentFieldData->fldType != ELEMENT_TYPE_CMOD_REQD);
 
         // Bump our counts and pointers for the next event.
         event->GetClassInfoResult.fieldCount++;
@@ -8863,6 +9326,196 @@ HRESULT Debugger::GetAndSendClassInfo(DebuggerRCThread* rcThread,
 }
 
 
+
+
+//
+// GetAndSendTypeHandleParams gets the necessary data for a type handle, i.e. its
+// type parameters, e.g. "String" and "List<int>" from the type handle
+// for "Dict<String,List<int>>", and sends it back to the right side.
+//
+HRESULT Debugger::GetAndSendTypeHandleParams(DebuggerRCThread* rcThread,
+                                 AppDomain *pAppDomain,
+                                 void *typeHandle, 
+                                 IpcTarget iWhich)
+{
+    LOG((LF_CORDB, LL_INFO10000, "D::GASCTPA: getting type parameters for 0x%08x 0x%0x8.\n",
+         pAppDomain, typeHandle));
+
+    HRESULT hr = S_OK;
+
+    // Setup the event that we will return the results in
+
+	// Although this looks like it could be coded as a two-way event, in the
+	// end we will want this to be a multiple return event, so I've left it
+	// as just an event with a single return for the moment.  Also, this
+	// means I could copy the code for the right-side from places which
+	// were also expecting multiple events.
+
+	DebuggerIPCEvent* event= rcThread->GetIPCEventSendBuffer(iWhich);
+    InitIPCEvent(event, DB_IPCE_GET_TYPE_HANDLE_PARAMS_RESULT, 0, pAppDomain);
+    
+    // Find the class given its type handle.
+    TypeHandle pTypeHandle(typeHandle);
+    
+    unsigned int nTyPars = pTypeHandle.GetNumGenericArgs();
+    event->GetTypeHandleParamsResult.typarCount = nTyPars;
+    if (nTyPars == 0) {
+        _ASSERTE(!"Should not be using GetAndSendTypeHandleParams on unparameterized type"); // nothing
+    }
+    else if (nTyPars > CORDB_MAX_TYPARS) {
+        _ASSERTE(!"Too many type parameters for debugger - arbitrary number of params. not yet implemented"); 
+    }
+	else {
+		for (unsigned int i = 0; i<nTyPars; i++) 
+		{
+            TypeHandleToExpandedTypeInfo(false, pAppDomain, pTypeHandle.GetInstantiation()[i], 
+				&(event->GetTypeHandleParamsResult.tyParData[i]), iWhich);
+		}
+    }
+    LOG((LF_CORDB, LL_INFO10000, "D::GASCTPA: sending  result"));
+
+    if (iWhich == IPC_TARGET_OUTOFPROC)
+        hr = rcThread->SendIPCEvent(IPC_TARGET_OUTOFPROC);
+    else
+        hr = S_OK;
+    
+    return hr;
+}
+
+
+//
+// GetAndSendExpandedTypeInfo returns the "expanded" information about a type
+// given a type handle.  This is just enough information to decide
+// whether it is an array type, pointer type etc., and to handle
+// the case where these are recursively nested.
+HRESULT Debugger::GetAndSendExpandedTypeInfo(DebuggerRCThread* rcThread,
+									 AppDomain *pAppDomain,
+									 void *typeHandle, 
+									 IpcTarget iWhich)
+{
+    LOG((LF_CORDB, LL_INFO10000, "D::EAST: getting type parameters for 0x%08x 0x%0x8.\n",
+         pAppDomain, typeHandle));
+
+    HRESULT hr = S_OK;
+
+    DebuggerIPCEvent* event = rcThread->GetIPCEventReceiveBuffer(iWhich);
+    InitIPCEvent(event, DB_IPCE_GET_EXPANDED_TYPE_INFO_RESULT, 0, pAppDomain);
+    
+    TypeHandle pTypeHandle(typeHandle);
+	// "false" is because the this is only used to expand type parameters,
+	// which are never boxed.  Only objects have "boxed" value types...
+    TypeHandleToExpandedTypeInfo(false, pAppDomain, pTypeHandle,  &(event->ExpandTypeResult), iWhich);
+    
+    LOG((LF_CORDB, LL_INFO10000, "D::EAST: sending result"));
+
+    event->hr = S_OK;
+
+    if (iWhich == IPC_TARGET_OUTOFPROC)
+        hr = rcThread->SendIPCReply(IPC_TARGET_OUTOFPROC);
+    else
+        hr = S_OK;
+    
+    return hr;
+}
+
+//
+// GetAndSendTypeHandle finds the type handle for an instantiated
+// type if it is available.
+//
+HRESULT Debugger::GetAndSendTypeHandle(DebuggerRCThread* rcThread,
+                                       AppDomain *pAppDomain,
+                                       DebuggerIPCE_ExpandedTypeData *typeData,
+                                       unsigned int typarCount,
+                                       DebuggerIPCE_BasicTypeData *typarData,
+                                       IpcTarget iWhich)
+{
+    LOG((LF_CORDB, LL_INFO10000, "D::GASTH: getting info.\n"));
+
+    HRESULT hr = S_OK;
+
+    // Setup the event that we will return the results in
+    DebuggerIPCEvent* event = rcThread->GetIPCEventReceiveBuffer(iWhich);
+    InitIPCEvent(event, DB_IPCE_GET_TYPE_HANDLE_RESULT, 0, pAppDomain);
+
+    TypeHandle res;
+    hr = ExpandedTypeInfoToTypeHandle(false, typeData, typarCount, typarData, &res);
+    if (SUCCEEDED(hr)) 
+        event->GetTypeHandleResult.typeHandle = res.AsPtr();
+    event->hr = hr;
+
+    LOG((LF_CORDB, LL_INFO10000, "D::GASTH: sending result, hr = 0x%0x8 0x%0x8\n", hr, event->GetTypeHandleResult.typeHandle));
+
+    if (iWhich == IPC_TARGET_OUTOFPROC)
+        hr = rcThread->SendIPCReply(IPC_TARGET_OUTOFPROC);
+    else
+        hr = S_OK;
+    
+    return hr;
+}
+
+
+//
+// GetAndSendMethodDescParams gets the type parameter data for a method descriptor
+// for a generic method and sends it back.
+//
+HRESULT Debugger::GetAndSendMethodDescParams(DebuggerRCThread* rcThread,
+                                 AppDomain *pAppDomain,
+                                 void *methodDesc, 
+                                 IpcTarget iWhich)
+{
+    LOG((LF_CORDB, LL_INFO10000, "D::GASMDP: getting generic type parameters for md 0x%08x 0x%0x8.\n",
+         pAppDomain, methodDesc));
+
+    _ASSERTE( methodDesc != NULL );
+
+	HRESULT hr = S_OK;
+
+    // Setup the event that we will return the results in
+
+	// Although this looks like it could be coded as a two-way event, in the
+	// end we will want this to be a multiple return event, so I've left it
+	// as just an event with a single return for the moment.  Also, this
+	// means I could copy the code for the right-side from places which
+	// were also expecting multiple events.
+    DebuggerIPCEvent* event= rcThread->GetIPCEventSendBuffer(iWhich);
+
+    InitIPCEvent(event, DB_IPCE_GET_METHOD_DESC_REPPARAMS_RESULT, 0, pAppDomain);
+    
+    MethodDesc *pFD = (MethodDesc *) methodDesc;
+    
+    //TypeHandle pTypeHandle(pFD->GetMethodTable());
+	unsigned int nTyPars = pFD->GetNumGenericClassArgs() + pFD->GetNumGenericMethodArgs();
+    event->GetMethodDescParamsResult.repTyParCount = nTyPars;
+	unsigned int nClassTyPars = pFD->GetNumGenericClassArgs();
+    event->GetMethodDescParamsResult.repClassTyParCount = nClassTyPars;
+    LOG((LF_CORDB, LL_INFO10000, "D::GASMDI: %d type parameters.\n"));
+    if (nTyPars == 0) {
+        _ASSERTE(!"Should not be using GetAndSendMethodDescParams on unparameterized method descriptor"); // nothing
+    }
+    else if (nTyPars > CORDB_MAX_TYPARS) {
+        _ASSERTE(!"Too many type parameters for debugger - arbitrary number of params. not yet implemented"); 
+    }
+    else 
+	{
+		for (unsigned int i = 0; i<nTyPars; i++) 
+		{
+			LOG((LF_CORDB, LL_INFO10000, "D::GASMDI: method inside a generic class.\n"));
+			TypeHandle p = i < nClassTyPars ? pFD->GetClassInstantiation()[i] : pFD->GetMethodInstantiation()[i-nClassTyPars];
+            TypeHandleToExpandedTypeInfo(false, pAppDomain, p,  &(event->GetMethodDescParamsResult.repTyParData[i]), iWhich);
+		}
+	}
+    LOG((LF_CORDB, LL_INFO10000, "D::GASMDP: sending  result"));
+
+    if (iWhich == IPC_TARGET_OUTOFPROC)
+        hr = rcThread->SendIPCEvent(IPC_TARGET_OUTOFPROC);
+    else
+        hr = S_OK;
+    
+    return hr;
+}
+
+
+
 //
 // GetAndSendClassInfo gets the necessary data for an Class and
 // sends it back to the right side.
@@ -8914,39 +9567,21 @@ HRESULT Debugger::GetAndSendSpecialStaticInfo(DebuggerRCThread* rcThread,
 // sends it back to the right side.
 //
 HRESULT Debugger::GetAndSendJITInfo(DebuggerRCThread* rcThread,
-                                    mdMethodDef funcMetadataToken,
-                                    void *funcDebuggerModuleToken,
+                                    DebuggerJitInfo *pJITInfo,
                                     AppDomain *pAppDomain,
                                     IpcTarget iWhich)
 {
-    LOG((LF_CORDB, LL_INFO10000, "D::GASJI: getting info for "
-         "0x%08x 0x%08x\n", funcMetadataToken, funcDebuggerModuleToken));
+    LOG((LF_CORDB, LL_INFO10000, "D::GASJI: getting info for dji "
+         "0x%08x\n", pJITInfo));
     
     unsigned int totalNativeInfos = 0;
     unsigned int argCount = 0;
 
     HRESULT hr = S_OK;
 
-    DebuggerModule *pDebuggerModule =
-        (DebuggerModule*) funcDebuggerModuleToken;
-    
-    MethodDesc* pFD = g_pEEInterface->LookupMethodDescFromToken(
-                                          pDebuggerModule->m_pRuntimeModule,
-                                          funcMetadataToken);
-
-    DebuggerJitInfo *pJITInfo = NULL;
-
-    //
-    // Find the JIT info for this function.
-    //
-    if (pFD != NULL)
-        pJITInfo = GetJitInfo(pFD, NULL);
-    else
-        LOG((LF_CORDB, LL_INFO10000, "D::GASJI: no fd found...\n"));
-
-    if ((pJITInfo != NULL) && (pJITInfo->m_jitComplete))
+    if ((pJITInfo != NULL) && (pJITInfo->m_jitComplete) && !pJITInfo->m_codePitched)
     {
-        argCount = GetArgCount(pFD);
+        argCount = GetArgCount(pJITInfo->m_fd);
         totalNativeInfos = pJITInfo->m_varNativeInfoCount;
     }
     else
@@ -8966,14 +9601,6 @@ HRESULT Debugger::GetAndSendJITInfo(DebuggerRCThread* rcThread,
     event->GetJITInfoResult.totalNativeInfos = totalNativeInfos;
     event->GetJITInfoResult.argumentCount = argCount;
     event->GetJITInfoResult.nativeInfoCount = 0;
-    if (pJITInfo == NULL)
-    {
-        event->GetJITInfoResult.nVersion = DebuggerJitInfo::DJI_VERSION_INVALID;
-    }
-    else
-    {
-        event->GetJITInfoResult.nVersion = pJITInfo->m_nVersion;
-    }
 
     ICorJitInfo::NativeVarInfo *currentNativeInfo =
         &(event->GetJITInfoResult.nativeInfo);
@@ -9355,66 +9982,136 @@ HRESULT Debugger::DeleteHeadOfList( MethodDesc *pFD )
             pFD->m_pszDebugMethodName));
 
   LockJITInfoMutex();
+  
+  if (m_pMethodInfos != NULL && pFD != NULL)
+  {
+	  DebuggerJitInfo *dji = GetJitInfo(pFD, NULL);
+	  if (dji != NULL) 
+	  {
+		  DebuggerMethodInfo *dmi = dji->m_methodInfo;
+		  DebuggerJitInfo *djiPrev = dji->m_prevJitInfo;
+		  TRACE_FREE(dji);
+		  DeleteInteropSafe(dji);
+		  if ( djiPrev != NULL )
+			  djiPrev->m_nextJitInfo = NULL;
+		  if (dmi->m_latestJitInfo == dji) 
+		  {
+			  dmi->m_latestJitInfo = djiPrev;
+			  if (djiPrev == NULL) {
+				  m_pMethodInfos->RemoveMethodInfo( pFD->GetModule(), pFD->GetMemberDef());
+			  }
+		  }
+	  }
+  }
 
-  if (m_pJitInfos != NULL && pFD != NULL)
-    m_pJitInfos->RemoveJitInfo( pFD);
-  
   UnlockJITInfoMutex();
-  
   LOG((LF_CORDB,LL_INFO10000,"D:DHOL: Finished removing head of the list"));
 
   return S_OK;
 }
 
 // HRESULT Debugger::InsertAtHeadOfList():  Make sure
+//  that there's only one head of the the list of DebuggerMethodInfos
+//  for the (implicitly) given MethodDef.Module pair.
+
+HRESULT 
+Debugger::InsertAtHeadOfList( DebuggerMethodInfo *dmi )
+{
+    LOG((LF_CORDB,LL_INFO10000,"D:IAHOL DMI: dmi:0x%08x\n", dmi));
+
+    HRESULT hr = S_OK;
+
+    _ASSERTE(dmi != NULL);
+
+    LockJITInfoMutex();
+
+//    CHECK_DJI_TABLE_DEBUGGER;
+
+    hr = CheckInitMethodInfoTable();
+
+    if (FAILED(hr)) {
+        UnlockJITInfoMutex();
+        return (hr);
+    }
+
+    DebuggerMethodInfo *dmiPrev = m_pMethodInfos->GetMethodInfo(dmi->m_module, dmi->m_token);
+    _ASSERTE(dmiPrev == NULL || (dmi->m_token == dmiPrev->m_token && dmi->m_module == dmiPrev->m_module));
+    LOG((LF_CORDB,LL_INFO10000,"D:IAHOL: current head of dmi list:0x%08x\n",dmiPrev));
+        
+    dmi->m_nVersion = 
+      (dmiPrev == NULL) 
+       ? DebuggerMethodInfo::DMI_VERSION_FIRST_VALID 
+       : dmiPrev->m_nVersion;
+    // Removed: GetVersionNumber(dmi->m_module, dmi->m_token);
+
+    if (dmiPrev != NULL)
+    {
+        dmi->m_prevMethodInfo = dmiPrev;
+        dmiPrev->m_nextMethodInfo = dmi;
+        
+        _ASSERTE(dmi->m_module != NULL);
+        hr = m_pMethodInfos->OverwriteMethodInfo(dmi->m_module, 
+                                         dmi->m_token, 
+                                         dmi,
+                                         FALSE);
+
+        LOG((LF_CORDB,LL_INFO10000,"D:IAHOL: DMI version 0x%04x for token 0x%08x\n", 
+            dmi->m_nVersion,dmi->m_token));
+    }
+    else
+    {
+        hr = m_pMethodInfos->AddMethodInfo(dmi->m_module, 
+                                         dmi->m_token, 
+                                         dmi, 
+                                         dmi->m_nVersion);
+    }
+#ifdef _DEBUG
+    dmiPrev = m_pMethodInfos->GetMethodInfo(dmi->m_module, dmi->m_token);
+    LOG((LF_CORDB,LL_INFO10000,"D:IAHOL: new head of dmi list:0x%08x\n",
+        dmiPrev));
+#endif //_DEBUG        
+    UnlockJITInfoMutex();
+
+    return hr;
+}
+
+
+//  HRESULT Debugger::AddJitInfo: Make sure
 //  that there's only one head of the the list of DebuggerJitInfos
 //  for the (implicitly) given MethodDesc.
 HRESULT 
-Debugger::InsertAtHeadOfList( DebuggerJitInfo *dji )
+Debugger::AddJitInfo( DebuggerJitInfo *dji )
 {
     LOG((LF_CORDB,LL_INFO10000,"D:IAHOL: dji:0x%08x\n", dji));
 
     HRESULT hr = S_OK;
 
     _ASSERTE(dji != NULL);
+    _ASSERTE(dji->m_methodInfo != NULL); // this should be set
 
     LockJITInfoMutex();
 
-//    CHECK_DJI_TABLE_DEBUGGER;
-
-    hr = CheckInitJitInfoTable();
-
-    if (FAILED(hr))
-        return (hr);
-
-    DebuggerJitInfo *djiPrev = m_pJitInfos->GetJitInfo(dji->m_fd);
-    LOG((LF_CORDB,LL_INFO10000,"D:IAHOL: current head of dji list:0x%08x\n",djiPrev));
-    _ASSERTE(djiPrev == NULL || dji->m_fd == djiPrev->m_fd);
+    DebuggerJitInfo *djiPrev = dji->m_methodInfo->m_latestJitInfo;
+	LOG((LF_CORDB,LL_INFO10000,"D:IAHOL: current head of dji list:0x%08x\n",djiPrev));
+    _ASSERTE(djiPrev == NULL || dji->m_methodInfo == djiPrev->m_methodInfo);
         
-    dji->m_nVersion = GetVersionNumber(dji->m_fd);
-
     if (djiPrev != NULL)
     {
         dji->m_prevJitInfo = djiPrev;
         djiPrev->m_nextJitInfo = dji;
         
-        _ASSERTE(dji->m_fd != NULL);
-        hr = m_pJitInfos->OverwriteJitInfo(dji->m_fd->GetModule(), 
-                                         dji->m_fd->GetMemberDef(), 
-                                         dji, 
-                                         FALSE);
+        dji->m_methodInfo->m_latestJitInfo = dji;
 
         LOG((LF_CORDB,LL_INFO10000,"D:IAHOL: DJI version 0x%04x for %s\n", 
-            dji->m_nVersion,dji->m_fd->m_pszDebugMethodName));
+            dji->m_methodInfo->m_nVersion,dji->m_fd->m_pszDebugMethodName));
     }
     else
     {
-        hr = m_pJitInfos->AddJitInfo(dji->m_fd, dji, dji->m_nVersion);
+        dji->m_methodInfo->m_latestJitInfo=dji;
     }
 #ifdef _DEBUG
-    djiPrev = m_pJitInfos->GetJitInfo(dji->m_fd);
     LOG((LF_CORDB,LL_INFO10000,"D:IAHOL: new head of dji list:0x%08x\n",
-        djiPrev));
+        dji->m_methodInfo->m_latestJitInfo));
 #endif //_DEBUG        
     UnlockJITInfoMutex();
 
@@ -10337,7 +11034,7 @@ static void GetArgValue(DebuggerEval *pDE,
 {
     THROWSCOMPLUSEXCEPTION();
 
-    switch (pFEAD->argType)
+    switch (pFEAD->argType.elementType)
     {
     case ELEMENT_TYPE_I8:
     case ELEMENT_TYPE_U8:
@@ -10434,15 +11131,12 @@ static void GetArgValue(DebuggerEval *pDE,
 
             _ASSERTE(pAddr);
 
-            // Grab the class of this value type.
-            EEClass *pBase = argTH.GetClass();
-
             if (!isByRef && !fNeedBoxOrUnbox)
             {
-                _ASSERTE(pBase);
-                unsigned size = pBase->GetNumInstanceFieldBytes();
+                _ASSERTE(argTH.GetMethodTable());
+                unsigned size = argTH.GetMethodTable()->GetClass()->GetNumInstanceFieldBytes();
                 if (size <= sizeof(ARG_SLOT))
-                    CopyValueClassUnchecked(ArgSlotEndianessFixup(pStack, sizeof(LPVOID)), pAddr, pBase->GetMethodTable());
+                    CopyValueClassUnchecked(ArgSlotEndianessFixup(pStack, sizeof(LPVOID)), pAddr, argTH.GetMethodTable());
                 else {
                     *pStack = PtrToArgSlot(pAddr);
                 }
@@ -10451,12 +11145,7 @@ static void GetArgValue(DebuggerEval *pDE,
             {
                 if (fNeedBoxOrUnbox)
                 {
-                    // Grab the class of this value type.
-                    DebuggerModule *pDebuggerModule = (DebuggerModule*) pFEAD->GetClassInfo.classDebuggerModuleToken;
-
-                    EEClass *pClass = g_pEEInterface->FindLoadedClass(pDebuggerModule->m_pRuntimeModule,
-                                                                      pFEAD->GetClassInfo.classMetadataToken);
-                    MethodTable * pMT = pClass->GetMethodTable();
+                    MethodTable * pMT = argTH.GetMethodTable();
                     // We have to keep byref values in a seperate array that is GCPROTECT'd.
                     *pObjectRefArg = pMT->Box(pAddr, TRUE);
                     *pStack = ObjToArgSlot(*pObjectRefArg);
@@ -10632,7 +11321,7 @@ static void GetArgValue(DebuggerEval *pDE,
             else
             {
                 // Do we have a something that needs to be GC protected?
-                if (pFEAD->argType == ELEMENT_TYPE_CLASS)
+                if (pFEAD->argType.elementType == ELEMENT_TYPE_CLASS || pFEAD->argType.elementType == ELEMENT_TYPE_OBJECT || pFEAD->argType.elementType == ELEMENT_TYPE_STRING)
                 {
                     // We have to keep byref values in a seperate array that is GCPROTECT'd.
                     *pStack = PtrToArgSlot(pObjectRefArg);
@@ -10746,7 +11435,7 @@ static void SetByRefArgValue(DebuggerEval *pDE,
                              INT64 primitiveByRefArg,
                              OBJECTREF objectRefByRegArg)
 {
-    switch (pFEAD->argType)
+    switch (pFEAD->argType.elementType)
     {
     case ELEMENT_TYPE_I8:
     case ELEMENT_TYPE_U8:
@@ -10811,7 +11500,7 @@ static void SetByRefArgValue(DebuggerEval *pDE,
                 _ASSERTE(pFEAD->argHome.kind == RAK_REG);
 
                 // Shove the result back into the proper register.
-                if (pFEAD->argType == ELEMENT_TYPE_CLASS)
+                if (pFEAD->argType.elementType == ELEMENT_TYPE_CLASS || pFEAD->argType.elementType == ELEMENT_TYPE_OBJECT || pFEAD->argType.elementType == ELEMENT_TYPE_STRING)
                     SetRegisterValue(pDE, pFEAD->argHome.reg1, pFEAD->argHome.reg1Addr, (DWORD)ObjToArgSlot(objectRefByRegArg));
                 else
                     SetRegisterValue(pDE, pFEAD->argHome.reg1, pFEAD->argHome.reg1Addr, (DWORD)primitiveByRefArg);
@@ -10846,7 +11535,10 @@ static void DoNormalFuncEval(DebuggerEval *pDE)
     BOOL staticMethod = pDE->m_md->IsStatic();
 
     // Grab the signature of the method we're working on.
-    MetaSig mSig(pDE->m_md->GetSig(), pDE->m_md->GetModule());
+	// GENERICS: note that if this is an instantiated generic method, then this will 
+	// correctly give as an instantiated view of the signature that we can iterate without
+	// worrying about generic items in the signature.
+    MetaSig mSig(pDE->m_md);
     
     BYTE callingconvention = mSig.GetCallingConvention();
     if (!isCallConv(callingconvention, IMAGE_CEE_CS_CALLCONV_DEFAULT))
@@ -10963,7 +11655,7 @@ static void DoNormalFuncEval(DebuggerEval *pDE)
             _ASSERTE(argSigType != ELEMENT_TYPE_END);
 
             // If this arg is a byref arg, then we'll need to know what type we're referencing for later...
-            EEClass *byrefClass = NULL;
+            TypeHandle byrefClass = TypeHandle();
             CorElementType byrefArgSigType = ELEMENT_TYPE_END;
 
             if (argSigType == ELEMENT_TYPE_BYREF)
@@ -10971,14 +11663,15 @@ static void DoNormalFuncEval(DebuggerEval *pDE)
 
             LOG((LF_CORDB, LL_INFO100000,
                 "curr=%d: argSigType=0x%x, byrefArgSigType=0x%0x, inType=0x%0x\n",
-                 curr, argSigType, byrefArgSigType, pFEAD->argType));
+                 curr, argSigType, byrefArgSigType, pFEAD->argType.elementType));
 
             // If the sig says class but we've got a value class parameter, then remember that we need to box it.  If
             // the sig says value class, but we've got a boxed value class, then remember that we need to unbox it.
-            fNeedBoxOrUnbox = ((argSigType == ELEMENT_TYPE_CLASS) && (pFEAD->argType == ELEMENT_TYPE_VALUETYPE)) ||
-                ((argSigType == ELEMENT_TYPE_VALUETYPE) && ((pFEAD->argType == ELEMENT_TYPE_CLASS) || (pFEAD->argType == ELEMENT_TYPE_OBJECT)) ||
+
+            fNeedBoxOrUnbox = ((argSigType == ELEMENT_TYPE_CLASS) && (pFEAD->argType.elementType == ELEMENT_TYPE_VALUETYPE)) ||
+                ((argSigType == ELEMENT_TYPE_VALUETYPE) && ((pFEAD->argType.elementType == ELEMENT_TYPE_CLASS) || (pFEAD->argType.elementType == ELEMENT_TYPE_OBJECT)) ||
                 // This is when method signature is expecting a BYREF ValueType, yet we recieve the boxed valuetype's handle. 
-                (pFEAD->argAddr && pFEAD->argType == ELEMENT_TYPE_CLASS && argSigType == ELEMENT_TYPE_BYREF && byrefArgSigType == ELEMENT_TYPE_VALUETYPE));
+                (pFEAD->argAddr && pFEAD->argType.elementType == ELEMENT_TYPE_CLASS && argSigType == ELEMENT_TYPE_BYREF && byrefArgSigType == ELEMENT_TYPE_VALUETYPE));
 
             GetArgValue(pDE,
                         pFEAD,
@@ -11000,7 +11693,7 @@ static void DoNormalFuncEval(DebuggerEval *pDE)
             fNeedBoxOrUnbox = false;
 
             // We had better have an object for a 'this' argument!
-            CorElementType et = argData[0].argType;
+            CorElementType et = argData[0].argType.elementType;
 
             if (!((et == ELEMENT_TYPE_CLASS) || (et == ELEMENT_TYPE_STRING) || (et == ELEMENT_TYPE_OBJECT) ||
                   (et == ELEMENT_TYPE_VALUETYPE) || (et == ELEMENT_TYPE_SZARRAY) || (et == ELEMENT_TYPE_ARRAY)))
@@ -11182,7 +11875,7 @@ static void DoNormalFuncEval(DebuggerEval *pDE)
 
             if (argSigType == ELEMENT_TYPE_BYREF)
             {
-                EEClass *byrefClass = NULL;
+                TypeHandle byrefClass = TypeHandle();
                 CorElementType byrefArgSigType = mSig.GetByRefType(&byrefClass);
             
                 SetByRefArgValue(pDE, &argData[mSig.HasRetBuffArg() ? curr-1 : curr], byrefArgSigType, pPrimitiveArgs[curr], pObjectRefArgs[curr]);
@@ -11280,7 +11973,9 @@ void *FuncEvalHijackWorker(DebuggerEval *pDE)
                     DebuggerIPCE_FuncEvalArgData *argData = (DebuggerIPCE_FuncEvalArgData*) pDE->m_argData;
 
                     // Assume we can only have this for real objects, not value classes...
-                    _ASSERTE((argData[0].argType == ELEMENT_TYPE_OBJECT) || (argData[0].argType == ELEMENT_TYPE_CLASS));
+                    _ASSERTE((argData[0].argType.elementType == ELEMENT_TYPE_OBJECT) || 
+						     (argData[0].argType.elementType == ELEMENT_TYPE_STRING) ||
+							 (argData[0].argType.elementType == ELEMENT_TYPE_CLASS));
 
                     // We should have a valid this pointer. 
                     if (argData[0].argHome.kind == RAK_NONE && argData[0].argAddr == NULL)
@@ -11423,35 +12118,29 @@ void *FuncEvalHijackWorker(DebuggerEval *pDE)
                     COMPlusThrow(kRankException, L"Rank_MultiDimNotSupported");
 
                 // Gotta be a primitive, class, or System.Object.
-                if (((pDE->m_arrayElementType < ELEMENT_TYPE_BOOLEAN) || (pDE->m_arrayElementType > ELEMENT_TYPE_R8)) &&
-                    (pDE->m_arrayElementType != ELEMENT_TYPE_CLASS) &&
-                    (pDE->m_arrayElementType != ELEMENT_TYPE_OBJECT))
+                if (((pDE->m_arrayType.elementType < ELEMENT_TYPE_BOOLEAN) || (pDE->m_arrayType.elementType > ELEMENT_TYPE_R8)) &&
+                    (pDE->m_arrayType.elementType != ELEMENT_TYPE_CLASS) &&
+                    (pDE->m_arrayType.elementType != ELEMENT_TYPE_STRING) &&
+                    (pDE->m_arrayType.elementType != ELEMENT_TYPE_OBJECT))
                     COMPlusThrow(kArgumentOutOfRangeException, L"ArgumentOutOfRange_Enum");
 
                 // Grab the dims from the arg/data area.
                 SIZE_T *dims;
                 dims = (SIZE_T*)pDE->m_argData;
 
-                if (pDE->m_arrayElementType == ELEMENT_TYPE_CLASS)
-                {
-                    // Find the class we want to make the array elements out of.
-                    pDE->m_class = g_pEEInterface->LoadClass(pDE->m_arrayClassDebuggerModuleToken->m_pRuntimeModule,
-                                                             pDE->m_arrayClassMetadataToken);
+             	TypeHandle th;
+				Debugger::BasicTypeInfoToTypeHandle(true,&(pDE->m_arrayType), &th); // Note that we are allowed to load classes here.
 
-                    arr = AllocateObjectArray(dims[0], TypeHandle(pDE->m_class->GetMethodTable()));
-                }
-                else if (pDE->m_arrayElementType == ELEMENT_TYPE_OBJECT)
+                if (pDE->m_arrayType.elementType == ELEMENT_TYPE_CLASS || 
+					pDE->m_arrayType.elementType == ELEMENT_TYPE_STRING || 
+					pDE->m_arrayType.elementType == ELEMENT_TYPE_OBJECT)
                 {
-                    // We want to just make an array of System.Objects, so we don't require the user to pass in a
-                    // specific class.
-                    pDE->m_class = g_pObjectClass->GetClass();
-
-                    arr = AllocateObjectArray(dims[0], TypeHandle(pDE->m_class->GetMethodTable()));
+                    arr = AllocateObjectArray(dims[0], th);
                 }
                 else
                 {
                     // Create a simple array. Note: we can only do this type of create here due to the checks above.
-                    arr = AllocatePrimitiveArray(pDE->m_arrayElementType, dims[0]);
+                    arr = AllocatePrimitiveArray(pDE->m_arrayType.elementType, dims[0]);
                 }
                 
                     // No exception, so it worked.
@@ -11922,19 +12611,18 @@ HRESULT Debugger::SetReference(void *objectRefAddress,
 // SetValueClass sets a value class for the Right Side, respecting the write barrier for references that are embedded
 // within in the value class.
 //
-HRESULT Debugger::SetValueClass(void *oldData, void *newData, mdTypeDef classMetadataToken, void *classDebuggerModuleToken)
+HRESULT Debugger::SetValueClass(void *oldData, void *newData, DebuggerIPCE_BasicTypeData * type)
 {
     HRESULT hr = S_OK;
 
-    // Find the class given its module and token. The class must be loaded.
-    DebuggerModule *pDebuggerModule = (DebuggerModule*) classDebuggerModuleToken;
-    EEClass *pClass = g_pEEInterface->FindLoadedClass(pDebuggerModule->m_pRuntimeModule, classMetadataToken);
+	TypeHandle th;
+    hr = BasicTypeInfoToTypeHandle(false,type, &th);
 
-    if (pClass == NULL)
+    if (FAILED(hr))
         return CORDBG_E_CLASS_NOT_LOADED;
 
     // Update the value class.
-    CopyValueClassUnchecked(oldData, newData, pClass->GetMethodTable());
+    CopyValueClassUnchecked(oldData, newData, th.GetMethodTable());
     
     // Free the buffer that is holding the new data. This is a buffer that was created in response to a GET_BUFFER
     // message, so we release it with ReleaseRemoteBuffer.
@@ -11958,13 +12646,13 @@ HRESULT Debugger::SetILInstrumentedCodeMap(MethodDesc *fd,
 
     _ASSERTE(dji != NULL);
 
-    if (dji->m_rgInstrumentedILMap != NULL)
+    if (dji->m_methodInfo->m_rgInstrumentedILMap != NULL)
     {
-        CoTaskMemFree(dji->m_rgInstrumentedILMap);
+        CoTaskMemFree(dji->m_methodInfo->m_rgInstrumentedILMap);
     }
     
-    dji->m_cInstrumentedILMap = cILMapEntries;
-    dji->m_rgInstrumentedILMap =  rgILMapEntries;
+    dji->m_methodInfo->m_cInstrumentedILMap = cILMapEntries;
+    dji->m_methodInfo->m_rgInstrumentedILMap =  rgILMapEntries;
     
     return S_OK;
 }
@@ -12588,6 +13276,46 @@ void DebuggerHeap::Free(void *pMem)
         m_heap->Free(pMem);
         LeaveCriticalSection(&m_cs);
     }
+}
+
+// CNewZeroData members
+BYTE *CNewZeroData::Alloc(int iSize, int iMaxSize)
+{
+    _ASSERTE(g_pDebugger != NULL);
+    _ASSERTE(g_pDebugger->m_heap != NULL);
+
+    BYTE *pb = (BYTE *) g_pDebugger->m_heap->Alloc(iSize);
+
+    if (pb != NULL)
+        memset(pb, 0, iSize);
+    return pb;
+}
+void CNewZeroData::Free(BYTE *pPtr, int iSize)
+{
+    _ASSERTE(g_pDebugger != NULL);
+    _ASSERTE(g_pDebugger->m_heap != NULL);
+
+    g_pDebugger->m_heap->Free(pPtr);
+}
+BYTE *CNewZeroData::Grow(BYTE *&pPtr, int iCurSize)
+{
+    _ASSERTE(g_pDebugger != NULL);
+    _ASSERTE(g_pDebugger->m_heap != NULL);
+
+    void *p = g_pDebugger->m_heap->Realloc(pPtr, iCurSize + GrowSize());
+
+    if (p == 0) return (0);
+
+    memset((BYTE*)p+iCurSize, 0, GrowSize());
+    return (pPtr = (BYTE *)p);
+}
+int CNewZeroData::RoundSize(int iSize)
+{
+    return (iSize);
+}
+int CNewZeroData::GrowSize()
+{
+    return (256);
 }
 
 /******************************************************************************

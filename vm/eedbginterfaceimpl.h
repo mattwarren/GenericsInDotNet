@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -306,98 +311,6 @@ public:
 //        return frame->GetFunction()->GetModule()->FindFunction(rva);
     }   
 
-    virtual MethodDesc *GetNonvirtualMethod(Module *module, 
-                                              mdToken token)    
-    {   
-        MethodDesc *fd = NULL;  
-
-        if (token&0xff000000)
-        {   
-            LPCUTF8         szMember;   
-            PCCOR_SIGNATURE pSignature; 
-            DWORD           cSignature; 
-            HRESULT         hr; 
-            mdToken         ptkParent;  
-
-            mdToken type = TypeFromToken(token);    
-            IMDInternalImport *pInternalImport = module->GetMDImport();
-            EEClass *c = NULL;  
-
-            if (type == mdtMethodDef)   
-            {   
-                szMember = pInternalImport->GetNameOfMethodDef(token);  
-                if (szMember == NULL)   
-                    return NULL;    
-
-                pSignature = pInternalImport->GetSigOfMethodDef(token,
-                                                             &cSignature);  
-
-                hr = pInternalImport->GetParentToken(token, &ptkParent);   
-                if (FAILED(hr)) 
-                    return NULL;    
-
-                if (ptkParent != COR_GLOBAL_PARENT_TOKEN)   
-                {   
-                    NameHandle name(module, ptkParent);
-                    c = module->GetClassLoader()->LoadTypeHandle(&name).GetClass();   
-                    if (c == NULL)  
-                        return NULL;    
-                }   
-                else    
-                {   
-                    c = NULL;   
-                }   
-            }   
-            else if (type == mdtMemberRef)  
-            {   
-
-                szMember = pInternalImport->GetNameAndSigOfMemberRef(token,
-                                                         &pSignature,   
-                                                         &cSignature);  
-
-                ptkParent = pInternalImport->GetParentOfMemberRef(token);    
-                
-                if (ptkParent != COR_GLOBAL_PARENT_TOKEN)   
-                {   
-                    NameHandle name(module, ptkParent);
-                    c = module->GetClassLoader()->LoadTypeHandle(&name).GetClass();   
-                    if (c == NULL)  
-                        return NULL;    
-                }   
-                else    
-                {   
-                    _ASSERTE(!"Cross Module Global Functions NYI"); 
-                    c = NULL;   
-                }   
-            }   
-            else    
-                return NULL;    
-
-            if (c == NULL)  
-                fd = module->FindFunction(token);   
-            else    
-            {   
-                EEClass *pSearch = NULL;    
-
-                for (pSearch = c;   
-                     pSearch != NULL;   
-                     pSearch = pSearch->GetParentClass())   
-                {   
-                    fd = (MethodDesc*) pSearch->FindMethod(szMember,    
-                                                           pSignature,    
-                                                           cSignature,    
-                                                           module);    
-                    if (fd != NULL) 
-                        break;  
-                }   
-            }   
-
-        }   
-        else    
-            fd = module->FindFunction(token);   
-
-        return fd;  
-    }   
 
     virtual MethodDesc *GetVirtualMethod(Module *module,    
                                          Object *object, mdToken token) 
@@ -449,11 +362,6 @@ public:
     bool IsPreemptiveGCDisabled()   
       { return ::GetThread()->m_fPreemptiveGCDisabled != 0; }   
 
-    void FieldDescGetSig(FieldDesc *fd, PCCOR_SIGNATURE *ppSig, DWORD *pcSig)
-    {
-        fd->GetSig(ppSig, pcSig);
-    }
-    
     DWORD MethodDescIsStatic(MethodDesc *pFD)
     {
         return pFD->IsStatic();
@@ -503,6 +411,40 @@ public:
             return NULL;
     }
 
+    TypeHandle FindLoadedInstantiation(TypeHandle pTyCon, TypeHandle *inst, DWORD ntypars)
+    {
+        // Lookup operations run the class loader in non-load mode.
+        return ClassLoader::LoadGenericInstantiation(pTyCon, inst, ntypars, NULL,NULL,TRUE /* dontLoadTypes */);
+    }
+
+    TypeHandle FindLoadedFnptrType(TypeHandle *inst, DWORD ntypars)
+    {
+        // Lookup operations run the class loader in non-load mode.
+        return ClassLoader::GetFnptrType(inst, ntypars, NULL, TRUE /* dontLoadTypes */);
+    }
+
+    TypeHandle FindLoadedPointerOrByrefType(CorElementType et, TypeHandle elemtype)
+    {
+        // Lookup operations run the class loader in non-load mode.
+        return ClassLoader::GetPointerOrByrefType(et, elemtype, NULL, TRUE /* dontLoadTypes */);
+    }
+
+    TypeHandle FindLoadedArrayType(CorElementType et, TypeHandle elemtype, unsigned rank)
+    {
+        // Lookup operations run the class loader in non-load mode.
+        return ClassLoader::GetArrayType(et, elemtype, rank, NULL, TRUE /* dontLoadTypes */ );
+    }
+
+
+    TypeHandle FindLoadedElementType(CorElementType et) 
+    {
+        // Lookup operations run the class loader in non-load mode.
+        MethodTable *m = g_Mscorlib.LookupElementType(et);
+        if (m == NULL)
+            return TypeHandle();
+        return TypeHandle(m);
+    }
+
     EEClass *LoadClass(Module *pModule, mdTypeDef classToken)
     {
         TypeHandle th;
@@ -516,6 +458,35 @@ public:
             return NULL;
     }
 
+    TypeHandle LoadInstantiation(TypeHandle pTyCon, TypeHandle *inst, DWORD ntypars)
+    {
+        return ClassLoader::LoadGenericInstantiation(pTyCon, inst, ntypars);
+    }
+
+    TypeHandle LoadArrayType(CorElementType et, TypeHandle elemtype, unsigned rank)
+    {
+        return ClassLoader::GetArrayType(et, elemtype, rank);
+    }
+
+    TypeHandle LoadPointerOrByrefType(CorElementType et, TypeHandle elemtype)
+    {
+        return ClassLoader::GetPointerOrByrefType(et, elemtype);
+    }
+
+    TypeHandle LoadFnptrType(TypeHandle *inst, DWORD ntypars)
+    {
+        return ClassLoader::GetFnptrType(inst, ntypars);
+    }
+
+    TypeHandle LoadElementType(CorElementType et) 
+    {
+        MethodTable *m = g_Mscorlib.GetElementType(et);
+        if (m == NULL)
+            return TypeHandle();
+        return TypeHandle(m);
+    }
+
+
     HRESULT GetMethodImplProps(Module *pModule, mdToken tk,
                                DWORD *pRVA, DWORD *pImplFlags)
     {
@@ -528,16 +499,6 @@ public:
         return pModule->GetMDImport()->GetParentToken(tk, pParentToken);
     }
     
-    HRESULT ResolveSigToken(Module *pModule, mdSignature sigTk, 
-                            PCCOR_SIGNATURE *ppSig)
-    {
-        DWORD cSig;
-
-        *ppSig = pModule->GetMDImport()->GetSigFromToken(sigTk,
-                                                         &cSig);
-        return S_OK;
-    }
-
     void MarkDebuggerAttached(void)
     {
         g_CORDebuggerControlFlags |= DBCF_ATTACHED;

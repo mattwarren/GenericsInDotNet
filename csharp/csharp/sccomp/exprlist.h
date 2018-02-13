@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -145,6 +150,8 @@ enum EXPRFLAG {
 
     EXF_HASRETHROW = 0x1,       // only on EXPRHANDLER, means that an argumentless throw occurs inside it
 
+    EXF_FORCE_BOX = 0x01,        // only on EXPRCAST, GENERICS: indicates a "forcing" boxing operation (if type parameter boxed then nop, i.e. object -> object, else value type -> object)
+    EXF_FORCE_UNBOX = 0x02,      // only on EXPRCAST, GENERICS: indicates a "forcing" unboxing operation (if type parameter boxed then castclass, i.e. object -> object, else object -> value type)
     EXF_BOX = 0x10,              // only on EXPRCAST, indicates a boxing operation (value type -> object)
     EXF_UNBOX = 0x20,            // only on EXPRCAST, indicates a unboxing operation (object -> value type)
     EXF_REFCHECK = 0x40,         // only on EXPRCAST, indicates an reference checked cast is required
@@ -257,6 +264,10 @@ public:
     void setArgs(EXPR * args);
     EXPR ** getArgsPtr();
     EXPR * getObject();
+    PTYPESYM getMethodInType();
+    void setMethodInType(PTYPESYM typ);
+    void getMethTypeArgs(PTYPESYM **ppMethTypeArgs, unsigned short *cMethTypeArgs);
+    void setMethTypeArgs(PTYPESYM *ppMethTypeArgs, unsigned short cMethTypeArgs);
     SYM * getMember();
     unsigned isDefValue();
 
@@ -322,16 +333,22 @@ public:
 
 class EXPRCALL: public EXPR {
 public:
+    METHSYM * method;  // must be 1st
+    PEXPR args;  // must be 2nd -see ASSERTs below, and BINOP
     PEXPR object;
-    PEXPR args;
-    METHSYM * method;
+    PTYPESYM methodInType; // type of the object being called, NULL is a static call, AGGSYM if a calling a method on a 
+                          // non-generic class, INSTAGGSYM if calling one on a generic class, AGGSYM if a static method
+                          // on a generic class
+    PTYPESYM *ppMethTypeArgs; // types at which a generic method is being instantiated, if any (NULL if calling a non-generic method)
+    unsigned short cMethTypeArgs; 
 };
 
 class EXPRPROP: public EXPR {
 public:
-    PEXPR object;
-    PEXPR args;
-    PROPSYM * prop;
+    PROPSYM * prop; // 1st
+    PEXPR args; // 2nd
+    PEXPR object;   // 3rd
+    PTYPESYM methodInType; // 4th, type of the object being called, NULL is a static call
 };
 
 class EXPRDECL: public EXPR {
@@ -348,9 +365,10 @@ public:
 
 class EXPRFIELD: public EXPR {
 public:
-    PEXPR object;
-    unsigned offset;
-    MEMBVARSYM * field;
+    MEMBVARSYM * field;  // 1st
+    unsigned offset; // 2nd
+    PEXPR object;    // 3rd
+    PTYPESYM methodInType; // 4th.  type of the object being called, NULL is a static call
     unsigned ownerOffset;
 };
 
@@ -493,6 +511,7 @@ public:
 class EXPRFUNCPTR : public EXPR {
 public:
     METHSYM * func;
+    TYPESYM * methodInType;
     EXPR * object;
 };
 
@@ -706,3 +725,43 @@ __forceinline SYM * EXPR::getMember()
     return (static_cast<EXPRCALL*>(this))->method;
 }
 
+__forceinline PTYPESYM EXPR::getMethodInType()
+{
+    ASSERT(kind == EK_CALL || kind == EK_PROP || kind == EK_FIELD);
+    ASSERT(offsetof(EXPRCALL, methodInType) == offsetof(EXPRPROP, methodInType));
+    ASSERT(offsetof(EXPRPROP, methodInType) == offsetof(EXPRFIELD, methodInType));
+    return (static_cast<EXPRCALL*>(this))->methodInType;
+}
+
+__forceinline void EXPR::setMethodInType(PTYPESYM methodInType)
+{
+    ASSERT(kind == EK_CALL || kind == EK_PROP || kind == EK_FIELD);
+    ASSERT(offsetof(EXPRCALL, methodInType) == offsetof(EXPRPROP, methodInType));
+    ASSERT(offsetof(EXPRPROP, methodInType) == offsetof(EXPRFIELD, methodInType));
+    (static_cast<EXPRCALL*>(this))->methodInType = methodInType;
+}
+
+__forceinline void EXPR::getMethTypeArgs(PTYPESYM **ppMethTypeArgs, unsigned short *cMethTypeArgs)
+{
+    ASSERT(kind == EK_CALL || kind == EK_PROP);
+    if (kind == EK_PROP) { 
+        *ppMethTypeArgs = NULL; *cMethTypeArgs = 0; return; 
+    }
+    else { 
+        *ppMethTypeArgs = (static_cast<EXPRCALL*>(this))->ppMethTypeArgs;
+        *cMethTypeArgs = (static_cast<EXPRCALL*>(this))->cMethTypeArgs;
+    }
+}
+
+
+__forceinline void EXPR::setMethTypeArgs(PTYPESYM *ppMethTypeArgs, unsigned short cMethTypeArgs)
+{
+    ASSERT(kind == EK_CALL || kind == EK_PROP);
+    if (kind == EK_PROP) { 
+        ASSERT(ppMethTypeArgs == NULL); ASSERT(cMethTypeArgs == 0); return; 
+    }
+    else { 
+        (static_cast<EXPRCALL*>(this))->ppMethTypeArgs = ppMethTypeArgs;
+        (static_cast<EXPRCALL*>(this))->cMethTypeArgs = cMethTypeArgs;
+    }
+}

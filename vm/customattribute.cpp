@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -565,9 +570,7 @@ FCIMPL3(LPVOID, COMCustomAttribute::CreateCAObject, CustomAttributeClass* refThi
     //
     // we got a valid ctor, check the sig and compare with the blob while building the arg list
 
-    // make a sig object we can inspect
-    PCCOR_SIGNATURE corSig = ctorMeth->GetSig();
-    MetaSig sig = MetaSig(corSig, pCAType->GetModule());
+    MetaSig sig = MetaSig(ctorMeth);
 
     // get the blob
     BYTE *blob = (BYTE*)refThis->GetBlob();
@@ -714,7 +717,7 @@ FCIMPL5(LPVOID, COMCustomAttribute::GetDataForPropertyOrField, CustomAttributeCl
         pMTValue = pEEEnum->GetMethodTable();
         if (fieldType == SERIALIZATION_TYPE_ENUM) 
             // load the enum type to pass it back
-            *type = pEEEnum->GetExposedClassObject();
+            *type = pMTValue->GetExposedClassObject();
         else 
             nullTH = TypeHandle(pMTValue);
     }
@@ -734,7 +737,7 @@ FCIMPL5(LPVOID, COMCustomAttribute::GetDataForPropertyOrField, CustomAttributeCl
     GCPROTECT_BEGIN(name);
     switch (fieldType) {
     case SERIALIZATION_TYPE_TAGGED_OBJECT:
-        *type = g_Mscorlib.GetClass(CLASS__OBJECT)->GetClass()->GetExposedClassObject();
+        *type = g_Mscorlib.GetClass(CLASS__OBJECT)->GetExposedClassObject();
     case SERIALIZATION_TYPE_TYPE:
     case SERIALIZATION_TYPE_STRING:
         *value = ArgSlotToObj(GetDataFromBlob(pCtorAssembly,
@@ -748,9 +751,9 @@ FCIMPL5(LPVOID, COMCustomAttribute::GetDataForPropertyOrField, CustomAttributeCl
         if (*value == NULL) {
             // load the proper type so that code in managed knows which property to load
             if (fieldType == SERIALIZATION_TYPE_STRING) 
-                *type = g_Mscorlib.GetElementType(ELEMENT_TYPE_STRING)->GetClass()->GetExposedClassObject();
+                *type = g_Mscorlib.GetElementType(ELEMENT_TYPE_STRING)->GetExposedClassObject();
             else if (fieldType == SERIALIZATION_TYPE_TYPE) 
-                *type = g_Mscorlib.GetClass(CLASS__TYPE)->GetClass()->GetExposedClassObject();
+                *type = g_Mscorlib.GetClass(CLASS__TYPE)->GetExposedClassObject();
         }
         break;
     case SERIALIZATION_TYPE_SZARRAY:

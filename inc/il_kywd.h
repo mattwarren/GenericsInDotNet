@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -34,6 +39,11 @@
     KYWD( "int16",          INT16_,             NO_VALUE )
     KYWD( "int32",          INT32_,             NO_VALUE )
     KYWD( "int64",          INT64_,             NO_VALUE )
+    KYWD( "uint",           UINT_,              NO_VALUE )
+    KYWD( "uint8",          UINT8_,             NO_VALUE )
+    KYWD( "uint16",         UINT16_,            NO_VALUE )
+    KYWD( "uint32",         UINT32_,            NO_VALUE )
+    KYWD( "uint64",         UINT64_,            NO_VALUE )
     KYWD( "float",          FLOAT_,             NO_VALUE )
     KYWD( "float32",        FLOAT32_,           NO_VALUE )
     KYWD( "float64",        FLOAT64_,           NO_VALUE )
@@ -46,14 +56,12 @@
     KYWD( "value",          VALUE_,             NO_VALUE )
     KYWD( "valuetype",      VALUETYPE_,         NO_VALUE )
     KYWD( "class",          CLASS_,             NO_VALUE )
-    KYWD( "const",          CONST_,             NO_VALUE )
     KYWD( "vararg",         VARARG_,            NO_VALUE )
     KYWD( "default",        DEFAULT_,           NO_VALUE )
     KYWD( "stdcall",        STDCALL_,           NO_VALUE )
     KYWD( "thiscall",       THISCALL_,          NO_VALUE )
     KYWD( "fastcall",       FASTCALL_,          NO_VALUE )
     KYWD( "unmanaged",      UNMANAGED_,         NO_VALUE )
-    KYWD( "not_in_gc_heap", NOT_IN_GC_HEAP_,    NO_VALUE )
     KYWD( "beforefieldinit",BEFOREFIELDINIT_,   NO_VALUE )
     KYWD( "instance",       INSTANCE_,          NO_VALUE )
     KYWD( "filter",         FILTER_,            NO_VALUE )
@@ -73,15 +81,12 @@
     KYWD( "auto",           AUTO_,              NO_VALUE )
     KYWD( "sequential",     SEQUENTIAL_,        NO_VALUE )
     KYWD( "explicit",       EXPLICIT_,          NO_VALUE )
-    KYWD( "wrapper",        WRAPPER_,           NO_VALUE )
     KYWD( "ansi",           ANSI_,              NO_VALUE )
     KYWD( "unicode",        UNICODE_,           NO_VALUE )
     KYWD( "autochar",       AUTOCHAR_,          NO_VALUE )
     KYWD( "import",         IMPORT_,            NO_VALUE )
     KYWD( "enum",           ENUM_,              NO_VALUE )
     KYWD( "virtual",        VIRTUAL_,           NO_VALUE )
-    KYWD( "notremotable",   NOTREMOTABLE_,      NO_VALUE )
-    KYWD( "special",        SPECIAL_,           NO_VALUE )
     KYWD( "il",             CIL_,               NO_VALUE )
     KYWD( "cil",            CIL_,               NO_VALUE )
     KYWD( "optil",          OPTIL_,             NO_VALUE )
@@ -118,9 +123,6 @@
     KYWD( "lasterr",        LASTERR_,           NO_VALUE )
     KYWD( "winapi",         WINAPI_,            NO_VALUE )
     KYWD( "cdecl",          CDECL_,             NO_VALUE )
-    KYWD( "stdcall",        STDCALL_,           NO_VALUE )
-    KYWD( "thiscall",       THISCALL_,          NO_VALUE )
-    KYWD( "fastcall",       FASTCALL_,          NO_VALUE )
     KYWD( "as",             AS_,                NO_VALUE )
     KYWD( "pinned",         PINNED_,            NO_VALUE )
     KYWD( "modreq",         MODREQ_,            NO_VALUE )
@@ -142,7 +144,6 @@
     KYWD( ".locals",        _LOCALS,            NO_VALUE )
     KYWD( ".entrypoint",    _ENTRYPOINT,        NO_VALUE )
     KYWD( ".zeroinit",      _ZEROINIT,          NO_VALUE )
-    KYWD( ".pdirect",       _PDIRECT,           NO_VALUE )
     KYWD( ".data",          _DATA,              NO_VALUE )
 
     KYWD( ".event",         _EVENT,             NO_VALUE )
@@ -150,14 +151,10 @@
     KYWD( ".removeon",      _REMOVEON,          NO_VALUE )
     KYWD( ".fire",          _FIRE,              NO_VALUE )
     KYWD( ".other",         _OTHER,             NO_VALUE )
-    KYWD( "protected",      PROTECTED_,         NO_VALUE )
     
     KYWD( ".property",      _PROPERTY,          NO_VALUE )
     KYWD( ".set",           _SET,               NO_VALUE )
     KYWD( ".get",           _GET,               NO_VALUE )
-    KYWD( "default",        DEFAULT_,           NO_VALUE )
-
-    KYWD( ".import",        _IMPORT,            NO_VALUE )
 
     KYWD( ".permission",    _PERMISSION,        NO_VALUE )
     KYWD( ".permissionset", _PERMISSIONSET,     NO_VALUE )
@@ -195,7 +192,6 @@
     KYWD( "nometadata",     NOMETADATA_,            NO_VALUE )
     KYWD( ".hash",          _HASH,              NO_VALUE )
     KYWD( ".assembly",      _ASSEMBLY,          NO_VALUE )
-    KYWD( "implicitcom",    IMPLICITCOM_,       NO_VALUE )
     KYWD( "noappdomain",    NOAPPDOMAIN_,       NO_VALUE )
     KYWD( "noprocess",      NOPROCESS_,         NO_VALUE )
     KYWD( "nomachine",      NOMACHINE_,         NO_VALUE )
@@ -208,7 +204,6 @@
     KYWD( ".export",        _EXPORT,            NO_VALUE )
     KYWD( ".manifestres",   _MRESOURCE,         NO_VALUE )
     KYWD( ".mresource",     _MRESOURCE,         NO_VALUE )
-    KYWD( ".localized",     _LOCALIZED,         NO_VALUE )
     KYWD( ".module",        _MODULE,            NO_VALUE )
         /* Field marshaling keywords */
     KYWD( "marshal",        MARSHAL_,           NO_VALUE )
@@ -244,8 +239,6 @@
     KYWD( "in",             IN_,                NO_VALUE )
     KYWD( "out",            OUT_,               NO_VALUE )
     KYWD( "opt",            OPT_,               NO_VALUE )
-    KYWD( "lcid",           LCID_,              NO_VALUE )
-    KYWD( "retval",         RETVAL_,            NO_VALUE )
     KYWD( ".param",         _PARAM,             NO_VALUE )
         /* Method implementations */
     KYWD( ".override",      _OVERRIDE,          NO_VALUE )
@@ -274,11 +267,12 @@
     KYWD( ".corflags",      _CORFLAGS,          NO_VALUE )
     KYWD( "alignment",      ALIGNMENT_,         NO_VALUE )
     KYWD( ".imagebase",     _IMAGEBASE,         NO_VALUE )
+        /* Explicit binary flag specification keywords */
+    KYWD( "flags",          FLAGS_,             NO_VALUE )
+    KYWD( "callconv",       CALLCONV_,          NO_VALUE )
 
         /* Deprecated keywords */
     KYWD( ".vtable",        _VTABLE,            NO_VALUE )
-    KYWD( "readonly",       READONLY_,          NO_VALUE )
-    KYWD( "implicitres",    IMPLICITRES_,       NO_VALUE )
 
 
     KYWD( "^THE_END^",      0,                  NO_VALUE )

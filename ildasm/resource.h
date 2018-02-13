@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -94,7 +99,8 @@
 #define IDS_USAGE_19                    IDS_USAGE_18 + 1
 #define IDS_USAGE_20					IDS_USAGE_19 + 1
 #define IDS_USAGE_21                    IDS_USAGE_20 + 1
-#define IDS_USAGE_22                    IDS_USAGE_21 + 1
+#define IDS_USAGE_21A                   IDS_USAGE_21 + 1
+#define IDS_USAGE_22                    IDS_USAGE_21A + 1
 #define IDS_USAGE_23                    IDS_USAGE_22 + 1
 #define IDS_USAGE_24                    IDS_USAGE_23 + 1
 #define IDS_USAGE_25                    IDS_USAGE_24 + 1

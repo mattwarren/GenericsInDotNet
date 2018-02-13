@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -2819,6 +2824,72 @@ HRESULT DebuggerShell::PrintFrame(ICorDebugFrame *frame)
         pArgs = NULL;
     }
 
+    if (m_rgfActiveModes & DSM_SHOW_TYARGS_IN_STACK_TRACE)
+    {
+        // Now print out the type arguments for the method
+        ICorDebugILFrame *ilf = NULL;
+
+        hr = frame->QueryInterface(IID_ICorDebugILFrame, (void **)&ilf);
+
+        if (FAILED(hr))
+            goto LExit;
+
+        ICorDebugTypeEnum *pArgs = NULL;
+
+        hr = ilf->EnumerateTypeParameters(&pArgs);
+
+        if (!SUCCEEDED(hr))
+            goto LExit;
+        
+        RELEASE(ilf);
+        ilf = NULL;
+
+        ULONG argCount;
+
+        hr = pArgs->GetCount(&argCount);
+
+        if (!SUCCEEDED(hr))
+            goto LExit;
+
+        ICorDebugType *itype;
+        ULONG celtFetched = 0;
+
+        LPWSTR nameWsz;
+        for (j = 0; j < argCount; j++)
+        {
+            DebuggerVarInfo* arg = function->GetTypeArgumentAt(j);
+
+            Write(L"\n\t\t");
+            if (arg != NULL)
+            {
+                MAKE_WIDEPTR_FROMUTF8(nameW, arg->name);
+                nameWsz = nameW;
+            }
+            else
+            {
+                wsprintf( wsz, L"T%d", j );
+                nameWsz = wsz;
+            }
+
+            // Get the field value
+            hr = pArgs->Next(1, &itype,&celtFetched);
+
+            // If successful, print the variable
+            if (SUCCEEDED(hr) && celtFetched==1)
+            {
+
+                PrintType(nameWsz, itype, 0);
+            }
+
+            // Otherwise, indicate that it is unavailable
+            else
+                Write(L"%s = <unavailable>", nameWsz);
+        }
+
+        RELEASE(pArgs);
+        pArgs = NULL;
+    }
+
  LExit:
     Write(L"\n");
 
@@ -3268,19 +3339,16 @@ ICorDebugValue *DebuggerShell::EvaluateExpression(const WCHAR *exp,
         delete [] nameAlloc;
         return (NULL);
     }
-
-    DebuggerModule *m = NULL;
-    mdTypeDef td = mdTypeDefNil;
     
     if (value == NULL)
     {
-        ICorDebugClass *iclass;
+        ICorDebugType *itype;
         mdFieldDef fd;
         bool isStatic;
 
         // See if we've got a static field name here...
-        hr = ResolveQualifiedFieldName(NULL, mdTypeDefNil, nameAlloc,
-                                       &m, &td, &iclass, &fd, &isStatic);
+        hr = ResolveQualifiedFieldName(NULL, nameAlloc,
+                                       &itype, &fd, &isStatic);
 
         if (FAILED(hr))
         {
@@ -3309,11 +3377,14 @@ ICorDebugValue *DebuggerShell::EvaluateExpression(const WCHAR *exp,
             hr = context->QueryInterface(IID_ICorDebugFrame, (void**)&pFrame);
             _ASSERTE(SUCCEEDED(hr));
             
-            // Grab the value of the static field off of the class.
+			// Get the class for containing the static
+            ICorDebugClass *iclass;
+			hr = itype->GetClass(&iclass);
+            _ASSERTE(SUCCEEDED(hr));
+
+			// Grab the value of the static field off of the class.
             hr = iclass->GetStaticFieldValue(fd, pFrame, &value);
             
-            RELEASE(pFrame);
-
             if (FAILED(hr))
             {
                 g_pShell->ReportError(hr);
@@ -3322,6 +3393,10 @@ ICorDebugValue *DebuggerShell::EvaluateExpression(const WCHAR *exp,
                 delete [] nameAlloc;
                 return (NULL);
             }
+
+			RELEASE(pFrame);
+			RELEASE(iclass);
+
         }
         else
         {
@@ -3406,9 +3481,9 @@ ICorDebugValue *DebuggerShell::EvaluateExpression(const WCHAR *exp,
 
                 RELEASE(value);
 
-                // Get class & module
-                ICorDebugClass *iclass;
-                hr = object->GetClass(&iclass);
+                // Get type, class & module
+                ICorDebugType *itype;
+                hr = object->GetExactType(&itype);
 
                 if (FAILED(hr))
                 {
@@ -3416,33 +3491,6 @@ ICorDebugValue *DebuggerShell::EvaluateExpression(const WCHAR *exp,
                     RELEASE(object);
                     return (NULL);
                 }
-
-                ICorDebugModule *imodule;
-                hr = iclass->GetModule(&imodule);
-
-                if (FAILED(hr))
-                {
-                    g_pShell->ReportError(hr);
-                    RELEASE(object);
-                    RELEASE(iclass);
-                    return (NULL);
-                }
-
-                m = DebuggerModule::FromCorDebug(imodule);
-                _ASSERTE(m != NULL);
-
-                hr = iclass->GetToken(&td);
-
-                if (FAILED(hr))
-                {
-                    g_pShell->ReportError(hr);
-                    RELEASE(object);
-                    RELEASE(iclass);
-                    return (NULL);
-                }
-
-                RELEASE(iclass);
-                RELEASE(imodule);
 
                 //
                 // Get field name
@@ -3473,8 +3521,9 @@ ICorDebugValue *DebuggerShell::EvaluateExpression(const WCHAR *exp,
                 mdFieldDef fd = mdFieldDefNil;
                 bool isStatic;
                 
-                hr = ResolveQualifiedFieldName(m, td, fieldAlloc,
-                                               &m, &td, &iclass, &fd,
+				ICorDebugType *itypeForField;
+                hr = ResolveQualifiedFieldName(itype, fieldAlloc,
+                                               &itypeForField, &fd,
                                                &isStatic);
 
                 if (FAILED(hr))
@@ -3482,21 +3531,28 @@ ICorDebugValue *DebuggerShell::EvaluateExpression(const WCHAR *exp,
                     Error(L"Field %s not found.\n", fieldAlloc);
 
                     RELEASE(object);
+					RELEASE(itype);
                     return (NULL);
                 }
+				RELEASE(itype);
 
                 _ASSERTE(object != NULL);
 
                 if (!isStatic)
-                    object->GetFieldValue(iclass, fd, &value);
+                    object->GetFieldValueForType(itypeForField, fd, &value);
                 else
                 {
+					ICorDebugClass * iclassForField;
                     // We'll let the user look at static fields as if
                     // they belong to objects.
-                    iclass->GetStaticFieldValue(fd, NULL, &value);
+					hr = itypeForField->GetClass(&iclassForField);
+                    _ASSERTE(SUCCEEDED(hr));
+
+                    iclassForField->GetStaticFieldValue(fd, NULL, &value);
+                    RELEASE(iclassForField);
                 }
 
-                RELEASE(iclass);
+				RELEASE(itypeForField);
                 RELEASE(object);
 
                 break;
@@ -4180,6 +4236,30 @@ exit:
     RELEASE(ivalue);
 }
 
+// Print a type when showing the value of a type
+// variable. 
+void DebuggerShell::PrintType(const WCHAR *name,
+                                      ICorDebugType *ivalue,
+                                      unsigned int indent)
+{
+    HRESULT hr;
+
+    // Print the variable's name first.
+    PrintVarName(name);
+    WCHAR className[MAX_CLASSNAME_LENGTH];
+    ULONG classNameSize = 0;
+
+    hr = GetTypeName(ivalue,MAX_CLASSNAME_LENGTH - 1,className, &classNameSize);
+	if (FAILED(hr)) 
+		goto exit;
+	className[classNameSize] = L'\0';
+
+    Write(L"%s", className);
+
+exit:    
+    RELEASE(ivalue);
+}
+
 void DebuggerShell::PrintArrayVar(ICorDebugArrayValue *iarray,
                                   const WCHAR* name,
                                   unsigned int indent,
@@ -4365,26 +4445,29 @@ LExit:
 }
 
 
-void DebuggerShell::PrintObjectVar(ICorDebugObjectValue *iobject,
-                                   const WCHAR* name,
-                                   unsigned int indent,
-                                   BOOL expandObjects)
+HRESULT DebuggerShell::GetTypeName(ICorDebugClass *iclass,
+                                ULONG bufLength,
+                                WCHAR* nameBuf,
+                                ULONG *nameSize)
 {
-    HRESULT hr = S_OK;
-    
-    _ASSERTE(iobject != NULL);
-
+    *nameSize = 0;
     DebuggerModule *dm;
+    // Get the module from this class
+    ICorDebugModule *imodule;
+    HRESULT hr = iclass->GetModule(&imodule);
+    WCHAR *buf = nameBuf;
+    ULONG bufRemaining = bufLength;
 
-    // Snagg the object's class.
-    ICorDebugClass *iclass = NULL;
-    hr = iobject->GetClass(&iclass);
-    
     if (FAILED(hr))
     {
         g_pShell->ReportError(hr);
         goto exit;
     }
+
+    dm = DebuggerModule::FromCorDebug(imodule);
+    
+    _ASSERTE(dm != NULL);
+    RELEASE(imodule);
 
     // Get the class's token
     mdTypeDef tdClass;
@@ -4394,47 +4477,236 @@ void DebuggerShell::PrintObjectVar(ICorDebugObjectValue *iobject,
     if (FAILED(hr))
     {
         g_pShell->ReportError(hr);
-        RELEASE(iclass);
-        goto exit;
-    }
-
-    // Get the module from this class
-    ICorDebugModule *imodule;
-    iclass->GetModule(&imodule);
-    RELEASE(iclass);
-    iclass = NULL;
-    
-    if (FAILED(hr))
-    {
-        g_pShell->ReportError(hr);
-        goto exit;
-    }
-
-    dm = DebuggerModule::FromCorDebug(imodule);
-    _ASSERTE(dm != NULL);
-    RELEASE(imodule);
-
-    if (FAILED(hr))
-    {
-        g_pShell->ReportError(hr);
         goto exit;
     }
 
     // Get the class name
-    WCHAR       className[MAX_CLASSNAME_LENGTH];
-    ULONG       classNameSize;
-    mdToken     parentTD;
-
+    ULONG       fetched;
     hr = dm->GetMetaData()->GetTypeDefProps(tdClass,
-                                            className, MAX_CLASSNAME_LENGTH,
-                                            &classNameSize, 
-                                            NULL, &parentTD);
+                                            buf, bufRemaining,
+                                            &fetched, 
+                                            NULL, NULL);
+    if (FAILED(hr))
+        goto exit;
+
+	bufRemaining -= (fetched - 1);
+    buf += (fetched - 1); 
+    (*nameSize) += (fetched - 1);
+
+   return S_OK;
+
+exit: 
+   g_pShell->ReportError(hr);
+   return hr;
+}
+
+
+
+HRESULT DebuggerShell::AddString(CHAR* s,
+								 ULONG bufLength,
+                                WCHAR* nameBuf,
+								ULONG *nameSize) 
+{
+    *nameSize = 0;
+	ULONG bufRemaining = bufLength;
+	for (; *s; s++) {
+		if (bufRemaining) {
+			*(nameBuf++) = *s;
+			bufRemaining--;
+			(*nameSize)++; 
+		}
+	}
+	return S_OK;
+}
+
+HRESULT DebuggerShell::GetTypeName(ICorDebugType *itype,
+                                ULONG bufLength,
+                                WCHAR* nameBuf,
+                                ULONG *nameSize)
+{
+    *nameSize = 0;
+    CorElementType ty;
+    HRESULT hr = itype->GetType(&ty);
+    WCHAR *buf = nameBuf;
+    ULONG bufRemaining = bufLength;
+    ULONG       fetched;
+    if (FAILED(hr))
+    {
+        g_pShell->ReportError(hr);
+        return hr;
+    }
+	switch (ty) 
+	{
+	case ELEMENT_TYPE_CLASS:
+	case ELEMENT_TYPE_VALUETYPE:
+		{
+			ICorDebugClass *iclass;
+            ICorDebugType *itypar = NULL;
+			BOOL constructed = false;
+            ICorDebugTypeEnum *e = NULL;
+
+			hr = itype->GetClass(&iclass);
+			if (FAILED(hr))
+			{
+				g_pShell->ReportError(hr);
+				return hr;
+			}
+			hr = GetTypeName(iclass, bufRemaining, buf,&fetched);
+			if (FAILED(hr))
+				goto exit;
+			buf += fetched;
+			bufRemaining -= fetched;
+			*nameSize += fetched;
+			RELEASE(iclass);
+
+			hr = itype->EnumerateTypeParameters( &e );
+			if (FAILED(hr))
+				goto exit;
+
+			ULONG count;
+			for (hr = e->Next(1, &itypar, &count);
+				SUCCEEDED(hr) && (count == 1) && (bufRemaining > 0);
+				hr = e->Next(1, &itypar, &count)) 
+			{
+
+				if (!constructed && bufRemaining > 0) 
+				{
+					*(buf++) = L'<';
+					bufRemaining--;
+					(*nameSize)++;
+					constructed = true;
+				}
+				else if (bufRemaining > 0) 
+				{
+					*(buf++) = L',';
+					bufRemaining--;
+					(*nameSize)++;
+				}
+
+				hr = GetTypeName(itypar, bufRemaining, buf, &fetched);
+				RELEASE(itypar);
+				if (FAILED(hr))
+					goto exit;
+				bufRemaining -= fetched;
+				buf += fetched;
+				(*nameSize) += fetched;
+			}
+			if (constructed && bufRemaining > 0) 
+			{
+				*(buf++) = L'>';
+				bufRemaining--;
+				(*nameSize)++;
+			}
+exit: 
+			if (e) 
+				RELEASE(e);
+			return hr;
+		}
+
+	case ELEMENT_TYPE_ARRAY:
+	case ELEMENT_TYPE_SZARRAY:
+	case ELEMENT_TYPE_BYREF:
+	case ELEMENT_TYPE_PTR:
+		{
+			ICorDebugType *itypar;
+			hr = itype->GetFirstTypeParameter(&itypar);
+			if (FAILED(hr))
+			{
+				g_pShell->ReportError(hr);
+				return hr;
+			}
+			hr = GetTypeName(itypar, bufRemaining, buf, &fetched);
+			bufRemaining -= fetched;
+			buf += fetched;
+			(*nameSize) += fetched;
+			if (FAILED(hr))
+			{
+				g_pShell->ReportError(hr);
+				return hr;
+			}
+			itypar->Release();
+			switch (ty) 
+			{
+			case ELEMENT_TYPE_ARRAY:  
+				AddString("[<rank not yet printed>]", bufRemaining, buf, &fetched); 
+				break;
+			case ELEMENT_TYPE_SZARRAY:   
+				AddString("[]", bufRemaining, buf, &fetched); 
+				break;
+			case ELEMENT_TYPE_BYREF:  
+				AddString("&", bufRemaining, buf, &fetched); 
+				break;
+			case ELEMENT_TYPE_PTR:  
+				AddString("*", bufRemaining, buf, &fetched); 
+				break;
+            default:
+                break;
+			}
+			bufRemaining -= fetched;
+			buf += fetched; 
+			(*nameSize) += fetched;
+
+			return hr;
+		}
+	case ELEMENT_TYPE_FNPTR: return AddString("*(...)", bufLength, nameBuf, nameSize); 
+    case ELEMENT_TYPE_VOID:     return AddString("System.Void", bufLength, nameBuf, nameSize); 
+    case ELEMENT_TYPE_BOOLEAN:  return AddString("System.Bool", bufLength, nameBuf, nameSize); 
+    case ELEMENT_TYPE_I1:       return AddString("System.SByte", bufLength, nameBuf, nameSize); 
+    case ELEMENT_TYPE_U1:       return AddString("System.Byte", bufLength, nameBuf, nameSize); 
+    case ELEMENT_TYPE_I2:       return AddString("System.Int16", bufLength, nameBuf, nameSize); 
+    case ELEMENT_TYPE_U2:       return AddString("System.UInt16", bufLength, nameBuf, nameSize); 
+    case ELEMENT_TYPE_CHAR:     return AddString("System.Char", bufLength, nameBuf, nameSize); 
+    case ELEMENT_TYPE_I4:       return AddString("System.Int32", bufLength, nameBuf, nameSize); 
+    case ELEMENT_TYPE_U4:       return AddString("System.UInt32", bufLength, nameBuf, nameSize); 
+    case ELEMENT_TYPE_I8:       return AddString("System.Int64", bufLength, nameBuf, nameSize); 
+    case ELEMENT_TYPE_U8:       return AddString("System.UInt64", bufLength, nameBuf, nameSize); 
+    case ELEMENT_TYPE_R4:       return AddString("System.Single", bufLength, nameBuf, nameSize); 
+    case ELEMENT_TYPE_R8:       return AddString("System.Double", bufLength, nameBuf, nameSize); 
+    case ELEMENT_TYPE_OBJECT:   return AddString("System.Object", bufLength, nameBuf, nameSize); 
+    case ELEMENT_TYPE_STRING:   return AddString("System.String", bufLength, nameBuf, nameSize); 
+    case ELEMENT_TYPE_I:        return AddString("System.IntPtr", bufLength, nameBuf, nameSize); 
+    case ELEMENT_TYPE_U:        return AddString("System.UIntPtr", bufLength, nameBuf, nameSize); 
+	default:
+			_ASSERTE(!"unimplemented!");
+	}
+
+   return S_OK;
+
+}
+
+
+
+
+void DebuggerShell::PrintObjectVar(ICorDebugObjectValue *iobject,
+                                   const WCHAR* name,
+                                   unsigned int indent,
+                                   BOOL expandObjects)
+{
+    HRESULT hr = S_OK;
     
+    _ASSERTE(iobject != NULL);
+
+    WCHAR className[MAX_CLASSNAME_LENGTH];
+    ULONG classNameSize = 0;
+
+    // Snagg the object's class.
+    ICorDebugType *itype = NULL;
+    hr = iobject->GetExactType(&itype);
+
     if (FAILED(hr))
     {
         g_pShell->ReportError(hr);
         goto exit;
     }
+
+    hr = GetTypeName(itype,MAX_CLASSNAME_LENGTH-1,className, &classNameSize);
+    if (FAILED(hr))
+    {
+        Write(L"*Unknown Type*", className);
+        g_pShell->ReportError(hr);
+        goto exit;
+    }
+	className[classNameSize] = L'\0';
 
     Write(L"<%s>", className);
 
@@ -4448,26 +4720,13 @@ void DebuggerShell::PrintObjectVar(ICorDebugObjectValue *iobject,
 
         BOOL anyMembers = FALSE;
         BOOL isSuperClass = FALSE;
+        itype->AddRef(); // we call Release on every type up the chain, so add a reference here....
 
         do
         {
-            if (isSuperClass)
-            {
-                hr = dm->GetMetaData()->GetTypeDefProps(tdClass,
-                                            className, MAX_CLASSNAME_LENGTH,
-                                            &classNameSize, 
-                                            NULL, &parentTD);
+            DebuggerModule *dm = ModuleOfType(itype);
+            mdTypeDef tdClass = TokenOfType(itype);
 
-                if (FAILED(hr))
-                    break;
-            }
-    
-            // Snag the ICorDebugClass we're working with now...
-            hr = dm->GetICorDebugModule()->GetClassFromToken(tdClass, &iclass);
-
-            if (FAILED(hr))
-                break;
-            
             HCORENUM fieldEnum = NULL;
 
             while (TRUE)
@@ -4538,13 +4797,16 @@ void DebuggerShell::PrintObjectVar(ICorDebugObjectValue *iobject,
                     {
                         Write(L"<static> ");
                     
+						ICorDebugClass *iclass = NULL;
+						HRESULT hr = itype->GetClass(&iclass);
                         // We'll let the user look at static fields as if
                         // they belong to objects.
                         hr = iclass->GetStaticFieldValue(field[0], NULL,
                                                          &fieldValue);
+						RELEASE(iclass);
                     }
                     else
-                        hr = iobject->GetFieldValue(iclass, field[0],
+                        hr = iobject->GetFieldValueForType(itype, field[0],
                                                     &fieldValue);
 
                     if (FAILED(hr))
@@ -4566,8 +4828,6 @@ void DebuggerShell::PrintObjectVar(ICorDebugObjectValue *iobject,
                 }
             }
 
-            RELEASE(iclass);
-
             // Release the field enumerator
             if (fieldEnum != NULL)
                 dm->GetMetaData()->CloseEnum(fieldEnum);
@@ -4578,24 +4838,16 @@ void DebuggerShell::PrintObjectVar(ICorDebugObjectValue *iobject,
                 ReportError(hr);
                 goto exit;
             }
+			ICorDebugType *iparent;
+			hr = itype->GetBase(&iparent); // sets itype to NULL at end
+			if (FAILED(hr))
+				break;
 
-            // Repeat with the super class.
-            isSuperClass = TRUE;
-            tdClass = parentTD;
+			RELEASE(itype);
+			itype = iparent;
+			isSuperClass = TRUE;
 
-            if ((TypeFromToken(tdClass) == mdtTypeRef) &&
-                (tdClass != mdTypeRefNil))
-            {
-                hr = ResolveTypeRef(dm, tdClass, &dm, &tdClass);
-
-                if (FAILED(hr))
-                {
-                    ReportError(hr);
-                    goto exit;
-                }
-            }
-
-        } while ((tdClass != mdTypeDefNil) && (tdClass != mdTypeRefNil));
+        } while (itype != NULL);
 
         // If this object has no members, lets go ahead and see if it has a size. If it does, then we'll just dump the
         // raw memory.
@@ -4672,9 +4924,14 @@ void DebuggerShell::PrintObjectVar(ICorDebugObjectValue *iobject,
             }
 
         }
+
     }
+	if (itype)
+		RELEASE(itype);
 
 exit:
+	if (itype)
+		RELEASE (itype);
     RELEASE(iobject);
 }
 
@@ -4891,12 +5148,9 @@ ErrExit:
 }
                                    
 
-HRESULT DebuggerShell::ResolveQualifiedFieldName(DebuggerModule *currentDM,
-                                                 mdTypeDef currentTD,
+HRESULT DebuggerShell::ResolveQualifiedFieldName(ICorDebugType *itype,  // GENRICS: the full type of the object, if any
                                                  WCHAR *fieldName,
-                                                 DebuggerModule **pDM,
-                                                 mdTypeDef *pTD,
-                                                 ICorDebugClass **pIClass,
+												 ICorDebugType **pIType, // GENERICS: the type of the object where the field resides (a supertype)
                                                  mdFieldDef *pFD,
                                                  bool *pbIsStatic)
 {
@@ -4914,73 +5168,77 @@ HRESULT DebuggerShell::ResolveQualifiedFieldName(DebuggerModule *currentDM,
     _ASSERTE(fn && cn);
     
     // If there is no class name, then we must have current scoping info.
-    if ((cn[0] == L'\0') &&
-        ((currentDM == NULL) || (currentTD == mdTypeDefNil)))
+    if ((cn[0] == L'\0') && itype == NULL)
     {
         hr = E_INVALIDARG;
         goto exit;
     }
 
-    // If we've got a specific class name to look for, go get it now.
+    // If we've got a specific class name to look for, go get it now.  Do this by finding the
+	// type corresponding to the given name.  This may not be a generic type.
     if (cn[0] != L'\0')
     {
-        hr = ResolveClassName(cn, pDM, pTD);
+		DebuggerModule *module;
+		mdTypeDef token;
+        hr = ResolveClassName(cn, &module, &token);
 
         if (FAILED(hr))
             goto exit;
+
+		ICorDebugClass *iclass;
+		module->GetICorDebugModule()->GetClassFromToken(token, &iclass);
+		if (FAILED(hr)) 
+			goto exit;
+
+		iclass->GetType(0, NULL, &itype);
+		if (FAILED(hr)) 
+		{
+			RELEASE(iclass);
+			goto exit;
+		}
+		RELEASE(iclass);
+
     }
-    else
+
+	DebuggerModule *module;
+	mdTypeDef token;
+	itype->AddRef();  // add extra ref to input type
+	do 
+	{
+
+		module = ModuleOfType(itype);
+		token = TokenOfType(itype);
+
+		if (module == NULL)
+			goto exit;
+		// Now get the field off of this class.
+		hr = module->GetMetaData()->FindField(token, fn, NULL, 0, pFD);
+
+        if (SUCCEEDED(hr)) 
+			break;
+		else
+		{
+			ICorDebugType *isupertype;
+			hr = itype->GetBase(&isupertype);
+			RELEASE (itype);
+			if (FAILED(hr))
+				break;
+ 	        // Release - GetBase does an AddRef.
+			itype = isupertype;
+		} 
+
+	} while(itype);
+
+    if (itype == NULL || FAILED(hr) || TypeFromToken(*pFD) != mdtFieldDef)
     {
-        // No specific class name, so we're just using the existing
-        // module and class.
-        *pDM = currentDM;
-        *pTD = currentTD;
-    }
-
-retry:
-    // Now get the field off of this class.
-    hr = (*pDM)->GetMetaData()->FindField(*pTD, fn, NULL, 0, pFD);
-
-    if (FAILED(hr))
-    {
-        // Perhaps its a field on a super class?
-        mdToken parentTD;
-        hr = (*pDM)->GetMetaData()->GetTypeDefProps(*pTD,
-                                                    NULL, 0, NULL,
-                                                    NULL, 
-                                                    &parentTD);
-
-        if (SUCCEEDED(hr))
-        {
-            if ((TypeFromToken(parentTD) == mdtTypeRef) &&
-                (parentTD != mdTypeRefNil))
-            {
-                hr = ResolveTypeRef(*pDM, parentTD, pDM, pTD);
-
-                if (SUCCEEDED(hr))
-                    goto retry;
-            }
-            else if ((TypeFromToken(parentTD) == mdtTypeDef) &&
-                     (parentTD != mdTypeDefNil))
-            {
-                *pTD = parentTD;
-                goto retry;
-            }
-        }
-
         hr = E_FAIL;
         goto exit;
     }
+	*pIType = itype;
 
-    if (TypeFromToken(*pFD) != mdtFieldDef)
-    {
-        hr = E_FAIL;
-        goto exit;
-    }
-    
-    // Finally, figure out if its static or not.
+	// Finally, figure out if its static or not.
     DWORD attr;
-    hr = (*pDM)->GetMetaData()->GetFieldProps(*pFD, NULL, NULL, 0, NULL, &attr,
+    hr = module->GetMetaData()->GetFieldProps(*pFD, NULL, NULL, 0, NULL, &attr,
                                               NULL, NULL, NULL, NULL, NULL);
 
     if (FAILED(hr))
@@ -4991,9 +5249,6 @@ retry:
     else
         *pbIsStatic = false;
     
-    // Get the ICorDebugClass to go with the class we're working with.
-    hr = (*pDM)->GetICorDebugModule()->GetClassFromToken(*pTD, pIClass);
-
 exit:
     if (fn)
         delete [] fn;
@@ -5507,6 +5762,7 @@ BOOL DebuggerShell::PrintCurrentInstruction(unsigned int around,
                                                 offset,
                                                 startAddr);
     
+    BYTE*                   nativeCode = NULL;
     ICorDebugCode *icode;
     ICorDebugILFrame *ilFrame;
     hr = m_rawCurrentFrame->QueryInterface(IID_ICorDebugILFrame,
@@ -5591,7 +5847,8 @@ BOOL DebuggerShell::PrintCurrentInstruction(unsigned int around,
     WCHAR buffer[1024];
 
 
-    if (FAILED(function->LoadCode(!isIL)))
+	// GENERICS: when native, get the code from the frame, not the function.
+    if (isIL && FAILED(function->LoadCode(!isIL)))
     {
         Write(L"Unable to provide disassembly.\n");
         return (FALSE);
@@ -5607,8 +5864,39 @@ BOOL DebuggerShell::PrintCurrentInstruction(unsigned int around,
     }
     else
     {
-        codeStart = function->m_nativeCode;
-        codeEnd = function->m_nativeCode + function->m_nativeCodeSize;
+  	    // GENERICS: when native, get the code from the frame, not the function.
+		// This means we get exactly the right native code regardless of which
+		// native version of the function we are running.
+		ICorDebugCode *inativecode;
+		hr = m_rawCurrentFrame->GetCode(&inativecode);
+
+		if (FAILED(hr))
+		{
+			g_pShell->ReportError(hr);
+			return (FALSE);
+		}
+
+		ULONG32 nativeCodeSize;
+        inativecode->GetSize(&nativeCodeSize);	
+
+        nativeCode = new BYTE [nativeCodeSize];
+        _ASSERTE(nativeCode != NULL);
+
+        if (nativeCode == NULL)
+        {
+            inativecode->Release();
+            return (E_OUTOFMEMORY);
+        }
+
+		ULONG32 fetchedSize;
+        hr = inativecode->GetCode(0, nativeCodeSize, nativeCodeSize, 
+                            nativeCode, &fetchedSize);
+
+        codeStart = nativeCode;
+        codeEnd = nativeCode + fetchedSize;
+
+		RELEASE(inativecode);
+
     }
     
     if (around == 0)
@@ -5710,6 +5998,8 @@ BOOL DebuggerShell::PrintCurrentInstruction(unsigned int around,
         }
     }
     
+	if (nativeCode)
+		delete [] nativeCode;
 
 
     return TRUE;
@@ -8205,7 +8495,7 @@ bool DebuggerShell::ShouldHandleSpecificException(ICorDebugValue *pException)
     if (FAILED(hr))
         goto Exit;
 
-    // Snagg the object's class.
+    // Snagg the object's class.                                                                                    
     hr = iobject->GetClass(&iclass);
     
     if (FAILED(hr))
@@ -8414,6 +8704,11 @@ HRESULT SigFormat::FormatSig()
     // Calling convention
     ULONG conv = _sigBlob[cb++];
 
+    // Type arg count
+    ULONG cTyArgs = 0;
+    if (conv & IMAGE_CEE_CS_CALLCONV_GENERIC)
+      cb += CorSigUncompressData(&_sigBlob[cb], &cTyArgs);
+
     // Arg count
     ULONG cArgs;
     cb += CorSigUncompressData(&_sigBlob[cb], &cArgs);
@@ -8478,6 +8773,13 @@ ULONG SigFormat::AddType(PCCOR_SIGNATURE sigBlob)
     case ELEMENT_TYPE_STRING:   AddString(L"String"); break;
     case ELEMENT_TYPE_I:        AddString(L"Int"); break;
     case ELEMENT_TYPE_U:        AddString(L"UInt"); break;
+
+            case ELEMENT_TYPE_WITH:
+            case ELEMENT_TYPE_VAR:
+            case ELEMENT_TYPE_MVAR:
+                _ASSERTE(!"Not yet implemented!");
+                break;
+
 
     case ELEMENT_TYPE_VALUETYPE:
     case ELEMENT_TYPE_CLASS:

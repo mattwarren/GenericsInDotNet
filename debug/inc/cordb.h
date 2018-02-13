@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -89,6 +94,9 @@ class CordbNativeFrame;
 class CordbObjectValue; 
 class CordbEnCErrorInfo;
 class CordbEnCErrorInfoEnum;
+class Instantiation;
+class CordbType;
+class CordbJITInfo;
 
 class CorpubPublish;
 class CorpubProcess;
@@ -259,7 +267,9 @@ typedef enum {
     enumCordbRCEventThread, //  34
     enumCordbNativeFrame,   //  35
     enumCordbObjectValue,   //  36
-    enumMaxDerived,         //  37
+    enumCordbType, //  37
+    enumCordbJITInfo, //  38
+    enumMaxDerived,         //  39
     enumMaxThis = 1024
 } enumCordbDerived;
 
@@ -278,8 +288,12 @@ public:
     enumCordbDerived m_type;
 #endif
     
-public: 
+// GENERIC: made this private as I'm changing the use of m_id for CordbClass, and
+// I want to make sure I catch all the places where m_id is used directly and cast
+// to/from tokens and/or (void*).
     UINT_PTR    m_id;
+
+public: 
     LONG        m_refCount;
 
     CordbBase(UINT_PTR id, enumCordbDerived type)
@@ -1072,6 +1086,15 @@ public:
     COM_METHOD Attach (void);
     COM_METHOD GetID (ULONG32 *pId);
 
+    COM_METHOD GetArrayOrPointerType(CorElementType elementType,
+                                     ULONG32 nRank,
+                                     ICorDebugType *pTypeArg, 
+                                     ICorDebugType **ppType);
+
+    COM_METHOD GetFunctionPointerType(ULONG32 nTypeArgs,
+                                      ICorDebugType *ppTypeArgs[], 
+                                      ICorDebugType **ppType);
+
     void Lock (void)
     { 
         LOCKCOUNTINCL("Lock in cordb.h");                               \
@@ -1092,6 +1115,7 @@ public:
     BOOL IsMarkedForDeletion (void) { return m_fMarkedForDeletion;}
 
 
+	CordbProcess *GetProcess() { return m_pProcess; }
 public:
 
     BOOL                m_fAttached;
@@ -1106,6 +1130,14 @@ public:
     CordbHashTable      m_assemblies;
     CordbHashTable      m_modules;
     CordbHashTable      m_breakpoints;
+
+    CordbHashTable      m_sharedtypes;   // Unique objects that represent the use of some
+	                                         // basic ELEMENT_TYPE's as type parameters.  These
+	                                         // are shared acrosss the entire process.  We could
+	                                         // go and try to find the classes corresponding to these
+	                                         // element types but it seems simpler just to keep
+	                                         // them as special cases.
+
 
 private:
     bool                m_synchronizedAD; // to be used later
@@ -1835,12 +1867,13 @@ public:
                            SIZE_T functionRVA,
                            CordbFunction** ppFunction);
     CordbClass* LookupClass(mdTypeDef classToken);
-    HRESULT CreateClass(mdTypeDef classToken,
-                        CordbClass** ppClass);
+    HRESULT LookupOrCreateClass(mdTypeDef classToken, CordbClass** ppClass);
+    HRESULT CreateClass(mdTypeDef classToken, CordbClass** ppClass);
     HRESULT LookupClassByToken(mdTypeDef token, CordbClass **ppClass);
     HRESULT LookupClassByName(LPWSTR fullClassName,
                               CordbClass **ppClass);
     HRESULT ResolveTypeRef(mdTypeRef token, CordbClass **ppClass);
+    HRESULT ResolveTypeRefOrDef(mdToken token, CordbClass **ppClass);
     HRESULT SaveMetaDataCopyToStream(IStream *pIStream);
 
     //-----------------------------------------------------------
@@ -1943,6 +1976,167 @@ class CordbSyncBlockFieldTable : public CHashTableAndData<CNewData>
 };
 
 
+/* ------------------------------------------------------------------------- *
+ * GENERICS: struct used to store the information that
+ * specify instantiations....  No AddRef's etc. performed on any inputs....
+ * ------------------------------------------------------------------------- */
+
+class Instantiation
+{
+public:
+	Instantiation() 
+		: m_cInst(0), m_ppInst(NULL), m_cClassTyPars (0) 
+	{ }
+
+	Instantiation(unsigned int _cClassInst, CordbType **_ppClassInst) 
+		: m_cInst(_cClassInst), m_ppInst(_ppClassInst), m_cClassTyPars(_cClassInst) 
+	{ }
+
+	Instantiation(unsigned int _cInst, CordbType **_ppInst, unsigned int numClassTyPars) 
+		: m_cInst(_cInst), m_ppInst(_ppInst),
+		m_cClassTyPars (numClassTyPars) 
+	{ }
+
+	Instantiation(const Instantiation &inst) 
+		: m_cInst(inst.m_cInst), m_ppInst(inst.m_ppInst), m_cClassTyPars (inst.m_cClassTyPars) 
+	{ }
+
+	unsigned int m_cInst;
+	CordbType **m_ppInst;
+	unsigned int m_cClassTyPars;
+};
+
+//------------------------------------------------------------------------
+// Instantiated signatures (signatures in a context)
+//------------------------------------------------------------------------
+
+
+
+class CordbType : public CordbBase, public ICorDebugType
+{
+public:
+    CordbType(CordbAppDomain *appdomain, CorElementType ty, unsigned int rank);
+    CordbType(CordbAppDomain *appdomain, CorElementType ty, CordbClass *c);
+    CordbType(CordbType *tycon, CordbType *tyarg);
+    virtual ~CordbType();
+    virtual void Neuter();
+    // If you want to force the init to happen even if we think the class
+    // is up to date, set fForceInit to TRUE
+    HRESULT Init(BOOL fForceInit);
+
+    //-----------------------------------------------------------
+    // IUnknown
+    //-----------------------------------------------------------
+
+    ULONG STDMETHODCALLTYPE AddRef();
+    ULONG STDMETHODCALLTYPE Release();
+    COM_METHOD QueryInterface(REFIID riid, void **ppInterface);
+
+    //-----------------------------------------------------------
+    // ICorDebugType
+    //-----------------------------------------------------------
+
+    COM_METHOD GetType(CorElementType *ty);
+    COM_METHOD GetClass(ICorDebugClass **ppClass);
+    COM_METHOD EnumerateTypeParameters(ICorDebugTypeEnum **ppTyParEnum);
+    COM_METHOD GetFirstTypeParameter(ICorDebugType **ppType);
+    COM_METHOD GetBase(ICorDebugType **ppType);
+    COM_METHOD GetRank(ULONG32 *pnRank);
+
+    //-----------------------------------------------------------
+    // Non-COM members
+    //-----------------------------------------------------------
+
+    // Basic constructor operations for the algebra of types.  
+    // These all create unique objects within an AppDomain. 
+    // Some information is currently lost (see MkCmodType & MkArrayType)
+
+    // This one is used to create simple types, e.g. int32, int64, typedbyref etc. 
+    static HRESULT MkNullaryType(CordbAppDomain *appdomain, CorElementType et, CordbType **ppType);
+
+    // This one is used to create array, pointer and byref types
+    static HRESULT MkUnaryType(CordbAppDomain *appdomain, CorElementType et, ULONG rank, CordbType *arg, CordbType **ppType);
+
+    // This one is used to create function pointer types.  et must be ELEMENT_TYPE_FNPTR
+    static HRESULT MkNaryType(CordbAppDomain *appdomain, CorElementType et, const Instantiation &inst, CordbType **ppType);
+
+    // This one is used to class and value class types, e.g. "class MyClass" or "class ArrayList<int>"
+    static HRESULT MkConstructedType(CordbAppDomain *appdomain, CorElementType et, CordbClass *cl, const Instantiation &inst, CordbType **ppType);
+
+	// Some derived constructors...
+    static HRESULT MkNonGenericType(CordbAppDomain *appdomain, CorElementType et, CordbClass *cl, CordbType **ppType);
+    static HRESULT MkNaturalNonGenericType(CordbAppDomain *appdomain, CordbClass *cl, CordbType **ppType);
+
+    //static HRESULT MkCmodType(CorElementType et, CordbModule *mod, mdToken tok, CordbType *arg, CordbType **ppType);
+
+	// Basic destructor operations over the algebra
+	CorElementType GetElementType();
+	CordbType *SkipFunkyModifiers();
+	void DestUnaryType(CordbType **pRes) ;
+	void DestConstructedType(CordbClass **pClass, Instantiation *pInst);
+	void DestNaryType(Instantiation *pInst);
+
+	// Derived operations over the algebra
+	// GENERICS: create from metadata
+	static HRESULT SigToType(CordbModule *module, PCCOR_SIGNATURE pvSigBlob, const Instantiation &inst, CordbType **pRes);
+
+	// GENERICS: create from the data received from the left-side
+	static HRESULT TypeDataToType(CordbAppDomain *appdomain, DebuggerIPCE_ExpandedTypeData *data, CordbType **pRes); 
+	static HRESULT TypeDataToType(CordbAppDomain *appdomain, DebuggerIPCE_BasicTypeData *data, CordbType **pRes); 
+
+    static HRESULT InstantiateFromTypeHandle(CordbAppDomain *appdomain, REMOTE_PTR typeHandle, CorElementType et, CordbClass *tycon, CordbType **pRes);
+
+	// GENERIC: prepare data to send back to left-side during Init()
+	void CordbType::TypeToTypeData(DebuggerIPCE_BasicTypeData *data);
+	void CordbType::TypeToTypeData(DebuggerIPCE_ExpandedTypeData *data);
+
+	// These are available after Init() has been called....
+	HRESULT GetObjectSize(ULONG32 *res);
+    HRESULT GetFieldInfo(mdFieldDef fldToken, DebuggerIPCE_FieldData **ppFieldData);
+    
+    CordbAppDomain *GetAppDomain() { return m_appdomain; }
+    CordbProcess *GetProcess() { return m_appdomain->GetProcess(); }
+
+    //-----------------------------------------------------------
+    // Data members
+    //-----------------------------------------------------------
+
+public:
+	CorElementType m_elementType;
+	CordbAppDomain *m_appdomain; // Valid for all E_T
+	CordbClass *m_class; // Only set for E_T_CLASS and E_T_VALUETYPE
+	ULONG m_rank; // Only set for E_T_ARRAY etc.
+
+    Instantiation           m_inst;
+    CordbHashTable          m_spinetypes; // A unique mapping from CordbType objects that are
+	                                      // type parameters to CordbType objects.  Each mapping
+	                                      // represents the use of the containing type as  
+	                                      // type constructor.  e.g. If the containing type
+	                                      // is CordbType(CordbClass "List") then the table here
+	                                      // will map parameters such as (CordbType(CordbClass "String")) to
+	                                      // the constructed type CordbType(CordbClass "List", <CordbType(CordbClass "String")>)
+	
+	SIZE_T                  m_objectSize;  // Valid after Init(), only for E_T_VALUETYPE, and only 
+	                                       // if type is a constructed type, i.e. m_class->m_typarCount != 0.
+
+	void *                  m_typeHandle;  // Valid after Init(), only for E_T_VALUETYPE and E_T_CLASS, and  
+	                                       // only if type is a constructed type, i.e. m_class->m_typarCount != 0.
+ 	                                       // Otherwise go via the shared field info in m_class.
+
+    // DON'T KEEP POINTERS TO ELEMENTS OF m_fields AROUND!!
+    // We keep pointers into fldFullSig, but that's memory that's
+    // elsewhere.
+    // This may be deleted if the class gets EnC'd
+    DebuggerIPCE_FieldData *m_instancefields;// Valid after Init(), only for E_T_VALUETYPE and E_T_CLASS, and only 
+	                                 // if type is a constructed type, i.e. m_class->m_typarCount != 0.
+	                                 // Otherwise go via the shared field info in m_class.  Also, all information
+	                                 // on static fields is stored in the shared fields in m_class.
+    SIZE_T                  m_EnCCounterLastSync;
+
+private:
+	static HRESULT MkTyAppType(CordbAppDomain *appdomain, CordbType *tycon, const Instantiation &inst, CordbType **pRes);
+
+};
 
 /* ------------------------------------------------------------------------- *
  * Class class
@@ -1950,7 +2144,11 @@ class CordbSyncBlockFieldTable : public CHashTableAndData<CNewData>
 
 class CordbClass : public CordbBase, public ICorDebugClass
 {
+private:
+    // GENERICS: type constructions
+    CordbClass(CordbClass *root, CordbType *parameter);
 public:
+    //CordbClass(CordbModule* m, mdTypeDef token);
     CordbClass(CordbModule* m, mdTypeDef token);
     virtual ~CordbClass();
     virtual void Neuter();
@@ -1978,6 +2176,7 @@ public:
                                    ICorDebugValue **ppValue);
     COM_METHOD GetModule(ICorDebugModule **pModule);
     COM_METHOD GetToken(mdTypeDef *pTypeDef);
+    COM_METHOD GetType(ULONG32 cTypeArgs, ICorDebugType **ppTypeArgs, ICorDebugType **ppType);
 
     //-----------------------------------------------------------
     // Convenience routines
@@ -1998,10 +2197,17 @@ public:
         return m_module->GetAppDomain();
     }
 
-    HRESULT GetFieldSig(mdFieldDef fldToken, 
+    static HRESULT GetFieldSig(CordbModule *module, mdFieldDef fldToken, 
                         DebuggerIPCE_FieldData *pFieldData);
 
-    HRESULT GetSyncBlockField(mdFieldDef fldToken, 
+    static HRESULT SearchFieldInfo(CordbModule *module, 
+		                                unsigned int cData, 
+		                                DebuggerIPCE_FieldData *data, 
+										mdTypeDef classToken, 
+										mdFieldDef fldToken, 
+										DebuggerIPCE_FieldData **ppFieldData);
+
+	HRESULT GetSyncBlockField(mdFieldDef fldToken, 
                               DebuggerIPCE_FieldData **ppFieldData,
                               CordbObjectValue *object);
 
@@ -2013,12 +2219,12 @@ public:
     // is up to date, set fForceInit to TRUE
     HRESULT Init(BOOL fForceInit);
     HRESULT GetFieldInfo(mdFieldDef fldToken, DebuggerIPCE_FieldData **ppFieldData);
-    HRESULT GetObjectSize(ULONG32 *pObjectSize);
     HRESULT IsValueClass(bool *pIsValueClass);
-    HRESULT GetThisSignature(ULONG *pcbSigBlob, PCCOR_SIGNATURE *ppvSigBlob);
+    HRESULT GetThisType(const Instantiation &inst, CordbType **res);
     static HRESULT PostProcessUnavailableHRESULT(HRESULT hr, 
                                IMetaDataImport *pImport,
                                mdFieldDef fieldDef);
+    mdTypeDef GetTypeDef() { return (mdTypeDef)m_id; }
 
     //-----------------------------------------------------------
     // Data members
@@ -2028,8 +2234,20 @@ public:
     BOOL                    m_loadEventSent;
     bool                    m_hasBeenUnloaded;
 
-private:
-    CordbModule*            m_module;
+	// [m_classtypes] is a unique mapping from CorElementType
+	// to CordbType objects.  Only E_T_CLASS and E_T_VALUECLASS
+	// can be in the domain of the hash table.  The entries represent
+	// the use of the class as types - normal classes can only be
+	// used with E_T_CLASS therefore that will be the entry, but
+	// in principle according to the ECMA specs value types
+	// can be used with either E_T_CLASS or E_T_VALUETYPE to indicate
+	// boxed or unboxed valuetypes.
+	//
+	//
+	CordbHashTable          m_classtypes;
+    CordbModule*            m_module; 
+    mdTypeDef               m_token;  // the token for the type constructor - m_id cannot be used for constructed types
+	unsigned int            m_typarCount; // 0 if the type is non-generic
 
     // Since GetProcess()->m_EnCCounter is init'd to 1, we
     // should init m_EnCCounterLastSyncClass to 0, so that the class will
@@ -2037,7 +2255,6 @@ private:
     SIZE_T                  m_EnCCounterLastSyncClass;
     UINT                    m_continueCounterLastSync;
     bool                    m_isValueClass;
-    SIZE_T                  m_objectSize;
     unsigned int            m_instanceVarCount;
     unsigned int            m_staticVarCount;
     REMOTE_PTR              m_staticVarBase;
@@ -2047,27 +2264,92 @@ private:
     // elsewhere.
     // This may be deleted if the class gets EnC'd
     DebuggerIPCE_FieldData *m_fields;
-    ULONG                   m_thisSigSize;
-    BYTE                    m_thisSig[8]; // must be big enough to hold a
-                                          // valid object signature.
-                                          
+
     CordbSyncBlockFieldTable m_syncBlockFieldsStatic; // if we do an EnC after this
                                 // class is loaded (in the debuggee), then the
                                 // new fields will be hung off the sync block,
                                 // thus available on a per-instance basis.
+
+	SIZE_T                  m_objectSize;  // Note: this is NOT valid for constructed value types,
+	                                       // e.g. value type Pair<DateTime,int>.  Use CordbType::m_objectSize instead.
 };
 
 
+/* ------------------------------------------------------------------------- *
+ * TypeParameter enumerator class
+ * ------------------------------------------------------------------------- */
+
+class CordbTypeEnum : public CordbBase, public ICorDebugTypeEnum
+{
+public:
+    CordbTypeEnum(unsigned int cTypars, CordbType **ppTypars);
+    virtual ~CordbTypeEnum() ;
+
+    //-----------------------------------------------------------
+    // IUnknown
+    //-----------------------------------------------------------
+
+    ULONG STDMETHODCALLTYPE AddRef()
+    {
+        return (BaseAddRef());
+    }
+    ULONG STDMETHODCALLTYPE Release()
+    {
+        return (BaseRelease());
+    }
+    COM_METHOD QueryInterface(REFIID riid, void **ppInterface);
+
+    //-----------------------------------------------------------
+    // ICorDebugEnum
+    //-----------------------------------------------------------
+
+    COM_METHOD Skip(ULONG celt);
+    COM_METHOD Reset(void);
+    COM_METHOD Clone(ICorDebugEnum **ppEnum);
+    COM_METHOD GetCount(ULONG *pcelt);
+
+    //-----------------------------------------------------------
+    // ICorDebugTypeEnum
+    //-----------------------------------------------------------
+
+    COM_METHOD Next(ULONG celt, ICorDebugType *Types[], ULONG *pceltFetched);
+
+private:
+	CordbType **m_ppTypars;
+    UINT   m_iCurrent;
+    UINT   m_iMax;
+};
+
+
+
+
+
 typedef CUnorderedArray<CordbCode*,11> UnorderedCodeArray;
-const int DJI_VERSION_INVALID = 0;
-const int DJI_VERSION_MOST_RECENTLY_JITTED = 1;
-const int DJI_VERSION_MOST_RECENTLY_EnCED = 2;
+const int DMI_VERSION_INVALID = 0;
+const int DMI_VERSION_MOST_RECENTLY_JITTED = 1;
+const int DMI_VERSION_MOST_RECENTLY_EnCED = 2;
 HRESULT UnorderedCodeArrayAdd(UnorderedCodeArray *pThis, CordbCode *pCode);
 CordbCode *UnorderedCodeArrayGet(UnorderedCodeArray *pThis, SIZE_T nVersion);
 
 /* ------------------------------------------------------------------------- *
  * Function class
+ *
+ * <REVIEW>The CordbFunction class now keeps a multiple JITInfo
+ * structures in a hash table indexed by tokens provided by the left-side.
+ * In 99.9% of cases this hash table will only contain one entry - we only
+ * use a hashtable to cover the case where we have multiple JITtings of
+ * a single version of a function, in particular multiple JITtings of generic
+ * code under different instantiations. This will increase space usage.  
+ * The way around it is to store one CordbJITInfo in-line in teh CordbFunction
+ * class, or at least store one such pointer so no hash table will normally
+ * be needed.  This is similar to other cases, e.g. the hash table in 
+ * CordbClass used to indicate different CordbTypes made from that class - 
+ * again in the normal case these tables will only contain one element.
+ *
+ * However, for the moment I've focused on correctness and we can minimize
+ * this space usage in due course.</REVIEW>
  * ------------------------------------------------------------------------- */
+
 const BOOL bNativeCode = FALSE;
 const BOOL bILCode = TRUE;
 
@@ -2115,27 +2397,23 @@ public:
     //-----------------------------------------------------------
     // Internal members
     //-----------------------------------------------------------
-    HRESULT CreateCode(BOOL isIL, REMOTE_PTR startAddress, SIZE_T size,
+    static HRESULT LookupOrCreateFromFuncData(CordbProcess *pProcess, CordbAppDomain *pAppDomain, DebuggerIPCE_FuncData *data, CordbFunction **ppRes);
+
+	HRESULT CreateCode(REMOTE_PTR startAddress, SIZE_T size,
                        CordbCode** ppCode,
-                       SIZE_T nVersion, void *CodeVersionToken,
-                       REMOTE_PTR ilToNativeMapAddr,
-                       SIZE_T ilToNativeMapSize);
+                       SIZE_T nVersion, void* ilCodeVersionToken);
     HRESULT Populate(SIZE_T nVersion);
-    HRESULT ILVariableToNative(DWORD dwIndex,
-                               SIZE_T ip,
-                               ICorJitInfo::NativeVarInfo **ppNativeInfo);
-    HRESULT LoadNativeInfo(void);
-    HRESULT GetArgumentType(DWORD dwIndex, ULONG *pcbSigBlob,
-                            PCCOR_SIGNATURE *ppvSigBlob);
-    HRESULT GetLocalVariableType(DWORD dwIndex, ULONG *pcbSigBlob,
-                                 PCCOR_SIGNATURE *ppvSigBlob);
 
     void SetLocalVarToken(mdSignature  localVarSigToken);
     
     HRESULT LoadLocalVarSig(void);
     HRESULT LoadSig(void);
     HRESULT UpdateToMostRecentEnCVersion(void);
-    
+
+    HRESULT GetArgumentType(DWORD dwIndex, const Instantiation &inst, CordbType **pType);
+    HRESULT GetLocalVariableType(DWORD dwIndex, const Instantiation &inst, CordbType **type);
+
+
     //-----------------------------------------------------------
     // Convenience routines
     //-----------------------------------------------------------
@@ -2158,32 +2436,32 @@ public:
     //-----------------------------------------------------------
     // Internal routines
     //-----------------------------------------------------------
-    HRESULT GetCodeByVersion( BOOL fGetIfNotPresent, BOOL fIsIL, 
+    HRESULT GetCodeByVersion( BOOL fGetIfNotPresent, 
         SIZE_T nVer, CordbCode **ppCode );
+
+    HRESULT LookupJITInfo( void *nativeCodeVersionToken, CordbJITInfo **ppInfo );
 
     //-----------------------------------------------------------
     // Data members
     //-----------------------------------------------------------
 
 public:
-    CordbModule             *m_module;
+
+	CordbModule             *m_module;
     CordbClass              *m_class;
     UnorderedCodeArray       m_rgilCode;
-    UnorderedCodeArray       m_rgnativeCode;
+	CordbHashTable           m_jitinfos;
+
     mdMethodDef              m_token;
     SIZE_T                   m_functionRVA;
 
     // Update m_nativeInfo whenever we do a new EnC.
-    BOOL                     m_nativeInfoValid;
     SIZE_T                   m_nVersionLastNativeInfo; // Version of the JITted code
         // that we have m_nativeInfo for.  So we call GetCodeByVersion (most recently
         // JITTED, or most recently EnC'd as the version number), and if
         // m_continue...Synch doesn't match the process's m_EnCCounter, then Populate,
         // which updates m_nVersionMostRecentEnC & m_continueCounterLastSynch.
         // LoadNativeInfo will do this, then make sure that m_nativeInfo is current.
-    unsigned int             m_argumentCount;
-    unsigned int             m_nativeInfoCount;
-    ICorJitInfo::NativeVarInfo *m_nativeInfo;
 
     PCCOR_SIGNATURE          m_methodSig;
     ULONG                    m_methodSigSize;
@@ -2200,8 +2478,87 @@ public:
         // this holds the number of the most recent version of the function that
         // the runtime has.
 
-    
-    bool                     m_isNativeImpl;
+	BOOL					 m_isNativeImpl; // Is the function implemented natively in the runtime??
+};
+
+/* ------------------------------------------------------------------------- *
+ * JITInfo class - one is created for each native code version of each method
+ * that is seen by the right-side.  If each method were JITted only once
+ * then this could go in CordbFunction (in V1 it was there).  
+ * ------------------------------------------------------------------------- */
+
+class CordbJITInfo : public CordbBase
+{
+public:
+    //-----------------------------------------------------------
+    // Create from scope and member objects.
+    //-----------------------------------------------------------
+    CordbJITInfo(CordbFunction *f, CordbCode *nativecode);
+    virtual ~CordbJITInfo();
+    virtual void Neuter();
+
+    //-----------------------------------------------------------
+    // IUnknown
+    //-----------------------------------------------------------
+
+    ULONG STDMETHODCALLTYPE AddRef()
+    {
+        return (BaseAddRef());
+    }
+    ULONG STDMETHODCALLTYPE Release()
+    {
+        return (BaseRelease());
+    }
+    COM_METHOD QueryInterface(REFIID riid, void **ppInterface);
+
+	//-----------------------------------------------------------
+    // Internal members
+    //-----------------------------------------------------------
+
+    HRESULT ILVariableToNative(DWORD dwIndex,
+                               SIZE_T ip,
+                               ICorJitInfo::NativeVarInfo **ppNativeInfo);
+    HRESULT LoadNativeInfo(void);
+
+    //-----------------------------------------------------------
+    // Convenience routines
+    //-----------------------------------------------------------
+
+    CordbProcess *GetProcess()
+    {
+        return (m_function->GetProcess());
+    }
+
+    CordbAppDomain *GetAppDomain()
+    {
+        return (m_function->GetAppDomain());
+    }
+
+    CordbModule *GetModule()
+    {
+        return m_function->GetModule();
+    }
+
+    CordbFunction *GetFunction()
+    {
+        return m_function;
+    }
+
+    //-----------------------------------------------------------
+    // Data members
+    //-----------------------------------------------------------
+
+public:
+
+	static HRESULT LookupOrCreateFromJITData(CordbFunction *pFunction, DebuggerIPCE_FuncData *currentFuncData, DebuggerIPCE_JITFuncData* currentJITFuncData, CordbJITInfo **ppRes);
+
+	CordbFunction           *m_function;
+    CordbCode               *m_nativecode;
+
+    unsigned int             m_nativeInfoCount;
+    ICorJitInfo::NativeVarInfo *m_nativeInfo;
+    BOOL                     m_nativeInfoValid;
+    unsigned int             m_argumentCount;
 };
 
 /* ------------------------------------------------------------------------- *
@@ -2214,9 +2571,12 @@ public:
     //-----------------------------------------------------------
     // Create from scope and member objects.
     //-----------------------------------------------------------
-    CordbCode(CordbFunction *m, BOOL isIL, REMOTE_PTR startAddress,
-              SIZE_T size, SIZE_T nVersion, void *CodeVersionToken,
-              REMOTE_PTR ilToNativeMapAddr, SIZE_T ilToNativeMapSize);
+	CordbCode(CordbFunction *m, REMOTE_PTR startAddress,
+		SIZE_T size, SIZE_T nVersion, void *ilCodeVersionToken);
+	CordbCode(CordbFunction *m, REMOTE_PTR startAddress,
+		SIZE_T size, SIZE_T nVersion, void *ilCodeVersionToken, void *nativeCodeVersionToken,
+		REMOTE_PTR ilToNativeMapAddr, SIZE_T ilToNativeMapSize);
+
     virtual ~CordbCode();
     virtual void Neuter();
 
@@ -2286,7 +2646,8 @@ public:
     SIZE_T                 m_nVersion;
     BYTE                  *m_rgbCode; //will be NULL if we can't fit it into memory
     UINT                   m_continueCounterLastSync;
-    void                  *m_CodeVersionToken;
+    void                  *m_ilCodeVersionToken;
+    void                  *m_nativeCodeVersionToken;
 
     REMOTE_PTR             m_ilToNativeMapAddr;
     SIZE_T                 m_ilToNativeMapSize;
@@ -2623,8 +2984,7 @@ private:
 class CordbFrame : public CordbBase, public ICorDebugFrame
 {
 public:
-    CordbFrame(CordbChain *chain, void *id,
-               CordbFunction *function, CordbCode *code,
+    CordbFrame(CordbChain *chain, void *id, bool native,
                SIZE_T ip, UINT iFrameInChain, CordbAppDomain *currentAppDomain);
 
     virtual ~CordbFrame();
@@ -2676,10 +3036,7 @@ public:
         return m_currentAppDomain;
     }
 
-    UINT_PTR GetID(void)
-    {
-        return m_id;
-    }
+	CordbFunction *GetFunction();
 
     //-----------------------------------------------------------
     // Data members
@@ -2688,12 +3045,11 @@ public:
 public:
     SIZE_T                  m_ip;
     CordbThread            *m_thread;
-    CordbFunction          *m_function;
-    CordbCode              *m_code;
     CordbChain             *m_chain;
     bool                    m_active;
     UINT                    m_iThisFrame;
     CordbAppDomain         *m_currentAppDomain;
+	bool m_native;
 };
 
 
@@ -2771,7 +3127,9 @@ public:
                  CordbFunction *function, CordbCode* code,
                  SIZE_T ip, void* sp, const void **localMap,
                  void* argMap, void* frameToken, bool active,
-                 CordbAppDomain *currentAppDomain);
+                 CordbAppDomain *currentAppDomain,
+				 const Instantiation &inst);
+    virtual void Neuter();
     virtual ~CordbILFrame();
 
     //-----------------------------------------------------------
@@ -2839,28 +3197,34 @@ public:
     COM_METHOD GetStackValue(DWORD dwIndex, ICorDebugValue **ppValue);
     COM_METHOD CanSetIP(ULONG32 nOffset);
 
+    COM_METHOD EnumerateTypeParameters(ICorDebugTypeEnum **ppTyParEnum);
+
     //-----------------------------------------------------------
     // Non-COM methods
     //-----------------------------------------------------------
 
-    HRESULT GetArgumentWithType(ULONG cbSigBlob,
-                                PCCOR_SIGNATURE pvSigBlob,
-                                DWORD dwIndex, 
-                                ICorDebugValue **ppValue);
-    HRESULT GetLocalVariableWithType(ULONG cbSigBlob,
-                                     PCCOR_SIGNATURE pvSigBlob,
-                                     DWORD dwIndex, 
-                                     ICorDebugValue **ppValue);
+    //HRESULT GetArgumentWithType(ULONG cbSigBlob,
+    //                            PCCOR_SIGNATURE pvSigBlob,
+    //                            DWORD dwIndex, 
+    //                            ICorDebugValue **ppValue);
+    //HRESULT GetLocalVariableWithType(ULONG cbSigBlob,
+    //                                 PCCOR_SIGNATURE pvSigBlob,
+    //                                 DWORD dwIndex, 
+    //                                 ICorDebugValue **ppValue);
     
     //-----------------------------------------------------------
     // Data members
     //-----------------------------------------------------------
 
+
 public:
     void             *m_sp;
+    CordbFunction          *m_function;
+    CordbCode              *m_code;
     REMOTE_PTR        m_localMap;
     REMOTE_PTR        m_argMap;
     void             *m_frameToken;
+	Instantiation     m_inst;
 };
 
 class CordbValueEnum : public CordbBase, public ICorDebugValueEnum
@@ -2927,7 +3291,7 @@ class CordbNativeFrame : public CordbFrame, public ICorDebugNativeFrame
 {
 public:
     CordbNativeFrame(CordbChain *chain, void *id,
-                     CordbFunction *function, CordbCode* code,
+                     CordbJITInfo *function, 
                      SIZE_T ip, DebuggerREGDISPLAY* rd, 
                      bool quicklyUnwound,
                      UINT iFrameInChain,
@@ -2995,32 +3359,55 @@ public:
                                      ULONG cbSigBlob,
                                      PCCOR_SIGNATURE pvSigBlob,
                                      ICorDebugValue **ppValue);
-    COM_METHOD GetLocalDoubleRegisterValue(CorDebugRegister highWordReg, 
+
+	COM_METHOD GetLocalDoubleRegisterValue(CorDebugRegister highWordReg, 
                                            CorDebugRegister lowWordReg, 
                                            ULONG cbSigBlob,
-                                           PCCOR_SIGNATURE pvSigBlob,
+										   PCCOR_SIGNATURE pvSigBlob,
                                            ICorDebugValue **ppValue);
+
     COM_METHOD GetLocalMemoryValue(CORDB_ADDRESS address,
                                    ULONG cbSigBlob,
-                                   PCCOR_SIGNATURE pvSigBlob,
+								   PCCOR_SIGNATURE pvSigBlob,
                                    ICorDebugValue **ppValue);
-    COM_METHOD GetLocalRegisterMemoryValue(CorDebugRegister highWordReg,
+
+	COM_METHOD GetLocalRegisterMemoryValue(CorDebugRegister highWordReg,
                                            CORDB_ADDRESS lowWordAddress, 
                                            ULONG cbSigBlob,
-                                           PCCOR_SIGNATURE pvSigBlob,
+										   PCCOR_SIGNATURE pvSigBlob,
                                            ICorDebugValue **ppValue);
+
     COM_METHOD GetLocalMemoryRegisterValue(CORDB_ADDRESS highWordAddress,
                                            CorDebugRegister lowWordRegister,
                                            ULONG cbSigBlob,
-                                           PCCOR_SIGNATURE pvSigBlob,
+										   PCCOR_SIGNATURE pvSigBlob,
                                            ICorDebugValue **ppValue);
+
     COM_METHOD CanSetIP(ULONG32 nOffset);
 
     //-----------------------------------------------------------
     // Non-COM members
     //-----------------------------------------------------------
 
-    void  *GetAddressOfRegister(CorDebugRegister regNum);
+    HRESULT GetLocalRegisterValue(CorDebugRegister reg, 
+                                     CordbType *type,
+                                     ICorDebugValue **ppValue);
+    HRESULT GetLocalDoubleRegisterValue(CorDebugRegister highWordReg, 
+                                           CorDebugRegister lowWordReg, 
+                                           CordbType *type,
+                                           ICorDebugValue **ppValue);
+    HRESULT GetLocalMemoryValue(CORDB_ADDRESS address,
+                                   CordbType *type,
+                                   ICorDebugValue **ppValue);
+    HRESULT GetLocalRegisterMemoryValue(CorDebugRegister highWordReg,
+                                           CORDB_ADDRESS lowWordAddress, 
+                                           CordbType *type,
+                                           ICorDebugValue **ppValue);
+    HRESULT GetLocalMemoryRegisterValue(CORDB_ADDRESS highWordAddress,
+                                           CorDebugRegister lowWordRegister,
+                                           CordbType *type,
+                                           ICorDebugValue **ppValue);
+    SIZE_T *GetAddressOfRegister(CorDebugRegister regNum);
     void  *GetLeftSideAddressOfRegister(CorDebugRegister regNum);
 
     //-----------------------------------------------------------
@@ -3031,6 +3418,7 @@ public:
     DebuggerREGDISPLAY m_rd;
     bool               m_quicklyUnwound;
     CordbJITILFrame*   m_JITILFrame;
+	CordbJITInfo*      m_jitinfo;
 };
 
 
@@ -3138,7 +3526,8 @@ public:
                     bool fVarArgFnx,
                     void *rpSig,
                     ULONG cbSig,
-                    void *rpFirstArg);
+                    void *rpFirstArg,
+				    void *methodDesc);
     virtual ~CordbJITILFrame();
     virtual void Neuter();
 
@@ -3182,12 +3571,15 @@ public:
     COM_METHOD GetStackDepth(ULONG32 *pDepth);
     COM_METHOD GetStackValue(DWORD dwIndex, ICorDebugValue **ppValue);
     COM_METHOD CanSetIP(ULONG32 nOffset);
+    COM_METHOD EnumerateTypeParameters(ICorDebugTypeEnum **ppTyParEnum);
 
     //-----------------------------------------------------------
     // Non-COM methods
     //-----------------------------------------------------------
 
-    HRESULT GetNativeVariable(ULONG cbSigBlob, PCCOR_SIGNATURE pvSigBlob,
+	CordbModule *GetModule() const { return m_ilCode->m_function->GetModule(); }
+
+    HRESULT GetNativeVariable(CordbType *type,
                               ICorJitInfo::NativeVarInfo *pJITInfo,
                               ICorDebugValue **ppValue);
 
@@ -3206,11 +3598,11 @@ public:
         return (m_nativeFrame->GetCurrentAppDomain());
     }
 
-    HRESULT GetArgumentWithType(ULONG cbSigBlob, PCCOR_SIGNATURE pvSigBlob,
-                                DWORD dwIndex, ICorDebugValue **ppValue);
-    HRESULT GetLocalVariableWithType(ULONG cbSigBlob,
-                                     PCCOR_SIGNATURE pvSigBlob, DWORD dwIndex, 
-                                     ICorDebugValue **ppValue);
+    //HRESULT GetArgumentWithType(ULONG cbSigBlob, PCCOR_SIGNATURE pvSigBlob,
+    //                            DWORD dwIndex, ICorDebugValue **ppValue);
+    //HRESULT GetLocalVariableWithType(ULONG cbSigBlob,
+    //                                 PCCOR_SIGNATURE pvSigBlob, DWORD dwIndex, 
+    //                                 ICorDebugValue **ppValue);
 
     // ILVariableToNative serves to let the frame intercept accesses
     // to var args variables.
@@ -3223,8 +3615,9 @@ public:
                                 ICorJitInfo::NativeVarInfo **ppNativeInfo);
 
     HRESULT GetArgumentType(DWORD dwIndex,
-                            ULONG *pcbSigBlob,
-                            PCCOR_SIGNATURE *ppvSigBlob);
+                            CordbType **pType);
+
+	HRESULT LoadTyParRepresentations();
 
     //-----------------------------------------------------------
     // Data members
@@ -3244,6 +3637,11 @@ public:
     ULONG             m_cbSig;
     void *            m_rpFirstArg;
     ICorJitInfo::NativeVarInfo * m_rgNVI;
+
+	void*             m_methodDesc;
+    Instantiation     m_tyParReps;
+	BOOL              m_tyParRepsLoaded;
+
 };
 
 /* ------------------------------------------------------------------------- *
@@ -3538,6 +3936,7 @@ public:
  * Value class
  * ------------------------------------------------------------------------- */
 
+
 class CordbValue : public CordbBase
 {
 public:
@@ -3545,48 +3944,19 @@ public:
     // Constructor/destructor
     //-----------------------------------------------------------
     CordbValue(CordbAppDomain *appdomain,
-               CordbModule* module,
-               ULONG cbSigBlob,
-               PCCOR_SIGNATURE pvSigBlob,
-               REMOTE_PTR remoteAddress,
+               CordbType *type,
+			   REMOTE_PTR remoteAddress,
                void *localAddress,
                RemoteAddress *remoteRegAddr,
-               bool isLiteral)
-    : CordbBase((ULONG)remoteAddress, enumCordbValue),
-      m_appdomain(appdomain),
-      m_module(module),
-      m_cbSigBlob(cbSigBlob),
-      m_pvSigBlob(pvSigBlob),
-      m_sigCopied(false),
-      m_size(0),
-      m_localAddress(localAddress),
-      m_isLiteral(isLiteral),
-      m_pParent(NULL)
-    {
-        if (remoteRegAddr != NULL)
-        {
-            _ASSERTE(remoteAddress == NULL);
-            m_remoteRegAddr = *remoteRegAddr;
-        }
-        else
-            m_remoteRegAddr.kind = RAK_NONE;
-
-        if (m_module)
-        {
-            m_process = m_module->GetProcess();
-            m_process->AddRef();
-        }
-        else
-            m_process = NULL;
-    }
+               bool isLiteral);
 
     virtual ~CordbValue()
     {
         if (m_process != NULL)
             m_process->Release();
         
-        if (m_pvSigBlob != NULL)
-            delete [] (BYTE*)m_pvSigBlob;
+        if (m_type)
+			m_type->Release();
 
         if (m_pParent != NULL)
             m_pParent->Release();
@@ -3613,10 +3983,7 @@ public:
     {
         VALIDATE_POINTER_TO_OBJECT(pType, CorElementType *);
     
-        //Get rid of funky modifiers
-        ULONG cb = _skipFunkyModifiersInSignature(m_pvSigBlob);
-        
-        *pType = (CorElementType) *(&m_pvSigBlob[cb]);
+		*pType = m_type->SkipFunkyModifiers()->m_elementType;
         return (S_OK);
     }
 
@@ -3643,10 +4010,7 @@ public:
     //-----------------------------------------------------------
 
     static HRESULT CreateValueByType(CordbAppDomain *appdomain,
-                                     CordbModule *module,
-                                     ULONG cbSigBlob,
-                                     PCCOR_SIGNATURE pvSigBlob,
-                                     CordbClass *optionalClass,
+                                     CordbType *type,
                                      REMOTE_PTR remoteAddress,
                                      void *localAddress,
                                      bool objectRefsInHandles,
@@ -3685,11 +4049,10 @@ public:
 public:
     CordbProcess    *m_process;
     CordbAppDomain  *m_appdomain;
-    CordbModule     *m_module;
-    ULONG            m_cbSigBlob;
-    PCCOR_SIGNATURE  m_pvSigBlob;
-    bool             m_sigCopied;   // Since the signature shouldn't change,
-                                    //  we only want to copy it once.
+    CordbType       *m_type; 
+
+    //bool             m_sigCopied;   // Since the signature shouldn't change,
+    //                                //  we only want to copy it once.
     ULONG32          m_size;
     void            *m_localAddress;
     RemoteAddress    m_remoteRegAddr; // register info on the Left Side.
@@ -3706,22 +4069,17 @@ class CordbGenericValue : public CordbValue, public ICorDebugGenericValue
 {
 public:
     CordbGenericValue(CordbAppDomain *appdomain,
-                      CordbModule *module,
-                      ULONG cbSigBlob,
-                      PCCOR_SIGNATURE pvSigBlob,
+                      CordbType *type,
                       REMOTE_PTR remoteAddress,
                       void *localAddress,
                       RemoteAddress *remoteRegAddr);
 
     CordbGenericValue(CordbAppDomain *appdomain,
-                      CordbModule *module,
-                      ULONG cbSigBlob,
-                      PCCOR_SIGNATURE pvSigBlob,
+                      CordbType *type,
                       DWORD highWord,
                       DWORD lowWord,
                       RemoteAddress *remoteRegAddr);
-    CordbGenericValue(ULONG cbSigBlob,
-                      PCCOR_SIGNATURE pvSigBlob);
+    CordbGenericValue(CordbType *type);
 
     //-----------------------------------------------------------
     // IUnknown
@@ -3792,15 +4150,12 @@ class CordbReferenceValue : public CordbValue, public ICorDebugReferenceValue
 {
 public:
     CordbReferenceValue(CordbAppDomain *appdomain,
-                        CordbModule *module,
-                        ULONG cbSigBlob,
-                        PCCOR_SIGNATURE pvSigBlob,
+                        CordbType *type,
                         REMOTE_PTR remoteAddress,
                         void *localAddress,
                         bool objectRefsInHandle,
                         RemoteAddress *remoteRegAddr);
-    CordbReferenceValue(ULONG cbSigBlob,
-                        PCCOR_SIGNATURE pvSigBlob);
+    CordbReferenceValue(CordbType *type);
     virtual ~CordbReferenceValue();
 
     //-----------------------------------------------------------
@@ -3864,7 +4219,7 @@ public:
     bool                     m_objectRefInHandle;
     bool                     m_specialReference;
     DebuggerIPCE_ObjectData  m_info;
-    CordbClass              *m_class;
+    CordbType               *m_realTypeOfTypedByref;
     CordbObjectValue        *m_objectStrong;
     CordbObjectValue        *m_objectWeak;
     UINT                    m_continueCounterLastSync;
@@ -3891,11 +4246,8 @@ class CordbObjectValue : public CordbValue, public ICorDebugObjectValue,
 
 public:
     CordbObjectValue(CordbAppDomain *appdomain,
-                     CordbModule *module,
-                     ULONG cbSigBlob,
-                     PCCOR_SIGNATURE pvSigBlob,
+                     CordbType *type,
                      DebuggerIPCE_ObjectData *pObjectData,
-                     CordbClass *objectClass,
                      bool fStrong,
                      void *token);
     virtual ~CordbObjectValue();
@@ -3945,7 +4297,12 @@ public:
     COM_METHOD GetManagedCopy(IUnknown **ppObject);
     COM_METHOD SetFromManagedCopy(IUnknown *pObject);
 
-    //-----------------------------------------------------------
+    COM_METHOD GetFieldValueForType(ICorDebugType *pType,
+                             mdFieldDef fieldDef,
+                             ICorDebugValue **ppValue);
+    COM_METHOD GetExactType(ICorDebugType **ppType);
+
+	//-----------------------------------------------------------
     // ICorDebugGenericValue
     //-----------------------------------------------------------
 
@@ -3982,7 +4339,6 @@ protected:
     BYTE                    *m_objectLocalVars; // var base in _this_ process
                                                 // points _into_ m_objectCopy
     BYTE                    *m_stringBuffer;    // points _into_ m_objectCopy
-    CordbClass              *m_class;
     UINT                     m_mostRecentlySynched; //Used in IsValid to figure
                                 // out if the process has been continued since
                                 // the last time the object has been updated.
@@ -4006,12 +4362,9 @@ class CordbVCObjectValue : public CordbValue, public ICorDebugObjectValue,
 {
 public:
     CordbVCObjectValue(CordbAppDomain *appdomain,
-                       CordbModule *module,
-                       ULONG cbSigBlob,
-                       PCCOR_SIGNATURE pvSigBlob,
+                       CordbType *type,
                        REMOTE_PTR remoteAddress,
                        void *localAddress,
-                       CordbClass *objectClass,
                        RemoteAddress *remoteRegAddr);
     virtual ~CordbVCObjectValue();
 
@@ -4064,6 +4417,10 @@ public:
     COM_METHOD IsValueClass(BOOL *pbIsValueClass);
     COM_METHOD GetManagedCopy(IUnknown **ppObject);
     COM_METHOD SetFromManagedCopy(IUnknown *pObject);
+    COM_METHOD GetFieldValueForType(ICorDebugType *pType,
+                             mdFieldDef fieldDef,
+                             ICorDebugValue **ppValue);
+    COM_METHOD GetExactType(ICorDebugType **ppType);
 
     //-----------------------------------------------------------
     // ICorDebugGenericValue
@@ -4077,7 +4434,8 @@ public:
     //-----------------------------------------------------------
 
     HRESULT Init(void);
-    HRESULT ResolveValueClass(void);
+    //HRESULT ResolveValueClass(void);
+    CordbClass *GetClass();
 
     //-----------------------------------------------------------
     // Data members
@@ -4085,7 +4443,6 @@ public:
 
 private:
     BYTE       *m_objectCopy;
-    CordbClass *m_class;
 };
 
 
@@ -4098,13 +4455,10 @@ class CordbBoxValue : public CordbValue, public ICorDebugBoxValue,
 {
 public:
     CordbBoxValue(CordbAppDomain *appdomain,
-                  CordbModule *module,
-                  ULONG cbSigBlob,
-                  PCCOR_SIGNATURE pvSigBlob,
+                  CordbType *type,
                   REMOTE_PTR remoteAddress,
                   SIZE_T objectSize,  
-                  SIZE_T offsetToVars,
-                  CordbClass *objectClass);
+                  SIZE_T offsetToVars);
     virtual ~CordbBoxValue();
 
     //-----------------------------------------------------------
@@ -4173,7 +4527,6 @@ public:
 
 private:
     SIZE_T      m_offsetToVars;
-    CordbClass *m_class;
 };
 
 /* ------------------------------------------------------------------------- *
@@ -4185,11 +4538,8 @@ class CordbArrayValue : public CordbValue, public ICorDebugArrayValue,
 {
 public:
     CordbArrayValue(CordbAppDomain *appdomain,
-                    CordbModule *module,
-                    ULONG cbSigBlob,
-                    PCCOR_SIGNATURE pvSigBlob,
-                    DebuggerIPCE_ObjectData *pObjectInfo,
-                    CordbClass *elementClass);
+                    CordbType *type,
+                    DebuggerIPCE_ObjectData *pObjectInfo);
     virtual ~CordbArrayValue();
 
     //-----------------------------------------------------------
@@ -4271,7 +4621,7 @@ public:
 
 private:
     DebuggerIPCE_ObjectData  m_info;
-    CordbClass              *m_class;
+    CordbType               *m_elemtype;
     BYTE                    *m_objectCopy;    
     DWORD                   *m_arrayLowerBase; // points _into_ m_objectCopy
     DWORD                   *m_arrayUpperBase; // points _into_ m_objectCopy
@@ -4336,6 +4686,8 @@ public:
                           DebuggerIPCE_FuncEvalArgData *argData);
     HRESULT SendCleanup(void);
 
+    HRESULT CreateValue(CordbType *pType,
+                           ICorDebugValue **ppValue);
     //-----------------------------------------------------------
     // Data members
     //-----------------------------------------------------------

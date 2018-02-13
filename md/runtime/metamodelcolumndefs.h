@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -364,6 +369,24 @@
     SCHEMA_ITEM_RID(NestedClass, NestedClass, TypeDef)
     SCHEMA_ITEM_RID(NestedClass, EnclosingClass, TypeDef)
     SCHEMA_TABLE_END(NestedClass)
-    
+
+    //-------------------------------------------------------------------------
+    // GenericPar
+    SCHEMA_TABLE_START(GenericPar)
+    SCHEMA_ITEM(GenericPar, USHORT, Number)
+    SCHEMA_ITEM(GenericPar, USHORT, Flags)
+    SCHEMA_ITEM_CDTKN(GenericPar, Owner, TypeOrMethodDef)
+    SCHEMA_ITEM_STRING(GenericPar, Name)
+    SCHEMA_ITEM_CDTKN(GenericPar, Kind, TypeDefOrRef)
+    SCHEMA_ITEM_CDTKN(GenericPar, Constraint, TypeDefOrRef)
+    SCHEMA_TABLE_END(GenericPar)
+
+    //-------------------------------------------------------------------------
+    //MethodSpec
+    SCHEMA_TABLE_START(MethodSpec)
+    SCHEMA_ITEM_NOFIXED()
+    SCHEMA_ITEM_CDTKN(MethodSpec, Method, MethodDefOrRef)
+    SCHEMA_ITEM_BLOB(MethodSpec, Instantiation)
+    SCHEMA_TABLE_END(MethodSpec)
 
 // eof ------------------------------------------------------------------------

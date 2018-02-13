@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -1548,7 +1553,7 @@ static Stub*  CreateNDirectStubWorker(StubState*        pss,
     // Set up signature walking objects.
     //
 
-    MetaSig msig(szMetaSig, pModule, fConvertSigAsVarArg);
+    MetaSig msig(szMetaSig, pModule, NULL, NULL, fConvertSigAsVarArg);
     MetaSig sig = msig;
     ArgIterator ai( NULL, &sig, TRUE);
 

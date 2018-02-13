@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -51,6 +56,7 @@
 #define ARRAYCLASS_GETAT "GetAt"
 #define ARRAYCLASS_SETAT "SetAt"
 #define ARRAYCLASS_ADDRESSAT "AddressAt"
+
 #define ARRAYCLASS_INIT COR_CTOR_METHOD_NAME    // ".ctor"
 
 // The VTABLE for an array look like
@@ -98,7 +104,8 @@ FCIMPL1(void, Array_Initialize, ArrayBase* array)
     //
     // This is quite a bit slower, but it is portable.  
     //
-    MetaSig sig(ctor->GetSig(), ctor->GetModule());
+    MetaSig sig(ctor);
+
     for (unsigned i =0; i < cElements; i++)
     {
         ARG_SLOT args = PtrToArgSlot((BYTE*)array + offset);
@@ -176,27 +183,6 @@ FCIMPLEND
 
 /*****************************************************************************************/
 
-static PCOR_SIGNATURE EmitSharedType(PCOR_SIGNATURE pSig, TypeHandle typeHnd) {
-
-    CorElementType type = typeHnd.GetSigCorElementType();
-    if (CorTypeInfo::IsObjRef(type)) {
-        *pSig++ = ELEMENT_TYPE_VAR;
-        *pSig++ = 0;        // variable 0
-    }
-    else if (CorTypeInfo::IsPrimitiveType(type))
-        *pSig++ = type;                     // Primitives are easy
-    else if (type == ELEMENT_TYPE_PTR) {
-        *pSig++ = ELEMENT_TYPE_U;           // we share here too
-    }
-    else 
-    {
-        _ASSERTE(type == ELEMENT_TYPE_VALUETYPE);
-        *pSig++ = ELEMENT_TYPE_VALUETYPE;
-        pSig += CorSigCompressToken(typeHnd.GetClass()->GetCl(), pSig);
-    }
-    return(pSig);
-}
-
 //
 // Generate a short sig (descr) for an array accessors
 //
@@ -206,7 +192,6 @@ static PCOR_SIGNATURE EmitSharedType(PCOR_SIGNATURE pSig, TypeHandle typeHnd) {
 #define ARRAY_FUNC_ADDRESS 3
 
 BOOL ClassLoader::GenerateArrayAccessorCallSig(
-    TypeHandle elemTypeHnd, 
     DWORD   dwRank,
     DWORD   dwFuncType,    // Load, store, or <init>
     Module* pModule,
@@ -214,27 +199,40 @@ BOOL ClassLoader::GenerateArrayAccessorCallSig(
     DWORD * pcSig          // Generated signature size
 )
 {
+    _ASSERTE(dwRank >= 1 && dwRank < 0x3ffff);
+
     PCOR_SIGNATURE pSig;
     PCOR_SIGNATURE pSigMemory;
-    DWORD   dwCallSigSize;
+    DWORD   dwCallSigSize = dwRank;
+    DWORD   dwArgCount = (dwFuncType == ARRAY_FUNC_SET) ? dwRank+1 : dwRank;
     DWORD   i;
 
-    _ASSERTE(dwRank >= 1 && dwRank < 0x3fff);
+    switch (dwFuncType)
+    {
+        // <callconv> <argcount> VAR 0 I4 , ... , I4
+        case ARRAY_FUNC_GET:            
+            dwCallSigSize += 4;
+            break;
 
-    dwCallSigSize = dwRank + 3;
+        // <callconv> <argcount> VOID I4 , ... , I4
+        case ARRAY_FUNC_CTOR:
+            dwCallSigSize += 3;
+            break;
 
-    // If the rank is larger than 127 then the encoding for the number of arguments
-    // will take 2 bytes.
-    if (dwRank >= 0x7f)
+        // <callconv> <argcount> VOID I4 , ... , I4 VAR 0
+        case ARRAY_FUNC_SET:
+            dwCallSigSize += 5;
+            break;
+
+        // <callconv> <argcount> BYREF VAR 0 I4 , ... , I4
+        case ARRAY_FUNC_ADDRESS:
+            dwCallSigSize += 5;
+            break;
+    }
+
+    // If the argument count is larger than 127 then it will require 2 bytes for the encoding
+    if (dwArgCount > 0x7f)
         dwCallSigSize++;
-
-    // One more for byref or for the value being set.
-    if (dwFuncType == ARRAY_FUNC_SET || dwFuncType == ARRAY_FUNC_ADDRESS)
-        dwCallSigSize++;    
-
-    // Reserve 4 bytes for the token 
-    if (dwFuncType != ARRAY_FUNC_CTOR && !CorTypeInfo::IsPrimitiveType(elemTypeHnd.GetSigCorElementType()))
-        dwCallSigSize += 4;
 
     WS_PERF_SET_HEAP(HIGH_FREQ_HEAP);
     pSigMemory = (PCOR_SIGNATURE) GetHighFrequencyHeap()->AllocMem(dwCallSigSize);
@@ -253,34 +251,36 @@ BOOL ClassLoader::GenerateArrayAccessorCallSig(
         callConv |= CORINFO_CALLCONV_PARAMTYPE;     // Address routine needs special hidden arg
 
     *pSig++ = callConv;
+    pSig += CorSigCompressData(dwArgCount, pSig);   // Argument count
     switch (dwFuncType)
     {
         case ARRAY_FUNC_GET:
-            pSig += CorSigCompressData(dwRank, pSig);       // Argument count
-            pSig = EmitSharedType(pSig, elemTypeHnd);
+            *pSig++ = ELEMENT_TYPE_VAR;
+            *pSig++ = 0;        // variable 0
             break;
         case ARRAY_FUNC_CTOR:
-            pSig += CorSigCompressData(dwRank, pSig);       // Argument count
             *pSig++ = (BYTE) ELEMENT_TYPE_VOID;             // Return type
             break;
         case ARRAY_FUNC_SET:
-            pSig += CorSigCompressData(dwRank+1, pSig);     // Argument count
             *pSig++ = (BYTE) ELEMENT_TYPE_VOID;             // Return type
             break;
         case ARRAY_FUNC_ADDRESS:
-            pSig += CorSigCompressData(dwRank, pSig);       // Argument count
             *pSig++ = (BYTE) ELEMENT_TYPE_BYREF;            // Return type
-            pSig = EmitSharedType(pSig, elemTypeHnd);
+            *pSig++ = ELEMENT_TYPE_VAR;
+            *pSig++ = 0;        // variable 0
             break;
     }
     for (i = 0; i < dwRank; i++)                
         *pSig++ = ELEMENT_TYPE_I4;
     
-    if (dwFuncType == ARRAY_FUNC_SET)
-        pSig = EmitSharedType(pSig, elemTypeHnd);
+    if (dwFuncType == ARRAY_FUNC_SET) 
+    {
+        *pSig++ = ELEMENT_TYPE_VAR;
+        *pSig++ = 0;        // variable 0
+    }
 
     // Make sure the sig came out exactly as large as we expected
-    _ASSERTE(pSig <= pSigMemory + dwCallSigSize);
+    _ASSERTE(pSig == pSigMemory + dwCallSigSize);
 
     *ppSig = pSigMemory;
     *pcSig = (DWORD)(pSig-pSigMemory);
@@ -341,13 +341,27 @@ ArrayECallMethodDesc *ArrayClass::AllocArrayMethodDesc(
 /*****************************************************************************************/
 MethodTable* ClassLoader::CreateArrayMethodTable(TypeHandle elemTypeHnd, CorElementType arrayKind, unsigned Rank, OBJECTREF* pThrowable) 
 {
+
     // At the moment we can't share nested SZARRAYs because they have different
     // numbers of constructors.  
+
     CorElementType elemType = elemTypeHnd.GetSigCorElementType();
+
     if (CorTypeInfo::IsObjRef(elemType) && elemType != ELEMENT_TYPE_SZARRAY &&
         elemTypeHnd.GetMethodTable() != g_pObjectClass) {
         return(FindArrayForElem(TypeHandle(g_pObjectClass), arrayKind, Rank, pThrowable).GetMethodTable());
     }
+
+    // Strictly speaking no method table should be needed for
+    // arrays of the faked up TypeDescs for variable types that are
+    // used when verfifying generic code.
+    // However verification is tied in with some codegen in the JITs, so give these
+    // the shared MT just in case.
+
+    if (CorTypeInfo::IsGenericVariable(elemType)) {
+        return(FindArrayForElem(TypeHandle(g_pObjectClass), arrayKind, Rank, pThrowable).GetMethodTable());
+    }
+
 
     Module*         pModule = elemTypeHnd.GetModule();
 
@@ -427,7 +441,6 @@ MethodTable* ClassLoader::CreateArrayMethodTable(TypeHandle elemTypeHnd, CorElem
     MethodTable* pMT = (MethodTable *) pMTHead;
 
     // Fill in pClass 
-    pClass->SetExposedClassObject (0);
     pClass->SetNumVtableSlots (wNumVtableSlots);
     pClass->SetNumMethodSlots (wNumVtableSlots);
     pClass->SetLoader (this);
@@ -442,6 +455,8 @@ MethodTable* ClassLoader::CreateArrayMethodTable(TypeHandle elemTypeHnd, CorElem
     pClass->SetVMFlags (flags);
     pClass->SetMethodTable (pMT);
     pClass->SetParentClass (g_pArrayClass->GetClass());
+    pMT->m_pParentMethodTable = g_pArrayClass;
+    pMT->SetExposedClassObject(0);
 
 #if CHECK_APP_DOMAIN_LEAKS
     // Non-covariant arrays of agile types are agile
@@ -462,6 +477,7 @@ MethodTable* ClassLoader::CreateArrayMethodTable(TypeHandle elemTypeHnd, CorElem
     pMT->m_pEEClass         = pClass;
     pMT->m_pModule          = pModule;
     pMT->m_NormType         = arrayKind;
+    pMT->m_pPerInstInfo     = NULL;
 
     if (CorTypeInfo::IsObjRef(elemType)) 
         pMT->SetSharedMethodTable();
@@ -528,43 +544,42 @@ MethodTable* ClassLoader::CreateArrayMethodTable(TypeHandle elemTypeHnd, CorElem
     WORD            methodAttrs = mdPublic; 
 
     // Get
-    if (!GenerateArrayAccessorCallSig(elemTypeHnd, Rank, ARRAY_FUNC_GET, pModule, &pSig, &cSig)) 
+    if (!GenerateArrayAccessorCallSig(Rank, ARRAY_FUNC_GET, pModule, &pSig, &cSig)) 
         return NULL;
     if (!(pClass->AllocArrayMethodDesc(pMethodDescChunk, dwMethodDescIndex, ARRAYCLASS_GET, pSig, cSig, methodAttrs, curSlot++, CORINFO_INTRINSIC_Array_Get)))
         return NULL;
     MDC_INC_INDEX();
 
     // Set
-    if (!GenerateArrayAccessorCallSig(elemTypeHnd, Rank, ARRAY_FUNC_SET, pModule, &pSig, &cSig)) 
+    if (!GenerateArrayAccessorCallSig(Rank, ARRAY_FUNC_SET, pModule, &pSig, &cSig)) 
         return NULL;
     if (!(pClass->AllocArrayMethodDesc(pMethodDescChunk, dwMethodDescIndex, ARRAYCLASS_SET, pSig, cSig, methodAttrs, curSlot++, CORINFO_INTRINSIC_Array_Set)))
         return NULL;
     MDC_INC_INDEX();
 
     // Address
-    if (!GenerateArrayAccessorCallSig(elemTypeHnd, Rank, ARRAY_FUNC_ADDRESS, pModule, &pSig, &cSig)) 
+    if (!GenerateArrayAccessorCallSig(Rank, ARRAY_FUNC_ADDRESS, pModule, &pSig, &cSig)) 
         return NULL;
     if (!(pClass->AllocArrayMethodDesc(pMethodDescChunk, dwMethodDescIndex, ARRAYCLASS_ADDRESS, pSig, cSig, methodAttrs, curSlot++)))
         return NULL;
     MDC_INC_INDEX();
 
-
     // GetAt
-    if (!GenerateArrayAccessorCallSig(elemTypeHnd, 1, ARRAY_FUNC_GET, pModule, &pSig, &cSig)) 
+    if (!GenerateArrayAccessorCallSig(1, ARRAY_FUNC_GET, pModule, &pSig, &cSig)) 
         return NULL;
     if (!(pClass->AllocArrayMethodDesc(pMethodDescChunk, dwMethodDescIndex, ARRAYCLASS_GETAT, pSig, cSig, methodAttrs, curSlot++)))
         return NULL;
     MDC_INC_INDEX();
 
     // SetAt
-    if (!GenerateArrayAccessorCallSig(elemTypeHnd, 1, ARRAY_FUNC_SET, pModule, &pSig, &cSig)) 
+    if (!GenerateArrayAccessorCallSig(1, ARRAY_FUNC_SET, pModule, &pSig, &cSig)) 
         return NULL;
     if (!(pClass->AllocArrayMethodDesc(pMethodDescChunk, dwMethodDescIndex, ARRAYCLASS_SETAT, pSig, cSig, methodAttrs, curSlot++)))
         return NULL;
     MDC_INC_INDEX();
 
     // AddressAt
-    if (!GenerateArrayAccessorCallSig(elemTypeHnd, 1, ARRAY_FUNC_ADDRESS, pModule, &pSig, &cSig)) 
+    if (!GenerateArrayAccessorCallSig(1, ARRAY_FUNC_ADDRESS, pModule, &pSig, &cSig)) 
         return NULL;
     if (!(pClass->AllocArrayMethodDesc(pMethodDescChunk, dwMethodDescIndex, ARRAYCLASS_ADDRESSAT, pSig, cSig, methodAttrs, curSlot++)))
         return NULL;
@@ -579,7 +594,7 @@ MethodTable* ClassLoader::CreateArrayMethodTable(TypeHandle elemTypeHnd, CorElem
         // For SZARRAY arrays, set up multiple constructors.  We probably should not do this.  
         for (DWORD i = 0; i < numCtors; i++)
         {
-            if (GenerateArrayAccessorCallSig(elemTypeHnd, i+1, ARRAY_FUNC_CTOR, pModule, &pSig, &cSig) == FALSE)
+            if (GenerateArrayAccessorCallSig(i+1, ARRAY_FUNC_CTOR, pModule, &pSig, &cSig) == FALSE)
                 return NULL;
             if (pClass->AllocArrayMethodDesc(pMethodDescChunk, dwMethodDescIndex, COR_CTOR_METHOD_NAME, pSig, cSig, ctorAttrs, curSlot++) == NULL)
                 return NULL;
@@ -589,13 +604,13 @@ MethodTable* ClassLoader::CreateArrayMethodTable(TypeHandle elemTypeHnd, CorElem
     else
     {
         // ELEMENT_TYPE_ARRAY has two constructors, one without lower bounds and one with lower bounds
-        if (GenerateArrayAccessorCallSig(elemTypeHnd, Rank, ARRAY_FUNC_CTOR, pModule, &pSig, &cSig) == FALSE)
+        if (GenerateArrayAccessorCallSig(Rank, ARRAY_FUNC_CTOR, pModule, &pSig, &cSig) == FALSE)
             return NULL;
         if (pClass->AllocArrayMethodDesc(pMethodDescChunk, dwMethodDescIndex, COR_CTOR_METHOD_NAME,  pSig, cSig, ctorAttrs, curSlot++) == NULL)
             return NULL;
         MDC_INC_INDEX();
 
-        if (GenerateArrayAccessorCallSig(elemTypeHnd, Rank * 2, ARRAY_FUNC_CTOR, pModule, &pSig, &cSig) == FALSE)
+        if (GenerateArrayAccessorCallSig(Rank * 2, ARRAY_FUNC_CTOR, pModule, &pSig, &cSig) == FALSE)
             return NULL;
         if (pClass->AllocArrayMethodDesc(pMethodDescChunk, dwMethodDescIndex, COR_CTOR_METHOD_NAME,  pSig, cSig, ctorAttrs, curSlot++) == NULL)
             return NULL;
@@ -805,7 +820,7 @@ BOOL GenerateArrayOpScript(ArrayECallMethodDesc *pMD, ArrayOpScript *paos)
     }
 
     PCCOR_SIGNATURE sig = pMD->m_pSig;
-    MetaSig msig(sig, pcls->GetModule());
+    MetaSig msig(pMD);
     _ASSERTE(!msig.IsVarArg());     // No array signature is varargs, code below does not expect it. 
 
     switch (pcls->GetElementType())
@@ -975,7 +990,10 @@ Stub *GenerateArrayOpStub(CPUSTUBLINKER *psl, ArrayECallMethodDesc* pMD)
     if (pcls->GetRank() == 0)
     {
         // this method belongs to the genarray class.
-        psl->EmitRankExceptionThrowStub(MetaSig::SizeOfActualFixedArgStack(pMT->GetModule(), pMD->m_pSig, FALSE));
+        // Generics: the method descriptors are not generic, hence we pass
+        // in NULL class and method instantiations.  If array methods are later
+        // considered generic then this will change.
+        psl->EmitRankExceptionThrowStub(MetaSig::SizeOfActualFixedArgStack(pMT->GetModule(), pMD->m_pSig, FALSE, NULL, NULL)); 
         return psl->Link();
 
     }
@@ -985,7 +1003,7 @@ Stub *GenerateArrayOpStub(CPUSTUBLINKER *psl, ArrayECallMethodDesc* pMD)
 
         if (!GenerateArrayOpScript(pMD, paos)) 
         {
-            psl->EmitRankExceptionThrowStub(MetaSig::SizeOfActualFixedArgStack(pMT->GetModule(), pMD->m_pSig, FALSE));
+            psl->EmitRankExceptionThrowStub(MetaSig::SizeOfActualFixedArgStack(pMT->GetModule(), pMD->m_pSig, FALSE, NULL, NULL));
             return psl->Link();
         }
 

@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -1454,6 +1459,76 @@ HRESULT ImportHelper::MergeUpdateTokenInFieldSig(       // S_OK or error.
             cbDestTotal += cbEmit;
             break;
 
+        case ELEMENT_TYPE_WITH:
+	  {
+            // syntax : WITH (ELEMENT_TYPE_CLASS | ELEMENT_TYPE_VALUECLASS)  <BaseType>
+
+            IfFailGo(MergeUpdateTokenInFieldSig(
+                pMiniMdAssemEmit,           // The assembly emit scope.
+                pMiniMdEmit,                // The emit scope.
+                pCommonAssemImport,         // The assembly scope where the signature is from.
+                pbHashValue,                // Hash value for the import assembly.
+                cbHashValue,                // Size in bytes for the hash value.
+                pCommonImport,              // scope to merge into the emit scope.
+                &pbSigImp[cbSrcTotal],      // from the imported scope
+                ptkMap,                     // OID mapping structure.
+                pqkSigEmit,                 // [OUT] buffer for translated signature
+                cbStartEmit + cbDestTotal,  // [IN] start point of buffer to write to
+                &cbImp,                     // [OUT] total number of bytes consumed from pbSigImp
+                &cbEmit));                  // [OUT] total number of bytes write to pqkSigEmit
+            cbSrcTotal += cbImp;
+            cbDestTotal += cbEmit;
+
+            // copy over the number of arguments
+            ULONG nargs;
+            cb = CorSigUncompressData(&pbSigImp[cbSrcTotal], &nargs);
+
+            IfFailGo(pqkSigEmit->ReSize(cbStartEmit + cbDestTotal + cb));
+            cb1 = CorSigCompressData(nargs, ((BYTE *)pqkSigEmit->Ptr()) + cbStartEmit + cbDestTotal);
+            _ASSERTE(cb == cb1);
+
+            cbSrcTotal += cb;
+            cbDestTotal += cb1;
+
+            for (ULONG narg = 0; narg < nargs; narg++) {
+                IfFailGo(MergeUpdateTokenInFieldSig(
+                    pMiniMdAssemEmit,           // The assembly emit scope.
+                    pMiniMdEmit,                // The emit scope.
+                    pCommonAssemImport,         // The assembly scope where the signature is from.
+                    pbHashValue,                // Hash value for the import assembly.
+                    cbHashValue,                // Size in bytes for the hash value.
+                    pCommonImport,              // The scope to merge into the emit scope.
+                    &pbSigImp[cbSrcTotal],      // signature from the imported scope
+                    ptkMap,                     // Internal OID mapping structure.
+                    pqkSigEmit,                 // [OUT] buffer for translated signature
+                    cbStartEmit + cbDestTotal,  // [IN] start point of buffer to write to
+                    &cbImp,                     // [OUT] total number of bytes consumed from pbSigImp
+                    &cbEmit));                  // [OUT] total number of bytes write to pqkSigEmit
+                cbSrcTotal += cbImp;
+                cbDestTotal += cbEmit;
+            }
+	  }
+
+            break;
+
+        case ELEMENT_TYPE_MVAR:
+        case ELEMENT_TYPE_VAR:
+            // syntax : VAR <n>
+            // syntax : MVAR <n>
+
+            // after the VAR or MVAR there is an integer indicating which type variable
+            //
+            cb = CorSigUncompressData(&pbSigImp[cbSrcTotal], &ulData);
+
+            IfFailGo(pqkSigEmit->ReSize(cbStartEmit + cbDestTotal + cb));
+            cb1 = CorSigCompressData(ulData, ((BYTE *)pqkSigEmit->Ptr()) + cbStartEmit + cbDestTotal);
+            _ASSERTE(cb == cb1);
+
+            cbSrcTotal += cb;
+            cbDestTotal += cb1;
+
+            break;
+
         case ELEMENT_TYPE_ARRAY:
             // syntax : ARRAY BaseType <rank> [i size_1... size_i] [j lowerbound_1 ... lowerbound_j]
 
@@ -1721,6 +1796,7 @@ HRESULT ImportHelper::MergeUpdateTokenInSig(// S_OK or error.
     ULONG       cbEmit;                 // count of bytes consumed in the imported signature
     ULONG       cbImp;                  // count of bytes for the new signature
     ULONG       cArg = 0;               // count of arguments in the signature
+    ULONG       cTyArg = 0;
     ULONG       callingconv;
 
     _ASSERTE(pcbEmit && pqkSigEmit && pbSigImp);
@@ -1760,6 +1836,12 @@ HRESULT ImportHelper::MergeUpdateTokenInSig(// S_OK or error.
     {
 
         // It is a MethodRef
+        // count of type arguments
+        if (callingconv & IMAGE_CEE_CS_CALLCONV_GENERIC)
+	{
+          cb = CorSigUncompressData(&pbSigImp[cbSrcTotal], &cTyArg);
+          cbSrcTotal += cb;
+	}
 
         // count of argument
         cb = CorSigUncompressData(&pbSigImp[cbSrcTotal], &cArg);

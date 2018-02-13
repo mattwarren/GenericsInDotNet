@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -28,19 +33,26 @@ struct AsmManFile
     DWORD   dwAttr;
     BinStr* pHash;
     CustomDescrList m_CustomDescrList;
+    AsmManFile()
+    {
+        szName = NULL;
+        pHash = NULL;
+    }
     ~AsmManFile()
     {
         if(szName)  delete szName;
         if(pHash)   delete pHash;
     }
+    int ComparedTo(AsmManFile* pX){ return strcmp(szName,pX->szName); }
 };
-typedef FIFO<AsmManFile> AsmManFileList;
+typedef SORTEDARRAY<AsmManFile> AsmManFileList;
 
 struct AsmManAssembly
 {
 	BOOL	isRef;
 	char*	szName;
 	char*	szAlias;
+    DWORD   dwAlias;
 	mdToken	tkTok;
 	DWORD	dwAttr;
 	BinStr* pPublicKey;
@@ -56,6 +68,11 @@ struct AsmManAssembly
     PermissionDecl* m_pPermissions;
     PermissionSetDecl* m_pPermissionSets;
 	CustomDescrList m_CustomDescrList;
+    AsmManAssembly()
+    {
+        szName = szAlias = NULL;
+        pPublicKey = pPublicKeyToken =pHashBlob = pLocale = NULL;
+    }
 	~AsmManAssembly() 
 	{
 		if(szAlias && (szAlias != szName)) delete [] szAlias;
@@ -65,8 +82,9 @@ struct AsmManAssembly
 		if(pHashBlob) delete pHashBlob;
 		if(pLocale) delete pLocale;
 	}
+    int ComparedTo(AsmManAssembly* pX){ return strcmp(szAlias,pX->szAlias); }
 };
-typedef FIFO<AsmManAssembly> AsmManAssemblyList;
+typedef SORTEDARRAY<AsmManAssembly> AsmManAssemblyList;
 
 struct AsmManComType
 {
@@ -77,13 +95,18 @@ struct AsmManComType
     char*   szComTypeName;
     mdToken tkClass;
     CustomDescrList m_CustomDescrList;
+    AsmManComType()
+    {
+        szName = szFileName = szComTypeName = NULL;
+    }
     ~AsmManComType()
     {
         if(szName) delete szName;
         if(szFileName) delete szFileName;
     }
+    int ComparedTo(AsmManComType* pX){ return strcmp(szName,pX->szName); }
 };
-typedef FIFO<AsmManComType> AsmManComTypeList;
+typedef SORTEDARRAY<AsmManComType> AsmManComTypeList;
 
 
 struct AsmManRes
@@ -137,12 +160,10 @@ class ErrorReporter;
 class AsmMan
 {
     AsmManFileList      m_FileLst;
-    AsmManAssemblyList  m_AsmRefLst;
     AsmManComTypeList   m_ComTypeLst;
     AsmManResList       m_ManResLst;
     AsmManModRefList    m_ModRefLst;
 
-    AsmManAssembly*     m_pCurAsmRef;
     AsmManComType*      m_pCurComType;
     AsmManRes*          m_pCurManRes;
     ErrorReporter*      report;
@@ -157,7 +178,9 @@ class AsmMan
     IMetaDataEmit*          m_pEmitter;
 
 public:
+    AsmManAssemblyList  m_AsmRefLst;
     AsmManAssembly*     m_pAssembly;
+    AsmManAssembly*     m_pCurAsmRef;
     char*   m_szScopeName;
     BinStr* m_pGUID;
     AsmManStrongName    m_sStrongName;
@@ -192,7 +215,7 @@ public:
     void    SetModuleName(char* szName);
 
     void    AddFile(char* szName, DWORD dwAttr, BinStr* pHashBlob);
-	void	EmitDebuggableAttribute(mdToken tkOwner, BOOL bIsMscorlib);
+	void	EmitDebuggableAttribute(mdToken tkOwner);
 
 	void	StartAssembly(char* szName, char* szAlias, DWORD dwAttr, BOOL isRef);
 	void	EndAssembly();

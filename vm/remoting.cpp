@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -346,8 +351,8 @@ FCIMPL4(Object*, CRemotingServices::CreateTransparentProxy, Object* orRPUNSAFE, 
 
     // Create a tranparent proxy that behaves as an object of the desired class
     ReflectClass *pRefClass = (ReflectClass *) gc.pClassToProxy->GetData();
-    EEClass *pEEClass = pRefClass->GetClass();
-    pTP = CTPMethodTable::CreateTPOfClassForRP(pEEClass, gc.orRP);
+    TypeHandle ty = pRefClass->GetTypeHandle();
+    pTP = CTPMethodTable::CreateTPOfClassForRP(ty, gc.orRP);
     
     // Set the stub pointer
     pTP->SetOffsetPtr(CTPMethodTable::GetOffsetOfStub(), pStub);
@@ -754,9 +759,11 @@ FCIMPLEND
 //
 //  Note:       Called by getNewHelper
 //+----------------------------------------------------------------------------
-BOOL CRemotingServices::IsRemoteActivationRequired(EEClass* pClass)
+BOOL CRemotingServices::IsRemoteActivationRequired(TypeHandle ty)
 {   
     BEGINFORBIDGC();
+    
+    EEClass *pClass = ty.GetClass();
 
     _ASSERTE(!pClass->IsThunking());
     
@@ -784,8 +791,10 @@ BOOL CRemotingServices::IsRemoteActivationRequired(EEClass* pClass)
 //
 //  Note:       Called by CreateProxyOrObject (JIT_NewCrossContext)
 //+----------------------------------------------------------------------------
-ManagedActivationType __stdcall CRemotingServices::RequiresManagedActivation(EEClass* pClass)
+ManagedActivationType __stdcall CRemotingServices::RequiresManagedActivation(TypeHandle ty)
 {
+    EEClass* pClass = ty.GetClass();
+
     if (!pClass->IsMarshaledByRef())
         return NoManagedActivation;
 
@@ -851,7 +860,7 @@ OBJECTREF CRemotingServices::CreateProxyOrObject(MethodTable* pMT, BOOL fIsCom)
     // By the time we reach here, we have alread checked that the class requires
     // managed activation. This check is made either through the JIT_NewCrossContext helper
     // or Activator.CreateInstance codepath.
-    _ASSERTE(RequiresManagedActivation(pClass) || IsRemoteActivationRequired(pClass));
+    _ASSERTE(RequiresManagedActivation(TypeHandle(pMT)) || IsRemoteActivationRequired(TypeHandle(pMT)));
 
     if(!s_fInitializedRemoting)
     {        
@@ -877,15 +886,14 @@ OBJECTREF CRemotingServices::CreateProxyOrObject(MethodTable* pMT, BOOL fIsCom)
         _ASSERTE(!pClass->IsArrayClass());
 
         // Get the type seen by reflection
-        REFLECTCLASSBASEREF reflectType = (REFLECTCLASSBASEREF) pClass->GetExposedClassObject();
+        REFLECTCLASSBASEREF reflectType = (REFLECTCLASSBASEREF) pMT->GetExposedClassObject();
         LPVOID pvType = NULL;
         *(REFLECTCLASSBASEREF *)&pvType = reflectType;
 
         // This will return either an uninitialized object or a proxy
         pServer = (Object *)CTPMethodTable::CallTarget(pTarget, pvType, NULL);
 
-        if (!pClass->IsContextful() 
-            && !pClass->GetMethodTable()->IsComObjectType())
+        if (!pClass->IsContextful() && !pMT->IsComObjectType())
         {   
             // Cache the result of the activation attempt ... 
             // if a strictly MBR class is not configured for remote 
@@ -932,12 +940,12 @@ FCIMPL1(Object*, CRemotingServices::AllocateUninitializedObject, ReflectClassBas
     THROWSCOMPLUSEXCEPTION();
 
     ReflectClass *pRefClass = (ReflectClass *) pClassOfObject->GetData();
-    EEClass *pEEClass = pRefClass->GetClass();
+    MethodTable *pMT = pRefClass->GetMethodTable();
+    EEClass *pEEClass = pMT->GetClass();
 
     // Make sure that this private allocator function is used by remoting 
     // only for marshalbyref objects
     _ASSERTE(!pEEClass->IsContextful() || pEEClass->IsMarshaledByRef());
-
 
     // if this is an abstract class then we will
     //  fail this
@@ -951,7 +959,7 @@ FCIMPL1(Object*, CRemotingServices::AllocateUninitializedObject, ReflectClassBas
         COMPlusThrow(kMemberAccessException,L"Acc_CreateInterface");
     }
 
-    newobj = AllocateObject(pEEClass->GetMethodTable());
+    newobj = AllocateObject(pMT);
 
     LOG((LF_REMOTING, LL_INFO1000, "AllocateUninitializedObject returning 0x%0x\n", OBJECTREFToObject(newobj)));
 
@@ -997,13 +1005,14 @@ FCIMPL1(Object*, CRemotingServices::AllocateInitializedObject, ReflectClassBaseO
     THROWSCOMPLUSEXCEPTION();
 
     ReflectClass *pRefClass = (ReflectClass *) pClassOfObject->GetData();
-    EEClass *pEEClass = pRefClass->GetClass();
+    MethodTable *pMT = pRefClass->GetMethodTable();
+    EEClass *pEEClass = pMT->GetClass();
 
     // Make sure that this private allocator function is used by remoting 
     // only for marshalbyref objects
     _ASSERTE(!pEEClass->IsContextful() || pEEClass->IsMarshaledByRef());
 
-    newobj = AllocateObject(pEEClass->GetMethodTable());
+    newobj = AllocateObject(pMT);
 
     CallDefaultConstructor(newobj);
 
@@ -1067,40 +1076,40 @@ void CRemotingServices::DestroyThunk(MethodDesc* pMD)
 //              (2) If the given type is present in the hierarchy of the 
 //              object type
 //+----------------------------------------------------------------------------
-BOOL CRemotingServices::CheckCast(OBJECTREF orTP, EEClass* pObjClass, 
-                                  EEClass *pClass)
+BOOL CRemotingServices::CheckCast(OBJECTREF orTP, TypeHandle objTy,
+                                  TypeHandle ty)
 {
     BEGINFORBIDGC();
 
     BOOL fCastOK = FALSE;
 
-    _ASSERTE((NULL != pClass) && (NULL != pObjClass));
+    _ASSERTE(!objTy.IsNull() && !ty.IsNull());
     // Object class can never be an interface. We use a separate cached
     // entry for storing interfaces that the proxy supports.
-    _ASSERTE(!pObjClass->IsInterface());
+    _ASSERTE(!objTy.IsInterface());
     
 
     // (1) We are trying to cast to an interface 
-    if(pClass->IsInterface())
+    if(ty.IsInterface())
     {
         // Do a quick check for interface cast by comparing it against the
         // cached entry
         MethodTable *pItfMT = (MethodTable *)orTP->GetPtrOffset(CTPMethodTable::GetOffsetOfInterfaceMT());
         if(NULL != pItfMT)
         {
-            if(pItfMT == pClass->GetMethodTable())
+            if(pItfMT == ty.GetMethodTable())
             {
                 fCastOK = TRUE;
             }
             else
             {
-                fCastOK = pItfMT->GetClass()->StaticSupportsInterface(pClass->GetMethodTable());
+                fCastOK = pItfMT->StaticSupportsInterface(ty.GetMethodTable());
             }
         }
 
         if(!fCastOK)
         {
-            fCastOK = pObjClass->StaticSupportsInterface(pClass->GetMethodTable());
+            fCastOK = objTy.GetMethodTable()->StaticSupportsInterface(ty.GetMethodTable());
         }
         
     }
@@ -1108,9 +1117,9 @@ BOOL CRemotingServices::CheckCast(OBJECTREF orTP, EEClass* pObjClass,
     else
     {
         // Walk up the class hierarchy and find a matching class
-        while (pObjClass != pClass)
+        while (ty != objTy)
         {
-            if (pObjClass == NULL)
+            if (objTy.IsNull())
             {
                 // Oh-oh, the cast did not succeed. Maybe we have to refine
                 // the proxy to match the clients view
@@ -1118,10 +1127,10 @@ BOOL CRemotingServices::CheckCast(OBJECTREF orTP, EEClass* pObjClass,
             }            
 
             // Continue searching
-            pObjClass = pObjClass->GetParentClass();
+            objTy = objTy.GetParent();
         }
 
-        if(pObjClass == pClass)
+        if(objTy == ty)
         {
             fCastOK = TRUE;
         }
@@ -1142,7 +1151,7 @@ BOOL CRemotingServices::CheckCast(OBJECTREF orTP, EEClass* pObjClass,
 //              return NULL
 //
 //+----------------------------------------------------------------------------
-BOOL CRemotingServices::CheckCast(OBJECTREF orTP, EEClass *pClass)
+BOOL CRemotingServices::CheckCast(OBJECTREF orTP, TypeHandle ty)
 {
     BEGINFORBIDGC();
 
@@ -1152,10 +1161,9 @@ BOOL CRemotingServices::CheckCast(OBJECTREF orTP, EEClass *pClass)
     _ASSERTE(pMT->IsTransparentProxyType());
 
     pMT = pMT->AdjustForThunking(orTP);
-    EEClass *pObjClass = pMT->GetClass();
 
     // Do a cast check without taking a lock
-    BOOL fCastOK = CheckCast(orTP, pObjClass, pClass);
+    BOOL fCastOK = CheckCast(orTP, TypeHandle(pMT), ty);
 
     ENDFORBIDGC();
 
@@ -1163,14 +1171,14 @@ BOOL CRemotingServices::CheckCast(OBJECTREF orTP, EEClass *pClass)
     {
         // Cast on arrays work via ComplexArrayStoreCheck. We should not
         // reach here for such cases.
-        _ASSERTE(!pClass->IsArrayClass());
+        _ASSERTE(!ty.IsArray());
 
         // We reach here only if any of the types in the current type hierarchy
         // represented by the proxy does not match the given type.     
         // Call a helper routine in managed RemotingServices to find out 
         // whether the server object supports the given type
         const void* pTarget = (const void *)MDofCheckCast()->GetMethodEntryPoint();
-        fCastOK = CTPMethodTable::CheckCast(pTarget, orTP, pClass);
+        fCastOK = CTPMethodTable::CheckCast(pTarget, orTP, ty);
     }
 
     LOG((LF_REMOTING, LL_INFO100, "CheckCast returning %s for object 0x%x and class 0x%x \n", (fCastOK ? "TRUE" : "FALSE")));
@@ -1197,14 +1205,14 @@ FCIMPL2(Object*, CRemotingServices::NativeCheckCast, Object* pObj, ReflectClassB
 
     //Get the EEClass of the object which we have and the class to which we're widening.
     ReflectClass *pRC = (ReflectClass *)typeObj->GetData();
-    EEClass *pEEC = pRC->GetClass();
+    TypeHandle ty = pRC->GetTypeHandle();
     EEClass *pEECOfObj = orObj->GetClass();
 
     //Always initialize retval
     // If it's thunking, check what we actually have.
     if (pEECOfObj->IsThunking()) {
         HELPER_METHOD_FRAME_BEGIN_RET_1(orObj);
-        if (!CRemotingServices::CheckCast(orObj, pEEC))
+        if (!CRemotingServices::CheckCast(orObj, ty))
             orObj = 0;
         HELPER_METHOD_FRAME_END();
     } 
@@ -1231,7 +1239,7 @@ void CRemotingServices::FieldAccessor(FieldDesc* pFD, OBJECTREF o, LPVOID pVal,
     BOOL fIsGCRef = pFD->IsObjRef();
     BOOL fIsByValue = pFD->IsByValue();
     TypeHandle  th;
-    EEClass *fldClass = NULL;
+    TypeHandle fldClass = TypeHandle();
 
     //
     // We mustn't try to get the type handle of a field
@@ -1245,10 +1253,8 @@ void CRemotingServices::FieldAccessor(FieldDesc* pFD, OBJECTREF o, LPVOID pVal,
     if(!pClass->IsMarshaledByRef() || fIsByValue)
     {
         // Extract the type of the field
-        PCCOR_SIGNATURE pSig;
-        DWORD       cSig;
-        pFD->GetSig(&pSig, &cSig);
-        FieldSig sig(pSig, pFD->GetModule());
+        MetaSig sig(pFD);
+	sig.NextArg();
 
         OBJECTREF throwable = NULL;
         GCPROTECT_BEGIN(throwable);
@@ -1263,7 +1269,7 @@ void CRemotingServices::FieldAccessor(FieldDesc* pFD, OBJECTREF o, LPVOID pVal,
         // Extract the field class for unshared method tables only
         if(th.IsUnsharedMT())
         {
-            fldClass = th.AsClass();
+            fldClass = th;
         }
     }
 
@@ -1296,19 +1302,19 @@ void CRemotingServices::FieldAccessor(FieldDesc* pFD, OBJECTREF o, LPVOID pVal,
     else
     {
         // This is a reference to a proxy. Get the real class of the instance.
-        pClass = pFD->GetMethodTableOfEnclosingClass()->GetClass();
+        TypeHandle ty = TypeHandle(pFD->GetMethodTableOfEnclosingClass());
 #ifdef _DEBUG
-        EEClass *pCheckClass = CTPMethodTable::GetClassBeingProxied(o);
+        TypeHandle checkTy = CTPMethodTable::GetClassBeingProxied(o);
     
-        while (pCheckClass != pClass) 
+        while (checkTy != ty)
         {
-            pCheckClass = pCheckClass->GetParentClass();
-            _ASSERTE(pCheckClass);
+            checkTy = checkTy.GetParent();
+            _ASSERTE(!checkTy.IsNull());
         }
 #endif
 
         // Call the managed code to start the field access call
-        CallFieldAccessor(pFD, o, pVal, fIsGetter, fIsByValue, fIsGCRef, pClass, 
+        CallFieldAccessor(pFD, o, pVal, fIsGetter, fIsByValue, fIsGCRef, ty,
                           fldClass, fieldType, cbSize);        
     }
 }
@@ -1363,8 +1369,8 @@ VOID CRemotingServices::CallFieldAccessor(FieldDesc* pFD,
                                           BOOL fIsGetter, 
                                           BOOL fIsByValue, 
                                           BOOL fIsGCRef,
-                                          EEClass *pClass, 
-                                          EEClass *fldClass, 
+                                          TypeHandle ty,
+                                          TypeHandle fldTy,
                                           CorElementType fieldType, 
                                           UINT cbSize)
 {
@@ -1409,7 +1415,7 @@ VOID CRemotingServices::CallFieldAccessor(FieldDesc* pFD,
         // else use the value passed to the function
         LPVOID pvFieldVal = (fIsGCRef ? (LPVOID)&(fieldArgs.val) : pVal);
         OBJECTREF *lpVal = &val;
-        GetObjectFromStack(lpVal, pvFieldVal, fieldType, fldClass); 
+        GetObjectFromStack(lpVal, pvFieldVal, fieldType, fldTy); 
     }
         
     // Get the method descriptor of the call
@@ -1442,7 +1448,7 @@ VOID CRemotingServices::CallFieldAccessor(FieldDesc* pFD,
             {
                 GCPROTECT_BEGIN(orRet);
 
-                if(!CheckCast(orRet, fldClass))
+                if(!CheckCast(orRet, fldTy))
                 {
                     COMPlusThrow(kInvalidCastException, L"Arg_ObjObj");
                 }
@@ -1459,7 +1465,7 @@ VOID CRemotingServices::CallFieldAccessor(FieldDesc* pFD,
             // Copy from the source to the destination
             if (oRet != NULL)
             {
-                CopyValueClass(pVal, oRet->UnBox(), fldClass->GetMethodTable(), fieldArgs.obj->GetAppDomain());
+                CopyValueClass(pVal, oRet->UnBox(), fldTy.GetMethodTable(), fieldArgs.obj->GetAppDomain());
             }
         }
         else
@@ -1504,7 +1510,7 @@ VOID CRemotingServices::GetTypeAndFieldName(FieldArgs *pArgs, FieldDesc *pFD)
     LPWSTR  szName = NULL;
 
     // Protect the reflection info
-    REFLECTCLASSBASEREF reflectType = (REFLECTCLASSBASEREF)pFD->GetEnclosingClass()->GetExposedClassObject();
+    REFLECTCLASSBASEREF reflectType = (REFLECTCLASSBASEREF)pFD->GetMethodTableOfEnclosingClass()->GetExposedClassObject();
         
     pRC = (ReflectClass *)(reflectType->GetData());
     // This call can cause a GC!
@@ -1999,7 +2005,7 @@ HRESULT NestedExportedTypeHelper(
 //              
 //              
 //+----------------------------------------------------------------------------
-HRESULT CRemotingServices::GetExecutionLocation(EEClass *pClass, LPCSTR pszLoc)
+HRESULT CRemotingServices::GetExecutionLocation(TypeHandle ty, LPCSTR pszLoc)
 {
     // Init the out params
     pszLoc = NULL;
@@ -2063,7 +2069,7 @@ REFLECTCLASSBASEREF CRemotingServices::GetClass(OBJECTREF pThis)
     THROWSCOMPLUSEXCEPTION();
 
     REFLECTCLASSBASEREF refClass = NULL;
-    EEClass *pClass = NULL;
+    MethodTable *pMT = NULL;
 
     GCPROTECT_BEGIN(pThis);
 
@@ -2073,7 +2079,7 @@ REFLECTCLASSBASEREF CRemotingServices::GetClass(OBJECTREF pThis)
     // correct type
     if(GetServerIdentityFromProxy(pThis) != NULL)
     {
-        pClass = pThis->GetTrueMethodTable()->GetClass();
+        pMT = pThis->GetTrueMethodTable();
     }
     // For everything else either we have refined the proxy to its correct type
     // or we have to consult the objref to get the true type
@@ -2086,16 +2092,16 @@ REFLECTCLASSBASEREF CRemotingServices::GetClass(OBJECTREF pThis)
             // There was no objref associated with the proxy or it is a proxy
             // that we do not understand. 
             // In this case, we return the class that is stored in the proxy
-            pClass = pThis->GetTrueMethodTable()->GetClass();
+            pMT = pThis->GetTrueMethodTable();
         }
 
-        _ASSERTE(refClass != NULL || pClass != NULL);
+        _ASSERTE(refClass != NULL || pMT != NULL);
 
         // Refine the proxy to the class just retrieved
         if(refClass != NULL)
         {
             if(!CTPMethodTable::RefineProxy(pThis, 
-                                            ((ReflectClass *)refClass->GetData())->GetClass()))
+                                            ((ReflectClass *)refClass->GetData())->GetTypeHandle()))
             {
                 // Throw an exception to indicate that we failed to expand the 
                 // method table to the given size.
@@ -2105,7 +2111,7 @@ REFLECTCLASSBASEREF CRemotingServices::GetClass(OBJECTREF pThis)
     }    
 
     if (refClass == NULL)
-        refClass = (REFLECTCLASSBASEREF)pClass->GetExposedClassObject();
+        refClass = (REFLECTCLASSBASEREF)pMT->GetExposedClassObject();
 
     GCPROTECT_END();
 
@@ -2771,12 +2777,12 @@ BOOL CTPMethodTable::AllocateThunks(DWORD dwSlots, DWORD dwCommitSize)
 //  Synopsis:   Creates a transparent proxy that behaves as an object of the
 //              supplied class
 //+----------------------------------------------------------------------------
-OBJECTREF CTPMethodTable::CreateTPOfClassForRP(EEClass *pClass, OBJECTREF pRP)
+OBJECTREF CTPMethodTable::CreateTPOfClassForRP(TypeHandle ty, OBJECTREF pRP)
 {
     // Sanity check
     THROWSCOMPLUSEXCEPTION();
 
-    _ASSERTE(pClass);
+    _ASSERTE(!ty.IsNull());
 
     OBJECTREF pTP = NULL;
     BOOL fAddRef = TRUE;
@@ -2800,7 +2806,7 @@ OBJECTREF CTPMethodTable::CreateTPOfClassForRP(EEClass *pClass, OBJECTREF pRP)
     if(s_fInitializedTPTable)
     {
         // Get the size of the VTable for the class to proxy
-        DWORD dwSlots = pClass->GetNumVtableSlots();
+        DWORD dwSlots = ty.GetNumVtableSlots();
         if (dwSlots == 0)
             dwSlots = 1;
         
@@ -2857,7 +2863,7 @@ OBJECTREF CTPMethodTable::CreateTPOfClassForRP(EEClass *pClass, OBJECTREF pRP)
             
             // If we are creating a proxy for an interface then the class
             // is the object class else it is the class supplied
-            if(pClass->IsInterface())
+            if(ty.IsInterface())
             {
                 _ASSERTE(NULL != g_pObjectClass);
 
@@ -2865,11 +2871,11 @@ OBJECTREF CTPMethodTable::CreateTPOfClassForRP(EEClass *pClass, OBJECTREF pRP)
                 pTP->SetOffsetPtr(s_dwMTOffset, CRemotingServices::GetMarshalByRefClass());
                 // Set the cached interface method table to the given interface
                 // method table
-                pTP->SetOffsetPtr(s_dwItfMTOffset, pClass->GetMethodTable()); 
+                pTP->SetOffsetPtr(s_dwItfMTOffset, ty.GetMethodTable()); 
             }
             else
             {
-                pTP->SetOffsetPtr(s_dwMTOffset, pClass->GetMethodTable()); 
+                pTP->SetOffsetPtr(s_dwMTOffset, ty.GetMethodTable()); 
             }
             
 
@@ -3197,7 +3203,7 @@ ARG_SLOT __stdcall CTPMethodTable::OnCall(TPMethodFrame *pFrame, Thread *pThrd, 
 //              
 //              
 //+----------------------------------------------------------------------------
-BOOL CTPMethodTable::CheckCast(const void* pTarget, OBJECTREF orTP, EEClass *pClass)
+BOOL CTPMethodTable::CheckCast(const void* pTarget, OBJECTREF orTP, TypeHandle ty)
 {
     THROWSCOMPLUSEXCEPTION();
     REFLECTCLASSBASEREF reflectType = NULL;
@@ -3217,7 +3223,7 @@ BOOL CTPMethodTable::CheckCast(const void* pTarget, OBJECTREF orTP, EEClass *pCl
     GCPROTECT_BEGIN (gcValues);
     COMPLUS_TRY
     {        
-        reflectType = (REFLECTCLASSBASEREF) pClass->GetExposedClassObject();
+        reflectType = (REFLECTCLASSBASEREF) ty.GetMethodTable()->GetExposedClassObject();
         *(REFLECTCLASSBASEREF *)&pvType = reflectType;
 
         fCastOK = (BOOL)(INT_PTR)CallTarget(pTarget, 
@@ -3246,25 +3252,25 @@ BOOL CTPMethodTable::CheckCast(const void* pTarget, OBJECTREF orTP, EEClass *pCl
         MethodTable *pCurrent = (MethodTable *) gcValues.orTP->GetPtrOffset(s_dwMTOffset);
         
         
-        if(pClass->IsInterface())
+        if(ty.IsInterface())
         {
             // We replace the cached interface method table with the interface
             // method table that we are trying to cast to. This will ensure that
             // casts to this interface, which are likely to happen, will succeed.
-            gcValues.orTP->SetOffsetPtr(s_dwItfMTOffset, pClass->GetMethodTable());
+            gcValues.orTP->SetOffsetPtr(s_dwItfMTOffset, ty.GetMethodTable());
         }
         else
         {
             BOOL fDerivedClass = FALSE;
             // Check whether this class derives from the current class
-            fDerivedClass = CRemotingServices::CheckCast(gcValues.orTP, pClass,
-                                                         pCurrent->GetClass());
+            fDerivedClass = CRemotingServices::CheckCast(gcValues.orTP, ty,
+                                                         TypeHandle(pCurrent));
             // We replace the current method table only if we cast to a more 
             // derived class
             if(fDerivedClass)
             {
                 // Set the method table in the proxy to the given method table
-                fCastOK = RefineProxy(gcValues.orTP, pClass);
+                fCastOK = RefineProxy(gcValues.orTP, ty);
             }
         }
                 
@@ -3285,20 +3291,20 @@ BOOL CTPMethodTable::CheckCast(const void* pTarget, OBJECTREF orTP, EEClass *pCl
 //              Additionally, expand the TP method table to the required number of slots.
 //              
 //+----------------------------------------------------------------------------
-BOOL CTPMethodTable::RefineProxy(OBJECTREF orTP, EEClass *pClass)
+BOOL CTPMethodTable::RefineProxy(OBJECTREF orTP, TypeHandle ty)
 {
-    _ASSERTE((orTP != NULL) && (pClass != NULL));
+    _ASSERTE((orTP != NULL) && !ty.IsNull());
 
     BOOL fExpanded = TRUE;
 
     // Do the expansion only if necessary
-    MethodTable *pMT = pClass->GetMethodTable();
+    MethodTable *pMT = ty.GetMethodTable();
     if (pMT != (MethodTable *)orTP->GetPtrOffset(s_dwMTOffset))
     {
         orTP->SetOffsetPtr(s_dwMTOffset, pMT); 
     
         // Extend the vtable if necessary
-        DWORD dwSlots = pClass->GetNumVtableSlots();
+        DWORD dwSlots = ty.GetNumVtableSlots();
         if (dwSlots == 0)
             dwSlots = 1;
     

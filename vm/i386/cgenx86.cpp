@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -1509,6 +1514,49 @@ VOID StubLinkerCPU::EmitUnboxMethodStub(MethodDesc* pUnboxMD)
     Emit32((__int32)(size_t)getStubCallAddr(pUnboxMD));
     Emit16(0xE0FF);                                     // JMP EAX
 }
+
+// This method passes an extra dictionary argument before calling the shared generic method code
+VOID StubLinkerCPU::EmitInstantiatingMethodStub(MethodDesc* pSharedMD, void* extra)
+{
+    int regnum = -1;
+
+    MetaSig::SizeOfActualFixedArgStack(pSharedMD->GetModule(), pSharedMD->GetSig(), pSharedMD->IsStatic(), pSharedMD->GetClassInstantiation(),
+				       pSharedMD->GetMethodInstantiation(), TRUE, &regnum);
+
+    // It's on the stack
+    if (regnum == -1)
+    {
+      // Pop return address into AX
+      X86EmitPopReg(kEAX);
+
+      // Push extra dictionary argument
+      X86EmitPushImm32((__int32)(size_t) extra);
+
+      // Put return address back
+      X86EmitPushReg(kEAX);
+    }
+
+    // It's in a register
+    else
+    {
+      X86EmitPushImm32((__int32)(size_t) extra);
+      if (regnum == 0)
+	X86EmitPopReg(kECX);
+      else
+        X86EmitPopReg(kEDX);
+    }
+
+    // If it is an ECall, m_CodeOrIL does not reflect the correct address to
+    // call to (which is an ECall stub).  Rather, it reflects the actual ECall
+    // implementation.  Naturally, ECalls must always hit the stub first.
+    // Along the same lines, perhaps the method isn't JITted yet.  The easiest
+    // way to handle all this is to simply dispatch through the top of the MD.
+
+    Emit8(0xB8);                                        // MOV EAX, pre stub call addr
+    Emit32((__int32)(size_t) pSharedMD - METHOD_CALL_PRESTUB_SIZE);
+    Emit16(0xE0FF);                                     // JMP EAX
+}
+
 
 //
 // SecurityWrapper

@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -22,14 +27,14 @@
 #include "common.h"
 #include "sigformat.h"
 
-SigFormat::SigFormat() : _arrayType()
+SigFormat::SigFormat() : _classInst(NULL)
 {
         _size = SIG_INC;
         _pos = 0;
         _fmtSig = new char[_size];
 }
 
-SigFormat::SigFormat(MetaSig &metaSig, LPCUTF8 szMemberName, LPCUTF8 szClassName, LPCUTF8 szNameSpace) : _arrayType()
+SigFormat::SigFormat(MetaSig &metaSig, LPCUTF8 szMemberName, LPCUTF8 szClassName, LPCUTF8 szNameSpace) : _classInst(NULL)
 {
     FormatSig(metaSig, szMemberName, szClassName, szNameSpace);
 }
@@ -38,15 +43,9 @@ SigFormat::SigFormat(MetaSig &metaSig, LPCUTF8 szMemberName, LPCUTF8 szClassName
 // SigFormat::SigFormat()
 // This constructor will create the string representation of a 
 //  method.
-SigFormat::SigFormat(MethodDesc* pMeth, TypeHandle arrayType, BOOL fIgnoreMethodName) : _arrayType()
+SigFormat::SigFormat(MethodDesc* pMeth, TypeHandle* classInst, BOOL fIgnoreMethodName) : _classInst(classInst)
 {
-    PCCOR_SIGNATURE pSig;
-    DWORD           cSig;
-    if (arrayType.IsArray()) 
-       _arrayType = arrayType.AsTypeDesc()->GetTypeParam();
-    pMeth->GetSig(&pSig,&cSig);
-    _ASSERTE(pSig != NULL);
-    MetaSig sig(pSig,pMeth->GetModule());
+    MetaSig sig(pMeth, classInst);
     if (fIgnoreMethodName)
     {
         FormatSig(sig, NULL);
@@ -126,30 +125,166 @@ int SigFormat::AddString(LPCUTF8 s)
 }
 
 
+//------------------------------------------------------------------------
+// Replacement for SigFormat::AddType that avoids class loading
+// and copes with formal type parameters
+//------------------------------------------------------------------------
+void SigFormat::AddTypeString(Module* pModule, SigPointer sig, TypeHandle *classInst, TypeHandle *methodInst)
+{
+    LPCUTF8     szcName;
+    LPCUTF8     szcNameSpace;
+	
+    CorElementType type = sig.GetElemType();
+
+    // Format the output
+    switch (type) 
+    {
+    case ELEMENT_TYPE_VOID:     AddString("Void"); break;
+    case ELEMENT_TYPE_BOOLEAN:  AddString("Boolean"); break;
+    case ELEMENT_TYPE_I1:       AddString("SByte"); break;
+    case ELEMENT_TYPE_U1:       AddString("Byte"); break;
+    case ELEMENT_TYPE_I2:       AddString("Int16"); break;
+    case ELEMENT_TYPE_U2:       AddString("UInt16"); break;
+    case ELEMENT_TYPE_CHAR:     AddString("Char"); break;
+    case ELEMENT_TYPE_I:        AddString("IntPtr"); break;
+    case ELEMENT_TYPE_U:        AddString("UIntPtr"); break;
+    case ELEMENT_TYPE_I4:       AddString("Int32"); break;
+    case ELEMENT_TYPE_U4:       AddString("UInt32"); break;
+    case ELEMENT_TYPE_I8:       AddString("Int64"); break;
+    case ELEMENT_TYPE_U8:       AddString("UInt64"); break;
+    case ELEMENT_TYPE_R4:       AddString("Single"); break;
+    case ELEMENT_TYPE_R8:       AddString("Double"); break;
+    case ELEMENT_TYPE_OBJECT:   AddString(g_ObjectClassName); break;
+    case ELEMENT_TYPE_STRING:   AddString(g_StringClassName); break;
+
+    // For Value Classes we fall through unless the pVMC is an Array Class, 
+    // If its an array class we need to get the name of the underlying type from 
+    // it.
+    case ELEMENT_TYPE_VALUETYPE:
+    case ELEMENT_TYPE_CLASS:
+        {
+	  IMDInternalImport *pInternalImport = pModule->GetMDImport();
+          mdToken token = sig.GetToken();
+
+	  if (TypeFromToken(token) == mdtTypeDef)
+	    pInternalImport->GetNameOfTypeDef(token, &szcName, &szcNameSpace);
+	  else if (TypeFromToken(token) == mdtTypeRef)
+	    pInternalImport->GetNameOfTypeRef(token, &szcName, &szcNameSpace);
+          else break;
+
+            if (*szcNameSpace)
+            {
+                AddString(szcNameSpace);
+                AddString(".");
+            }
+            AddString(szcName);
+            break;
+        }
+    case ELEMENT_TYPE_TYPEDBYREF:
+        {
+            AddString("TypedReference");
+            break;
+        }
+
+    case ELEMENT_TYPE_BYREF:
+        {
+            AddTypeString(pModule, sig, classInst, methodInst);          
+            AddString(" ByRef");
+        }
+        break;
+
+    case ELEMENT_TYPE_MVAR :
+      {
+        DWORD ix = sig.GetData();
+        if (methodInst != NULL)
+	{
+           AddType(methodInst[ix]);
+        }
+        else
+	{
+          char smallbuf[20];
+          sprintf(smallbuf, "!!%d", ix);
+          AddString(smallbuf);
+        }    
+      }
+      break;
+
+    case ELEMENT_TYPE_VAR :
+      {
+        DWORD ix = sig.GetData();
+        if (classInst != NULL)
+	{
+           AddType(classInst[ix]);
+        }
+        else
+        {
+          AddString("!");
+          char smallbuf[20];
+          sprintf(smallbuf, "!%d", ix);
+          AddString(smallbuf);
+        }
+      }
+      break;
+
+    case ELEMENT_TYPE_WITH :
+      {
+        AddTypeString(pModule, sig, classInst, methodInst);
+        sig.SkipExactlyOne();
+        DWORD n = sig.GetData();
+        AddString("<");
+        for (DWORD i = 0; i < n; i++)
+	{
+          if (i > 0)
+            AddString(",");
+          AddTypeString(pModule,sig, classInst, methodInst);
+          sig.SkipExactlyOne();
+        }
+        AddString(">");
+        break;
+      }
+
+    case ELEMENT_TYPE_SZARRAY:      // Single Dim, Zero
+    case ELEMENT_TYPE_ARRAY:        // General Array
+        {
+            AddTypeString(pModule, sig, classInst, methodInst);
+            sig.SkipExactlyOne();
+            if (type == ELEMENT_TYPE_ARRAY) {
+                AddString("[");         
+                int len = sig.GetData();
+                for (int i=0;i<len-1;i++)
+                    AddString(",");
+                AddString("]");
+            }
+            else {
+                AddString("[]");
+            }
+        } 
+        break;
+
+    case ELEMENT_TYPE_PTR:
+        {
+            // This will pop up on methods that take a pointer to a block of unmanaged memory.
+            AddTypeString(pModule, sig, classInst, methodInst);
+            AddString("*");
+            break;
+        }
+    default:
+        AddString("**UNKNOWN TYPE**");
+
+    }
+}
+
 void SigFormat::FormatSig(MetaSig &sig, LPCUTF8 szMemberName, LPCUTF8 szClassName, LPCUTF8 szNameSpace)
 {
-    THROWSCOMPLUSEXCEPTION();
-
     UINT            cArgs;
-    TypeHandle      th;
 
     _size = SIG_INC;
     _pos = 0;
     _fmtSig = new char[_size];
 
-    Thread          *pCurThread = GetThread();
-    BOOL            fToggleGC = !pCurThread->PreemptiveGCDisabled();
+    TypeHandle *methodInst = sig.GetMethodInst();
+    AddTypeString(sig.GetModule(), sig.GetReturnProps(), _classInst, methodInst);
 
-    if (fToggleGC)
-        pCurThread->DisablePreemptiveGC();
-
-    OBJECTREF throwable = NULL;
-    GCPROTECT_BEGIN(throwable);
-    th = sig.GetReturnProps().GetTypeHandle(sig.GetModule(), &throwable, FALSE, FALSE, &_arrayType);
-    if (throwable != NULL)
-        COMPlusThrow(throwable);
-
-    AddType(th);
     AddSpace();
     if (szNameSpace != NULL)
     {
@@ -176,11 +311,7 @@ void SigFormat::FormatSig(MetaSig &sig, LPCUTF8 szMemberName, LPCUTF8 szClassNam
     // Loop through all of the args
     for (UINT i=0;i<cArgs;i++) {
         sig.NextArg();
-        th = sig.GetArgProps().GetTypeHandle(sig.GetModule(), &throwable, FALSE, FALSE, &_arrayType);
-        if (throwable != NULL)
-            COMPlusThrow(throwable);
-
-       AddType(th);
+       AddTypeString(sig.GetModule(), sig.GetArgProps(), _classInst, methodInst);
        if (i != cArgs-1)
            AddString(", ");
     }
@@ -194,10 +325,6 @@ void SigFormat::FormatSig(MetaSig &sig, LPCUTF8 szMemberName, LPCUTF8 szClassNam
     }
 
     AddString(")");
-    GCPROTECT_END();
-        
-    if (fToggleGC)
-        pCurThread->EnablePreemptiveGC();
 }
 
 int SigFormat::AddType(TypeHandle th)
@@ -255,6 +382,17 @@ int SigFormat::AddType(TypeHandle th)
                 AddString(".");
             }
             AddString(szcName);
+            if (th.HasInstantiation())
+	    {
+              TypeHandle *inst = th.GetInstantiation();
+              AddString("<");
+              for (DWORD i = 0; i < th.GetNumGenericArgs(); i++)
+	      {
+                if (i > 0) AddString(",");
+                AddType(inst[i]);
+              }
+              AddString(">");
+            }
             break;
         }
     case ELEMENT_TYPE_TYPEDBYREF:
@@ -325,36 +463,20 @@ int SigFormat::AddType(TypeHandle th)
 }
 
 
-FieldSigFormat::FieldSigFormat(FieldDesc* pFld)
+FieldSigFormat::FieldSigFormat(FieldDesc* pFld, TypeHandle *classInst)
 {
-    THROWSCOMPLUSEXCEPTION();
-
     PCCOR_SIGNATURE pSig;
     DWORD           cSig;
-    CorElementType  type;
-    TypeHandle      th;
 
     pFld->GetSig(&pSig,&cSig);
 
     _size = SIG_INC;
     _pos = 0;
 
-    // We shouldn't need to allocate memory for this data member since the
-    // base class already allocates memory for it.
-    // _fmtSig = new char[_size];
+    SigPointer sig(pSig);
+    sig.GetCallingConvInfo();
 
-    FieldSig sig(pSig,pFld->GetModule());
-
-    type = sig.GetFieldType();
-
-    OBJECTREF throwable = NULL;
-    GCPROTECT_BEGIN(throwable);
-    th = sig.GetTypeHandle(&throwable);
-    if (throwable != NULL)
-        COMPlusThrow(throwable);
-    GCPROTECT_END();
-
-    AddType(th);
+    AddTypeString(pFld->GetModule(), sig, classInst, NULL);
     AddSpace();
     AddString(pFld->GetName());
 }

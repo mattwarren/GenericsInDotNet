@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -583,9 +588,12 @@ void FUNCBREC::realizeStringConcat(EXPRCONCAT * expr)
                 compiler()->namemgr->GetPredefName(PN_STRCONCAT)->text);
     }
 
-    verified = verifyMethodCall(NULL, method, args, &obj, 0);
-
     EXPRCALL * call = newExpr(NULL, EK_CALL, typeString)->asCALL();
+    call->ppMethTypeArgs = NULL;
+    call->cMethTypeArgs = 0;
+    call->methodInType = NULL;
+    verified = verifyMethodCall(NULL, method, args, &obj, 0, call, NULL);
+
     call->object = NULL;
     call->flags |= EXF_BOUNDCALL | (expr->flags & EXF_VALONSTACK);
     call->method = verified->asMETHSYM();
@@ -787,11 +795,11 @@ void FUNCBREC::postBindCompile(EXPRBLOCK * expr)
 
 void FUNCBREC::checkOutParams()
 {
-    if (thisPointer && thisPointer->slot.ilSlot && !thisPointer->type->asAGGSYM()->isEmptyStruct) {
-        if (!currentBitset->testBits(thisPointer->slot.ilSlot, thisPointer->type->asAGGSYM()->getFieldsSize())) 
+    if (thisPointer && thisPointer->slot.ilSlot && !thisPointer->type->underlyingAggregate()->isEmptyStruct) {
+        if (!currentBitset->testBits(thisPointer->slot.ilSlot, thisPointer->type->underlyingAggregate()->getFieldsSize())) 
         {
             // Determine which fields of this were unassigned, and report error for each.
-            for (SYM * field = thisPointer->type->asAGGSYM()->firstChild; field; field = field->nextChild) {
+            for (SYM * field = thisPointer->type->underlyingAggregate()->firstChild; field; field = field->nextChild) {
                 if (field->kind == SK_MEMBVARSYM && !field->asMEMBVARSYM()->isStatic) {
                     if (!currentBitset->testBits(thisPointer->slot.ilSlot + field->asMEMBVARSYM()->offset, 
                                                  field->asMEMBVARSYM()->type->getFieldsSize()))
@@ -1177,7 +1185,7 @@ bool __fastcall FUNCBREC::assignToExpr(EXPR * expr, EXPR * val)
         ASSERT(!local->isConst);
         if ((slot = local->slot.ilSlot)) {
             if ((type = local->type)->fundType() == FT_STRUCT) {
-                currentBitset = currentBitset->setBits(slot, type->asAGGSYM()->getFieldsSize());
+                currentBitset = currentBitset->setBits(slot, type->underlyingAggregate()->getFieldsSize());
             } else {
                 currentBitset = currentBitset->setBit(slot);
             }
@@ -1197,7 +1205,7 @@ bool __fastcall FUNCBREC::assignToExpr(EXPR * expr, EXPR * val)
             currentBitset = currentBitset->setBit(expr->asFIELD()->ownerOffset);
         }
         if ((type = expr->asFIELD()->field->type)->fundType() == FT_STRUCT) {
-            currentBitset = currentBitset->setBits(slot, type->asAGGSYM()->getFieldsSize());
+            currentBitset = currentBitset->setBits(slot, type->underlyingAggregate()->getFieldsSize());
         } else {
             currentBitset = currentBitset->setBit(slot);
         }

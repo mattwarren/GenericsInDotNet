@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -560,7 +565,7 @@ STDMETHODIMP RegMeta::DefineImportMember(     // S_OK or error.
 
     _ASSERTE(pImport && pmr);
     _ASSERTE(TypeFromToken(tkImport) == mdtTypeRef || TypeFromToken(tkImport) == mdtModuleRef ||
-                IsNilToken(tkImport));
+                IsNilToken(tkImport) || TypeFromToken(tkImport) == mdtTypeSpec);
     _ASSERTE((TypeFromToken(mbMember) == mdtMethodDef && mbMember != mdMethodDefNil) ||
              (TypeFromToken(mbMember) == mdtFieldDef && mbMember != mdFieldDefNil));
 
@@ -668,7 +673,7 @@ STDMETHODIMP RegMeta::DefineEvent(
 
     _ASSERTE(TypeFromToken(td) == mdtTypeDef && td != mdTypeDefNil);
     _ASSERTE(IsNilToken(tkEventType) || TypeFromToken(tkEventType) == mdtTypeDef ||
-                TypeFromToken(tkEventType) == mdtTypeRef);
+                TypeFromToken(tkEventType) == mdtTypeRef || TypeFromToken(tkEventType) == mdtTypeSpec);
     _ASSERTE(TypeFromToken(mdAddOn) == mdtMethodDef && mdAddOn != mdMethodDefNil);
     _ASSERTE(TypeFromToken(mdRemoveOn) == mdtMethodDef && mdRemoveOn != mdMethodDefNil);
     _ASSERTE(IsNilToken(mdFire) || TypeFromToken(mdFire) == mdtMethodDef);
@@ -1636,6 +1641,83 @@ ErrExit:
     STOP_MD_PERF(DefineNestedType);
     return hr;
 } // RegMeta::DefineNestedType()
+
+
+//*****************************************************************************
+// Set the formal type parameters for the given TypeDef or MethodDef token.
+//*****************************************************************************
+STDMETHODIMP RegMeta::SetGenericPars(       // S_OK or error.
+    mdToken     tk,                     // [IN] The TypeDef/MethodDef.        
+    ULONG       ulNum,                  // [IN] number of type parameters
+    mdToken     rtkConstraints[],       // [IN] bounds on the type parameters
+    LPCWSTR     wzNames[])              // [IN] string array
+{
+    HRESULT     hr = S_OK;              // A result.
+    // Specifies whether to clear the GenericPar records.
+    BOOL        bClear = IsENCOn() || IsCallerExternal();   
+
+    LOG((LOGMD, "RegMeta::SetGenericPars(0x%08x, %d, 0x%08x, 0x%08x)\n", tk, ulNum, rtkConstraints, wzNames));
+    START_MD_PERF();
+
+    _ASSERTE(TypeFromToken(tk) == mdtTypeDef || TypeFromToken(tk) == mdtMethodDef);
+    _ASSERTE(wzNames != NULL);
+
+    IfFailGo(_SetGenericPars(ulNum, rtkConstraints, wzNames, tk, bClear));
+
+ErrExit:
+    STOP_MD_PERF(SetGenericPars);
+    return hr;
+} // RegMeta::SetGenericPars
+
+
+//*****************************************************************************
+// Create and set a MethodSpec record.
+//*****************************************************************************
+STDMETHODIMP RegMeta::DefineMethodSpec(        // S_OK or error
+    mdToken     tkImport,               // [IN] MethodDef or MemberRef
+    PCCOR_SIGNATURE pvSigBlob,          // [IN] point to a blob value of COM+ signature
+    ULONG       cbSigBlob,              // [IN] count of bytes in the signature blob
+    mdMethodSpec *pmi)         // [OUT] method instantiation token
+{
+    HRESULT         hr = S_OK;
+    MethodSpecRec    *pRecord = 0;       // The MethodSpec record.
+    RID             iRecord;            // RID of new MethodSpec record.
+
+    LOG((LOGMD, "MD RegMeta::DefineMethodSpec(0x%08x, 0x%08x, 0x%08x, 0x%08x)\n", 
+        tkImport, pvSigBlob, cbSigBlob, pmi));
+    START_MD_PERF();
+    LOCKWRITE();
+
+    m_pStgdb->m_MiniMd.PreUpdate();
+
+    _ASSERTE(TypeFromToken(tkImport) == mdtMethodDef || TypeFromToken(tkImport) == mdtMemberRef);
+
+    _ASSERTE(pvSigBlob && cbSigBlob && pmi);
+
+
+    if (!pRecord)
+    {   // Create the record.
+        IfNullGo(pRecord=m_pStgdb->m_MiniMd.AddMethodSpecRecord(&iRecord));
+
+
+        // Give token to caller.
+        *pmi = TokenFromRid(iRecord, mdtMethodSpec);
+    }
+
+    // Save row data.
+    IfFailGo(m_pStgdb->m_MiniMd.PutToken(TBL_MethodSpec, MethodSpecRec::COL_Method, pRecord, tkImport));
+    IfFailGo(m_pStgdb->m_MiniMd.PutBlob(TBL_MethodSpec, MethodSpecRec::COL_Instantiation, pRecord,
+                                pvSigBlob, cbSigBlob));
+
+    IfFailGo(UpdateENCLog(*pmi));
+
+ErrExit:
+    
+    STOP_MD_PERF(DefineMethodSpec);
+    return hr;
+} // STDMETHODIMP RegMeta::DefineMethodSpec()
+
+
 
 //*****************************************************************************
 // Set the properties on the given Method token.

@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -105,6 +110,9 @@ ERRORDEF(  76, 0,     ERR_ReservedEnumerator,             IDS_ReservedEnumerator
 ERRORDEF(  77, 0,     ERR_AsMustHaveReferenceType,        IDS_AsMustHaveReferenceType)
 ERRORDEF(  78, 4,     WRN_LowercaseEllSuffix,             IDS_LowercaseEllSuffix)
 ERRORDEF(  79, 0,     ERR_BadEventUsageNoField,           IDS_BadEventUsageNoField)
+ERRORDEF(  80, 0,     ERR_ConstraintOnlyAllowedOnGenericDecl,   IDS_ConstraintOnlyAllowedOnGenericDecl)
+ERRORDEF(  81, 0,     ERR_MethodTypeParamMustBeIdentifier,IDS_MethodTypeParamMustBeIdentifier)
+ERRORDEF(  82, 0,     ERR_EventPropertyFieldCantBeGeneric,IDS_EventPropertyFieldCantBeGeneric)
 
 ERRORDEF(100, 0,     ERR_DuplicateParamName,             IDS_DuplicateParamName)
 ERRORDEF(101, 0,     ERR_DuplicateNameInNS,              IDS_DuplicateNameInNS)
@@ -260,6 +268,16 @@ ERRORDEF(252, 2,     WRN_BadRefCompareLeft,              IDS_BadRefCompareLeft)
 ERRORDEF(253, 2,     WRN_BadRefCompareRight,             IDS_BadRefCompareRight)
 ERRORDEF(254, 0,     ERR_BadCastInFixed,                 IDS_BadCastInFixed)
 ERRORDEF(255, 0,     ERR_StackallocInCatchFinally,       IDS_StackallocInCatchFinally)
+
+ERRORDEF(301, 0,     ERR_GenericStaticField,             IDS_GenericStaticField)
+ERRORDEF(302, 0,     ERR_GenericStaticMethod,            IDS_GenericStaticMethod)
+ERRORDEF(303, 0,     ERR_TyvarNotInScope,                IDS_TyvarNotInScope)
+ERRORDEF(304, 0,     ERR_NoNewTyvar,                     IDS_NoNewTyvar)
+ERRORDEF(305, 0,     ERR_TypeParams,                     IDS_TypeParams)
+ERRORDEF(306, 0,     ERR_BadTypeParameter,               IDS_BadTypeParameter)
+ERRORDEF(307, 0,     ERR_TooManyTypeParams,              IDS_TooManyTypeParams)
+ERRORDEF(308, 0,     ERR_TooFewTypeParams,               IDS_TooFewTypeParams)
+ERRORDEF(309, 0,     ERR_GenericConstraintNotSatisfied,               IDS_GenericConstraintNotSatisfied)
 
 ERRORDEF(500, 0,     ERR_AbstractHasBody,                IDS_AbstractHasBody)
 ERRORDEF(501, 0,     ERR_ConcreteMissingBody,            IDS_ConcreteMissingBody)
@@ -440,6 +458,12 @@ ERRORDEF(676, 0,     ERR_VolatileByRef,                  IDS_VolatileByRef)
 ERRORDEF(677, 0,     ERR_VolatileStruct,                 IDS_VolatileStruct)
 ERRORDEF(678, 0,     ERR_VolatileAndReadonly,            IDS_VolatileAndReadonly)
 ERRORDEF(679, 1,     WRN_InternalVirtual,                IDS_InternalVirtual)
+//ERRORDEF(680, 1,     WRN_AccessibleReadonly,             IDS_AccessibleReadonly)
+ERRORDEF(681, 0,     ERR_AbstractField,                  IDS_AbstractField)
+ERRORDEF(682, 0,     ERR_BogusExplicitImpl,              IDS_BogusExplicitImpl)
+ERRORDEF(683, 0,     ERR_ExplicitMethodImplAccessor,     IDS_ExplicitMethodImplAccessor)
+ERRORDEF(684, 0,     ERR_AccessorImplementingMethod,     IDS_AccessorImplementingMethod)
+ERRORDEF(685, 0,     ERR_ConditionalWithOutParam,        IDS_ConditionalWithOutParam)
 
 ERRORDEF(1001, 0,   ERR_IdentifierExpected,             IDS_IdentifierExpected)
 ERRORDEF(1002, 0,   ERR_SemicolonExpected,              IDS_SemicolonExpected)
@@ -600,6 +624,8 @@ ERRORDEF(1610, 4,   WRN_DeleteAutoResFailed,            IDS_DeleteAutoResFailed)
 ERRORDEF(1611, 0,   ERR_ParamsCantBeRefOut,             IDS_ParamsCantBeRefOut)
 ERRORDEF(1612, 0,   ERR_ReturnNotLValue,                IDS_ReturnNotLValue)
 ERRORDEF(1613, 0,   ERR_MissingCoClass,                 IDS_MissingCoClass)
+ERRORDEF(1614, 0,   ERR_BadArgRef,                      IDS_BadArgRef)
+ERRORDEF(1615, 0,   ERR_BadArgExtraRef,                 IDS_BadArgExtraRef)
 
 ERRORDEF(1900, 0,   ERR_BadWarningLevel,                IDS_BadWarningLevel)
 ERRORDEF(1901, 0,   ERR_NoWarningsAsErrors,             IDS_NoWarningsAsErrors)

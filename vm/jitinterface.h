@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -138,6 +143,12 @@ public:
     CORINFO_MODULE_HANDLE __stdcall getClassModule(CORINFO_CLASS_HANDLE clsHnd);
     const char* __stdcall getClassName (CORINFO_CLASS_HANDLE cls);
     DWORD __stdcall getClassAttribs (CORINFO_CLASS_HANDLE cls, CORINFO_METHOD_HANDLE context);
+
+    // Given a scope and a MethodSpec token, decompose the MethodSpec to provide 
+    //   (a) a MemberRef for the generic method, and 
+    //   (b) a pointer to the formal instantiation 
+    BYTE* __stdcall unpackMethodInst(CORINFO_MODULE_HANDLE scopeHnd, unsigned metaTOK, unsigned *memberRef);
+
     CORINFO_CLASS_HANDLE __stdcall getSDArrayForClass(CORINFO_CLASS_HANDLE clsHnd);
     unsigned __stdcall getClassSize (CORINFO_CLASS_HANDLE cls);
     unsigned __stdcall getClassGClayout (CORINFO_CLASS_HANDLE cls, BYTE* gcPtrs); /* really GCType* gcPtrs */
@@ -217,13 +228,24 @@ public:
 
         // ICorScopeInfo stuff
     DWORD __stdcall getModuleAttribs (CORINFO_MODULE_HANDLE cls);
+
+    // Given a type token metaTOK, use class instantiation in context to instantiate any type variables and return a type handle
     CORINFO_CLASS_HANDLE __stdcall findClass(CORINFO_MODULE_HANDLE  scopeHnd, unsigned metaTOK, CORINFO_METHOD_HANDLE context);
+
+    // Given a field token metaTOK, use class instantiation in context to instantiate any type variables in its *parent* type and return a field handle
     CORINFO_FIELD_HANDLE __stdcall findField(CORINFO_MODULE_HANDLE  scopeHnd, unsigned metaTOK, CORINFO_METHOD_HANDLE context);
+
+    // Given a method token metaTOK, use class instantiation in context to instantiate any type variables in its *parent* type and return a method handle
     CORINFO_METHOD_HANDLE __stdcall findMethod(CORINFO_MODULE_HANDLE  scopeHnd, unsigned metaTOK, CORINFO_METHOD_HANDLE context);
-    void __stdcall findSig(CORINFO_MODULE_HANDLE scopeHnd, unsigned sigTOK, CORINFO_SIG_INFO* sig);
-    void __stdcall findCallSiteSig(CORINFO_MODULE_HANDLE scopeHnd, unsigned methTOK, CORINFO_SIG_INFO* sig);
-    CORINFO_GENERIC_HANDLE __stdcall findToken (CORINFO_MODULE_HANDLE  scopeHnd, unsigned metaTOK, CORINFO_METHOD_HANDLE context,
-                                                CORINFO_CLASS_HANDLE& tokenType);
+
+    // Given a field or method token metaTOK return its parent token
+    unsigned __stdcall getMemberParent(CORINFO_MODULE_HANDLE  scopeHnd, unsigned metaTOK);
+
+    // Given a signature token sigTOK, use class/method instantiation in context to instantiate any type variables in the signature and return a new signature
+    void __stdcall findSig(CORINFO_MODULE_HANDLE scopeHnd, unsigned sigTOK, CORINFO_METHOD_HANDLE context, CORINFO_SIG_INFO* sig);
+    void __stdcall findCallSiteSig(CORINFO_MODULE_HANDLE scopeHnd, unsigned methTOK, CORINFO_METHOD_HANDLE context, CORINFO_SIG_INFO* sig);
+    // Given a token metaTOK, use class instantiation in context to instantiate any type variables and return an appropriate handle
+    CORINFO_GENERIC_HANDLE __stdcall findToken (CORINFO_MODULE_HANDLE  scopeHnd, unsigned metaTOK, CORINFO_METHOD_HANDLE context, CORINFO_CLASS_HANDLE& tokenType);
     const char * __stdcall findNameOfToken (CORINFO_MODULE_HANDLE module, mdToken metaTOK);
     BOOL __stdcall canSkipVerification(CORINFO_MODULE_HANDLE moduleHnd);
 
@@ -254,14 +276,23 @@ public:
             CORINFO_METHOD_HANDLE  calleeHnd,
             CORINFO_ACCESS_FLAGS   flags);
 
+    CorInfoInstantiationVerification __stdcall isInstantiationOfVerifiedGeneric (
+	    CORINFO_METHOD_HANDLE  methodHnd);
+
+
     bool __stdcall canTailCall (
             CORINFO_METHOD_HANDLE  callerHnd,
             CORINFO_METHOD_HANDLE  calleeHnd,
             CORINFO_ACCESS_FLAGS   flags);
 
+    // Given a method descriptor ftnHnd, extract signature information into sigInfo
+    // Obtain (representative) instantiation information from ftnHnd's owner class
+    // The explicit owner parameter is used in verification code
     void __stdcall getMethodSig (
             CORINFO_METHOD_HANDLE ftnHnd,
-            CORINFO_SIG_INFO* sigInfo);
+            CORINFO_SIG_INFO* sigInfo,
+	    CORINFO_CLASS_HANDLE owner = NULL
+	    );
 
     void __stdcall getEHinfo(
             CORINFO_METHOD_HANDLE ftn,
@@ -298,10 +329,22 @@ public:
 
     // Given a Delegate type and a method, check if the method signature
     // is Compatible with the Invoke method of the delegate.
+
+    //@GENERICSVER: deprecated
     BOOL __stdcall isCompatibleDelegate(
             CORINFO_CLASS_HANDLE        objCls,
             CORINFO_METHOD_HANDLE       method,
             CORINFO_METHOD_HANDLE       delegateCtor);
+
+    //@GENERICSVER: new
+    BOOL __stdcall isCompatibleDelegate(
+            CORINFO_CLASS_HANDLE        objCls,
+            CORINFO_CLASS_HANDLE        methodParentCls,
+            CORINFO_METHOD_HANDLE       method,
+            CORINFO_CLASS_HANDLE        delegateCls,
+            CORINFO_MODULE_HANDLE       moduleHnd,
+            unsigned        methodMemberRef,
+            unsigned        delegateConstructorMemberRef);
 
     // Static helper
     static BOOL CompatibleMethodSig(
@@ -317,7 +360,10 @@ public:
                                      CORINFO_ACCESS_FLAGS  flags);
 
     CORINFO_CLASS_HANDLE __stdcall getFieldClass (CORINFO_FIELD_HANDLE field);
-    CorInfoType __stdcall getFieldType (CORINFO_FIELD_HANDLE field, CORINFO_CLASS_HANDLE* structType);
+
+    // The owner parameter is used in verification code
+    CorInfoType __stdcall getFieldType (CORINFO_FIELD_HANDLE field, CORINFO_CLASS_HANDLE* structType,CORINFO_CLASS_HANDLE owner = NULL);
+
     unsigned __stdcall getFieldOffset (CORINFO_FIELD_HANDLE field);
     void* __stdcall getFieldAddress(CORINFO_FIELD_HANDLE field, void **ppIndirection);
     CorInfoHelpFunc __stdcall getFieldHelper(CORINFO_FIELD_HANDLE field, enum CorInfoFieldAccess kind);
@@ -389,8 +435,7 @@ public:
     void* __stdcall getAddressOfPInvokeFixup(CORINFO_METHOD_HANDLE method, void **ppIndirection);
     CORINFO_PROFILING_HANDLE __stdcall GetProfilingHandle(CORINFO_METHOD_HANDLE method, BOOL *bpHookFunction, void **ppIndirection);
     LPVOID __stdcall constructStringLiteral(CORINFO_MODULE_HANDLE scopeHnd, mdToken metaTok, void **ppIndirection);
-    CORINFO_CLASS_HANDLE __stdcall findMethodClass(CORINFO_MODULE_HANDLE module, mdToken methodTok);
-    LPVOID __stdcall getInstantiationParam(CORINFO_MODULE_HANDLE module, mdToken methodTok, void **ppIndirection);
+    CORINFO_CLASS_HANDLE __stdcall findMethodClass(CORINFO_MODULE_HANDLE module, mdToken methodTok, CORINFO_METHOD_HANDLE context);
 
     DWORD __stdcall getThreadTLSIndex(void **ppIndirection);
     const void * __stdcall getInlinedCallFrameVptr(void **ppIndirection);
@@ -411,7 +456,7 @@ public:
                                                     void **ppIndirection);
     CORINFO_METHOD_HANDLE __stdcall embedMethodHandle(CORINFO_METHOD_HANDLE handle,
                                                       void **ppIndirection);
-    CORINFO_GENERIC_HANDLE __stdcall embedGenericHandle(
+    CORINFO_GENERICHANDLE_RESULT __stdcall embedGenericHandle(
                         CORINFO_MODULE_HANDLE   module,
                         unsigned                metaTOK,
                         CORINFO_METHOD_HANDLE   context,
@@ -659,7 +704,7 @@ enum ILSTUB_SPECIAL_TOKENS
     NUM_ILSTUB_HELPERS
 };
 
-Object* __stdcall JIT_IsInstanceOfClassWorker(OBJECTREF objref, EEClass *pClass, BOOL bThrow);
+Object* __stdcall JIT_IsInstanceOfClassWorker(OBJECTREF objref, MethodTable *pMT, BOOL bThrow);
 Object* __stdcall JIT_AllocateObjectSpecial(CORINFO_CLASS_HANDLE typeHnd_);
 Object* __stdcall JIT_NewCrossContextHelper(CORINFO_CLASS_HANDLE typeHnd_);
 #ifdef _DEBUG

@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -29,8 +34,8 @@ public:
     SYMTBL(COMPILER * comp, unsigned log2Buckets);
     ~SYMTBL();
 
-    PSYM LookupSym(PNAME name, PPARENTSYM parent, unsigned kindmask);
-    PSYM LookupNextSym(PSYM symPrev, PPARENTSYM parent, unsigned kindmask);
+    PSYM LookupSym(PNAME name, PPARENTSYM parent, symbmask_t kindmask);
+    PSYM LookupNextSym(PSYM symPrev, PPARENTSYM parent, symbmask_t kindmask);
 
     void Clear();
     void Term();
@@ -71,9 +76,9 @@ public:
     /* Core general creation and lookup of symbols. */
     PSYM CreateGlobalSym(SYMKIND symkind, PNAME name, PPARENTSYM parent);
     PSYM CreateLocalSym(SYMKIND symkind, PNAME name, PPARENTSYM parent);
-    PSYM LookupGlobalSym(PNAME name, PPARENTSYM parent, unsigned kindmask);
-    PSYM LookupLocalSym(PNAME name, PPARENTSYM parent, unsigned kindmask);
-    PSYM LookupNextSym(PSYM symPrev, PPARENTSYM parent, unsigned kindmask);
+    PSYM LookupGlobalSym(PNAME name, PPARENTSYM parent, symbmask_t kindmask); // DRS: changed to __int64 to allow 64 symbol kinds
+    PSYM LookupLocalSym(PNAME name, PPARENTSYM parent, symbmask_t kindmask);
+    PSYM LookupNextSym(PSYM symPrev, PPARENTSYM parent, symbmask_t kindmask);
 
     /* Specific routines for specific symbol types. */
     PNSSYM CreateNamespace(PNAME name, PNSSYM parent);
@@ -81,6 +86,7 @@ public:
     PAGGSYM CreateAggregate(PNAME name, PPARENTSYM parent);
     PNSDECLSYM CreateNamespaceDeclaration(PNSSYM nspace, PNSDECLSYM parent, PINFILESYM inputfile, NAMESPACENODE * parseTree);
     PMEMBVARSYM CreateMembVar(PNAME name, PAGGSYM parent);
+    PTYVARSYM CreateTyVar(PNAME name, PPARENTSYM parent);
     PMETHSYM CreateMethod(PNAME name, PAGGSYM parent);
     PIFACEIMPLMETHSYM CreateIfaceImplMethod(PAGGSYM parent);
     PPROPSYM CreateProperty(PNAME name, PAGGSYM parent);
@@ -95,10 +101,15 @@ public:
     PGLOBALATTRSYM CreateGlobalAttribute(PNAME name, NSDECLSYM *parent);
 
     PARRAYSYM GetArray(PTYPESYM elementType, int rank);
+    PINSTAGGSYM GetInstAgg(PAGGSYM rootType, unsigned short cArgs, PTYPESYM *ppArgs);
+    PINSTMETHSYM GetInstMeth(PMETHSYM rootMeth, unsigned short cMethArgs, PTYPESYM *ppMethArgs);
+    PINSTAGGMETHSYM GetInstAggMeth(PMETHSYM rootMeth, PINSTAGGSYM methodInType);
+    PINSTAGGINSTMETHSYM GetInstAggInstMeth(PINSTAGGMETHSYM rootMeth, unsigned short cMethArgs, PTYPESYM *ppMethArgs);
+    PINSTAGGMEMBVARSYM GetInstAggMembVar(PMEMBVARSYM rootMembVar, PINSTAGGSYM methodInType);
     PPTRSYM GetPtrType(PTYPESYM baseType);
     PPINNEDSYM GetPinnedType(PTYPESYM baseType);
     PPARAMMODSYM GetParamModifier(PTYPESYM baseType, bool isOut);
-    PTYPESYM * AllocParams(int cTypes, PTYPESYM * types, mdToken ** ppToken = NULL);
+    PTYPESYM * AllocParams(unsigned int cTypes, PTYPESYM * types, mdToken ** ppToken = NULL);
     static unsigned NumberOfParams(PTYPESYM *types)
         { return (types ? ((TYPEARRAY*) (((BYTE*) (types)) - offsetof(TYPEARRAY, types)))->cTypes : 0); }
     /* Get special symbols */
@@ -129,6 +140,8 @@ public:
     PREDEFATTRSYM *GetPredefAttr(PREDEFATTR pa)
         { return predefinedAttributes[pa]; }
 
+    PTYPESYM GetThisType(PAGGSYM root); // return, e.g. List<T> for generic aggregate List
+
     /* Other helper routines */
     inline void DeclareType(PSYM sym) 
     { 
@@ -141,7 +154,23 @@ public:
     static int GetAttrArgSize(PREDEFTYPE pt);
     LPWSTR GetFullName(PREDEFTYPE pt);
 
-    bool IsBaseType(PAGGSYM derived, PAGGSYM base);
+    PTYPESYM SubstTypeUsingType(PTYPESYM typ, PTYPESYM governingTyp);
+    PTYPESYM SubstTypeUsingTypeAsMethInst(PTYPESYM typ, PTYPESYM governingTyp);
+    PTYPESYM SubstTypeUsingCallExpr(PTYPESYM typ, EXPR *call);
+    PTYPESYM SubstTypeUsingCallData(PTYPESYM typ, PTYPESYM governingTyp, unsigned short cMethTypeArgs = 0, PTYPESYM *ppMethTypeArgs = NULL);
+    PTYPESYM SubstType(PTYPESYM sym, unsigned short cArgs, PTYPESYM *ppArgs, unsigned short cMethTypeArgs = 0, PTYPESYM *ppMethTypeArgs = NULL);
+    bool UsesClassTypeFormals(TYPESYM *typ);
+    bool UsesMethodTypeFormals(TYPESYM *typ);
+
+
+    PTYPESYM *SubstParamsUsingType(unsigned short cParams, PTYPESYM *params, PTYPESYM governingTyp);
+    PTYPESYM *SubstParamsUsingCallExpr(unsigned short cParams, PTYPESYM *params, EXPR *call);
+    PTYPESYM *SubstParamsUsingCallData(unsigned short cParams, PTYPESYM *params, PTYPESYM governingTyp, unsigned short cMethTypeArgs = 0, PTYPESYM *ppMethTypeArgs = NULL);
+    PTYPESYM *SubstParams(unsigned short cParams, PTYPESYM *params, unsigned short cInst, PTYPESYM *ppInst, unsigned short cMethTypeArgs = 0, PTYPESYM *ppMethTypeArgs = NULL);
+    bool SubstSigUsingTypeEqualsSig(METHPROPSYM *msym,PTYPESYM methodInType,PTYPESYM *params2,PTYPESYM retty2);
+
+    bool IsBaseAggregate(PAGGSYM derived, PAGGSYM base); 
+    bool IsBaseType(PTYPESYM derived, PTYPESYM base); 
 
     void AddToGlobalSymList(PSYM sym, PSYMLIST * * symLink);
     void AddToLocalSymList(PSYM sym, PSYMLIST * * symLink);
@@ -169,7 +198,7 @@ private:
     struct TYPEARRAY {
         unsigned hash;
         TYPEARRAY * next;
-        int cTypes;
+        unsigned int cTypes;
         PTYPESYM types[];
     };
     typedef TYPEARRAY * PTYPEARRAY;

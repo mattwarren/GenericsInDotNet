@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -22,25 +27,15 @@
 #include "ceefilegenwriter.h"
 #include "strongname.h"
 
-extern WCHAR *g_wzResourceFile;  // resource file name - global, declared in MAIN.CPP
-extern bool OnErrGo; // declared in main.cpp
-extern unsigned int g_uCodePage;
-extern WCHAR *g_wzKeySourceName;
-extern bool bClock;
-extern DWORD cBegin,cEnd,
-			cParsBegin,cParsEnd,
-			cMDEmitBegin,cMDEmitEnd,
-			cMDEmit1,cMDEmit2,cMDEmit3,cMDEmit4,
-			cRef2DefBegin,cRef2DefEnd,
-			cFilegenBegin,cFilegenEnd;
 
 HRESULT Assembler::InitMetaData()
 {
     HRESULT             hr = E_FAIL;
-    WCHAR               wzScopeName[MAX_SCOPE_LENGTH];
+    WCHAR*              wzScopeName=&wzUniBuf[0];
 
 	if(m_fInitialisedMetaData) return S_OK;
 
+    if(bClock) bClock->cMDInitBegin = GetTickCount();
 	if(m_szScopeName[0]) // default: scope name = output file name
 	{
 		WszMultiByteToWideChar(g_uCodePage,0,m_szScopeName,-1,wzScopeName,MAX_SCOPE_LENGTH);
@@ -55,13 +50,14 @@ HRESULT Assembler::InitMetaData()
 	if (FAILED(hr))
 		goto exit;
 
-	hr = m_pDisp->DefineScope(CLSID_CorMetaDataRuntime, 0, IID_IMetaDataEmit,
+    hr = m_pDisp->DefineScope(CLSID_CorMetaDataRuntime, 0, IID_IMetaDataEmit,
 						(IUnknown **)&m_pEmitter);
 	if (FAILED(hr))
 		goto exit;
 
 	m_pManifest->SetEmitter(m_pEmitter);
-
+    if(FAILED(hr = m_pEmitter->QueryInterface(IID_IMetaDataImport, (void**)&m_pImporter)))
+        goto exit;
 	hr = PAL_CoCreateInstance(CLSID_CorSymWriter,
                            IID_ISymUnmanagedWriter,
                            (void **)&m_pSymWriter);
@@ -78,10 +74,6 @@ HRESULT Assembler::InitMetaData()
 		m_pSymWriter = NULL;
 	}
 
-	hr = m_pEmitter->QueryInterface(IID_IMetaDataHelper, (void **)&m_pHelper);
-	if (FAILED(hr))
-		goto exit;
-
     hr = m_pEmitter->SetModuleProps(
         wzScopeName
     );
@@ -93,12 +85,13 @@ HRESULT Assembler::InitMetaData()
 
 	if(m_fOwnershipSet)
 	{
-		DefineCV(1,0x02000001,m_pbsOwner);
+		DefineCV(new CustomDescr(1,0x02000001,m_pbsOwner));
 	}
 
     hr = S_OK;
 
 exit:
+    if(bClock) bClock->cMDInitEnd = GetTickCount();
     return hr;
 }
 /*********************************************************************************/
@@ -160,7 +153,10 @@ HRESULT Assembler::CreateTLSDirectory() {
     hr=m_pCeeFileGen->SetDirectoryEntry (m_pCeeFile, tlsDirSec, IMAGE_DIRECTORY_ENTRY_TLS, 
 		sizeof(IMAGE_TLS_DIRECTORY), tlsDirOffset);
 
-	return(hr);
+	m_dwComImageFlags &= ~COMIMAGE_FLAGS_ILONLY; 
+	m_dwComImageFlags |= COMIMAGE_FLAGS_32BITREQUIRED;
+	
+    return(hr);
 }
 
 HRESULT Assembler::CreateDebugDirectory()
@@ -420,7 +416,6 @@ DWORD	Assembler::EmitExportStub(DWORD dwVTFSlotRVA)
 	
 	PEFileOffset -= EXPORT_STUB_SIZE;
 	*pwJumpInd = 0x25FF;
-	printf("EmitExportStub: dwVTFSlotRVA=0x%08x\n",dwVTFSlotRVA);
 	*pdwVTFSlotRVA = dwVTFSlotRVA;
 	memcpy(outBuff,bBuff,EXPORT_STUB_SIZE);
 	m_pCeeFileGen->AddSectionReloc(m_pILSection, PEFileOffset+2,m_pGlobalDataSection, srRelocHighLow);
@@ -499,7 +494,7 @@ HRESULT Assembler::StrongNameSign()
     return S_OK;
 }
 
-BOOL Assembler::EmitMembers(Class* pClass)
+BOOL Assembler::EmitFieldsMethods(Class* pClass)
 {
 	unsigned n;
 	BOOL ret = TRUE;
@@ -565,7 +560,7 @@ BOOL Assembler::EmitMembers(Class* pClass)
 		Method*	pMethod;
 
 		if(m_fReportProgress) printf("Methods: %d;\t",n);
-        while((pMethod = pClass->m_MethodList.POP()))
+		for(int i=0; (pMethod = pClass->m_MethodList.PEEK(i)); i++)
 		{
 			if(!EmitMethod(pMethod))
 			{
@@ -576,13 +571,20 @@ BOOL Assembler::EmitMembers(Class* pClass)
 			{ 
 			  if (pMethod->IsGlobalMethod())
 				  report->msg("Method '%s'\n\n", pMethod->m_szName);
-			  else report->msg("Method '%s::%s'\n\n", pMethod->m_pClass->m_szName,
+			  else report->msg("Method '%s::%s'\n\n", pMethod->m_pClass->m_szFQN,
 						  pMethod->m_szName);
 			  GenerateListingFile(pMethod);
 			}
-			delete pMethod;
 		}
 	}
+	if(m_fReportProgress) printf("\n");
+	return ret;
+}
+
+BOOL Assembler::EmitEventsProps(Class* pClass)
+{
+	unsigned n;
+	BOOL ret = TRUE;
 	// emit all event definition metadata tokens
     if((n = pClass->m_EventDList.COUNT()))
 	{
@@ -616,15 +618,205 @@ BOOL Assembler::EmitMembers(Class* pClass)
 	return ret;
 }
 
+HRESULT Assembler::ResolveLocalMemberRefs()
+{
+	unsigned ulTotal=0, ulDefs=0, ulRefs=0, ulUnres=0;
+    MemberRefDList* pList[2] = {&m_LocalMethodRefDList,&m_LocalFieldRefDList};
+	
+    ulTotal = pList[0]->COUNT() + pList[1]->COUNT();
+	if(ulTotal)
+    {
+		MemberRefDescriptor*	pMRD;
+		mdToken			tkMemberDef = 0;
+		int i,j,k;
+		Class	*pSearch;
+
+		if(m_fReportProgress) printf("Resolving local member refs: ");
+        for(k=0; k<2; k++)
+        {
+            for(i=0; (pMRD = pList[k]->PEEK(i)); i++)
+    		{
+    			tkMemberDef = 0;
+    			Method* pListMD;
+    			char*			pMRD_szName = pMRD->m_szName;
+                DWORD           pMRD_dwName = pMRD->m_dwName;
+    			ULONG			pMRD_dwCSig = (pMRD->m_pSigBinStr ? pMRD->m_pSigBinStr->length() : 0);
+    			PCOR_SIGNATURE	pMRD_pSig = (PCOR_SIGNATURE)(pMRD->m_pSigBinStr ? pMRD->m_pSigBinStr->ptr() : NULL);
+                CQuickBytes     qbSig;
+    			
+                pSearch = NULL;
+                if(pMRD->m_tdClass == mdTokenNil)
+                    pSearch = m_lstClass.PEEK(0);
+                else if((TypeFromToken(pMRD->m_tdClass) != mdtTypeDef)
+                    ||((pSearch = m_lstClass.PEEK(RidFromToken(pMRD->m_tdClass)-1)) == NULL))
+                {
+    				report->msg("Error: bad parent 0x%08X of local member ref '%s'\n",
+                        pMRD->m_tdClass,pMRD->m_szName);
+                }
+                if(pSearch)
+                {
+                    // MemberRef may reference a method or a field
+        			if(k==0) //methods
+        			{
+                        if(*pMRD_pSig & IMAGE_CEE_CS_CALLCONV_VARARG)
+                        {
+                            ULONG L;
+                            qbSig.ReSize(0);
+                            _GetFixedSigOfVarArg(pMRD_pSig,pMRD_dwCSig,&qbSig,&L);
+                            pMRD_pSig = (PCOR_SIGNATURE)(qbSig.Ptr());
+                            pMRD_dwCSig = L;
+                        }
+                        for(j=0; (pListMD = pSearch->m_MethodList.PEEK(j)); j++)
+                        {
+                            if(pListMD->m_dwName != pMRD_dwName) continue;
+                            if(strcmp(pListMD->m_szName,pMRD_szName)) continue;
+                            if(pListMD->m_dwMethodCSig  != pMRD_dwCSig)  continue;
+                            if(memcmp(pListMD->m_pMethodSig,pMRD_pSig,pMRD_dwCSig)) continue;
+                            tkMemberDef = pListMD->m_Tok;
+                            ulDefs++;
+                            break;
+                        }
+                        if(tkMemberDef && (*pMRD_pSig & IMAGE_CEE_CS_CALLCONV_VARARG))
+                        {
+                            WszMultiByteToWideChar(g_uCodePage,0,pMRD_szName,-1,wzUniBuf,dwUniBuf);
+        
+                            m_pEmitter->DefineMemberRef(tkMemberDef, wzUniBuf,
+                                                             pMRD->m_pSigBinStr->ptr(),
+                                                             pMRD->m_pSigBinStr->length(),
+                                                             &tkMemberDef);
+                            ulDefs--;
+                            ulRefs++;
+                        }
+        			}
+        			else   // fields
+        			{
+                        FieldDescriptor* pListFD;
+                        for(j=0; (pListFD = pSearch->m_FieldDList.PEEK(j)); j++)
+                        {
+                            if(pListFD->m_dwName != pMRD_dwName) continue;
+                            if(strcmp(pListFD->m_szName,pMRD_szName)) continue;
+                            if(pListFD->m_pbsSig)
+                            {
+                                if(pListFD->m_pbsSig->length()  != pMRD_dwCSig)  continue;
+                                if(memcmp(pListFD->m_pbsSig->ptr(),pMRD_pSig,pMRD_dwCSig)) continue;
+                            }
+                            else if(pMRD_dwCSig) continue;
+                            tkMemberDef = pListFD->m_fdFieldTok;
+                            ulDefs++;
+                            break;
+                        }
+        			}
+                }
+    			if(tkMemberDef==0)
+    			{ // could not resolve ref to def, make new ref and leave it this way
+    				pSearch = pMRD->m_pClass;
+    				if(pSearch)
+                    {
+    					mdToken tkRef = MakeTypeRef(0,pSearch->m_szFQN);
+    
+    					if(RidFromToken(tkRef))
+    					{
+    						WszMultiByteToWideChar(g_uCodePage,0,pMRD_szName,-1,wzUniBuf,dwUniBuf);
+    
+    						m_pEmitter->DefineMemberRef(tkRef, wzUniBuf, pMRD_pSig, 
+    							pMRD_dwCSig, &tkMemberDef);
+                            ulRefs++;
+    					}
+                        else
+                        {
+            				report->msg("Error: unresolved member ref '%s' of class 0x%08X\n",pMRD->m_szName,pMRD->m_tdClass);
+            				ulUnres++;
+                        }
+    				}
+                    else
+                    {
+        				report->msg("Error: unresolved global member ref '%s'\n",pMRD->m_szName);
+        				ulUnres++;
+                    }
+    			}
+                pMRD->m_tkResolved = tkMemberDef;
+    		}
+        }
+        for(i=0; (pMRD = m_MethodSpecList.PEEK(i)); i++)
+        {
+            tkMemberDef = pMRD->m_tdClass;
+            if(TypeFromToken(tkMemberDef)==0x99000000)
+            {
+                tkMemberDef = m_LocalMethodRefDList.PEEK(RidFromToken(tkMemberDef)-1)->m_tkResolved;
+                if((TypeFromToken(tkMemberDef)==mdtMethodDef)||(TypeFromToken(tkMemberDef)==mdtMemberRef))
+                {
+                    ULONG			pMRD_dwCSig = (pMRD->m_pSigBinStr ? pMRD->m_pSigBinStr->length() : 0);
+                    PCOR_SIGNATURE	pMRD_pSig = (PCOR_SIGNATURE)(pMRD->m_pSigBinStr ? pMRD->m_pSigBinStr->ptr() : NULL);
+                    HRESULT hr = m_pEmitter->DefineMethodSpec(tkMemberDef, pMRD_pSig, pMRD_dwCSig, &(pMRD->m_tkResolved));
+                    if(FAILED(hr))
+                        report->error("Unable to define method instantiation");
+                }
+            }
+            if(RidFromToken(pMRD->m_tkResolved)) ulDefs++;
+            else ulUnres++;
+        }
+		if(m_fReportProgress) printf("%d -> %d defs, %d refs, %d unresolved\n",ulTotal,ulDefs,ulRefs,ulUnres);
+	}
+    return (ulUnres ? E_FAIL : S_OK);
+}
+HRESULT Assembler::DoLocalMemberRefFixups()
+{
+    MemberRefDList* pList;
+    unsigned    Nlmr = m_LocalMethodRefDList.COUNT() + m_LocalFieldRefDList.COUNT(), 
+                Nlmrf = m_LocalMemberRefFixupList.COUNT();
+    HRESULT     hr = S_OK;
+    if(Nlmr)
+	{
+        MemberRefDescriptor* pMRD;
+        LocalMemberRefFixup* pMRF;
+        while((pMRF = m_LocalMemberRefFixupList.POP()))
+        {
+            switch(TypeFromToken(pMRF->tk))
+            {
+                case 0x99000000: pList = &m_LocalMethodRefDList; break;
+                case 0x98000000: pList = &m_LocalFieldRefDList; break;
+                case 0x9A000000: pList = &m_MethodSpecList; break;
+                default: pList = NULL; break;
+            }
+            if(pList)
+            {
+                pMRD = pList->PEEK(RidFromToken(pMRF->tk)-1);
+    			if(pMRD)
+                    memcpy((void*)(pMRF->offset),&(pMRD->m_tkResolved),sizeof(mdToken));
+                else
+                {
+    				report->msg("Error: bad local member ref token 0x%08X in LMR fixup\n",pMRF->tk);
+                    hr = E_FAIL;
+                }
+            }
+            delete pMRF;
+        }
+    }
+    else if(Nlmrf)
+    {
+    	report->msg("Error: %d local member ref fixups, no local member refs\n",Nlmrf);
+        hr = E_FAIL;
+    }
+    return hr;
+}
+void Assembler::EmitUnresolvedCustomAttributes()
+{
+    CustomDescr *pCD;
+    while((pCD = m_CustomDescrList.POP()))
+    {
+        pCD->tkType = ResolveLocalMemberRef(pCD->tkType);
+        pCD->tkOwner = ResolveLocalMemberRef(pCD->tkOwner);
+        DefineCV(new CustomDescr(pCD->tkOwner,pCD->tkType,pCD->pBlob));
+    }
+}
+
 HRESULT Assembler::CreatePEFile(WCHAR *pwzOutputFilename)
 {
     HRESULT             hr;
 	DWORD				mresourceSize = 0;
 	BYTE*				mresourceData = NULL;
-	//IUnknown *pUnknown = NULL;
-//    DWORD               i;
 
-	if(bClock) cMDEmitBegin = GetTickCount();
+	if(bClock) bClock->cMDEmitBegin = GetTickCount();
 	if(m_fReportProgress) printf("Creating %s file\n", m_fOBJ ? "COFF" : "PE");
     if (!m_pEmitter)
     {
@@ -637,9 +829,7 @@ HRESULT Assembler::CreatePEFile(WCHAR *pwzOutputFilename)
 		if(!OnErrGo) return E_FAIL;
 	}
 
-    if (DoGlobalFixups() == FALSE)
-        return E_FAIL;
-	if(bClock) cMDEmit1 = GetTickCount();
+	if(bClock) bClock->cMDEmit1 = GetTickCount();
 
 	if(m_fOBJ)
 	{
@@ -660,32 +850,32 @@ HRESULT Assembler::CreatePEFile(WCHAR *pwzOutputFilename)
     if (m_pManifest->m_sStrongName.m_pbPublicKey)
         if (FAILED(hr = AllocateStrongNameSignature()))
             goto exit;
-	if(bClock) cMDEmit2 = GetTickCount();
+	if(bClock) bClock->cMDEmit2 = GetTickCount();
 
-	// Check undefined local TypeRefs
-	if(m_LocalTypeRefDList.COUNT())
-	{
-		LocalTypeRefDescr*	pLTRD=NULL;
-		BOOL	bIsUndefClass = FALSE;
-        while((pLTRD = m_LocalTypeRefDList.POP()))
-		{
-			if(NULL == FindClass(pLTRD->m_szFullName))
-			{
-				report->msg("%s: Reference to undefined class '%s' (token 0x%08X)\n",
-                    "Error", pLTRD->m_szFullName,pLTRD->m_tok);
-				bIsUndefClass = TRUE;
-			}
-			delete pLTRD;
-		}
-        if(bIsUndefClass && !OnErrGo) return E_FAIL;
-	}
-	if(bClock) cMDEmit3 = GetTickCount();
-
-	// Emit class members and globals:
+    // Emit classes, class members and globals:
 	{
         Class *pSearch;
 		int i;
-		if(m_fReportProgress)	printf("\nEmitting members:\n");
+		BOOL	bIsUndefClass = FALSE;
+		if(m_fReportProgress)	printf("\nEmitting classes:\n");
+        for (i=1; (pSearch = m_lstClass.PEEK(i)); i++)   // 0 is <Module>
+		{
+			if(m_fReportProgress)
+				printf("Class %d:\t%s\n",i,pSearch->m_szFQN);
+            
+            if(pSearch->m_bIsMaster)
+            {
+				report->msg("Error: Reference to undefined class '%s'\n",pSearch->m_szFQN);
+				bIsUndefClass = TRUE;
+            }
+			if(!EmitClass(pSearch))
+			{
+				if(!OnErrGo) return E_FAIL;
+			}
+		}
+        if(bIsUndefClass && !OnErrGo) return E_FAIL;
+		
+        if(m_fReportProgress)	printf("\nEmitting fields and methods:\n");
         for (i=0; (pSearch = m_lstClass.PEEK(i)); i++)
 		{
 			if(m_fReportProgress)
@@ -693,15 +883,40 @@ HRESULT Assembler::CreatePEFile(WCHAR *pwzOutputFilename)
 				if(i == 0)	printf("Global \t");
 				else		printf("Class %d\t",i);
 			}
-			if(!EmitMembers(pSearch))
+			if(!EmitFieldsMethods(pSearch))
 			{
 				if(!OnErrGo) return E_FAIL;
 			}
 		}
 	}
-	if(bClock) cMDEmit4 = GetTickCount();
 
-	if(m_MethodImplDList.COUNT())
+	// All ref'ed items def'ed in this file are emitted, resolve member refs to member defs:
+	if(bClock) bClock->cRef2DefBegin = GetTickCount();
+	hr = ResolveLocalMemberRefs();
+    if(bClock) bClock->cRef2DefEnd = GetTickCount();
+    if(FAILED(hr) &&(!OnErrGo)) goto exit;
+
+    // Local member refs resolved, emit events, props and method impls
+	{
+        Class *pSearch;
+		int i;
+
+        if(m_fReportProgress)	printf("\nEmitting events and properties:\n");
+        for (i=0; (pSearch = m_lstClass.PEEK(i)); i++)
+		{
+			if(m_fReportProgress)
+			{
+				if(i == 0)	printf("Global \t");
+				else		printf("Class %d\t",i);
+			}
+			if(!EmitEventsProps(pSearch))
+			{
+				if(!OnErrGo) return E_FAIL;
+			}
+		}
+	}
+	if(bClock) bClock->cMDEmit3 = GetTickCount();
+    if(m_MethodImplDList.COUNT())
 	{
 		if(m_fReportProgress) report->msg("Method Implementations (total): %d\n",m_MethodImplDList.COUNT());
 		if(!EmitMethodImpls())
@@ -709,115 +924,41 @@ HRESULT Assembler::CreatePEFile(WCHAR *pwzOutputFilename)
 			if(!OnErrGo) return E_FAIL;
 		}
 	}
-	if(bClock) cMDEmitEnd = cRef2DefBegin = GetTickCount();
-	// Now, when all items defined in this file are emitted, let's try to resolve member refs to member defs:
-	if(m_MemberRefDList.COUNT())
-	{
-		MemberRefDescriptor*	pMRD;
-		mdToken			tkMemberDef = 0;
-		int i,j;
-		unsigned ulTotal=0, ulDefs=0, ulRefs=0;
-		Class	*pSearch;
-
-		if(m_fReportProgress) printf("Resolving member refs: ");
-        while((pMRD = m_MemberRefDList.POP()))
-		{
-			tkMemberDef = 0;
-			MethodDescriptor* pListMD;
-			mdToken			pMRD_tdClass = pMRD->m_tdClass;
-			char*			pMRD_szName = pMRD->m_szName;
-			ULONG			pMRD_dwCSig = (pMRD->m_pSigBinStr ? pMRD->m_pSigBinStr->length() : 0);
-			PCOR_SIGNATURE	pMRD_pSig = (PCOR_SIGNATURE)(pMRD->m_pSigBinStr ? pMRD->m_pSigBinStr->ptr() : NULL);
-			ulTotal++;
-			// MemberRef may reference a method or a field
-			if((pMRD_pSig==NULL)||(*pMRD_pSig != IMAGE_CEE_CS_CALLCONV_FIELD))
-			{
-                for (i=0; (pSearch = m_lstClass.PEEK(i)); i++)
-				{
-					if(pMRD_tdClass != pSearch->m_cl) continue;
-                    for(j=0; (pListMD = pSearch->m_MethodDList.PEEK(j)); j++)
-					{
-						if(pListMD->m_dwCSig  != pMRD_dwCSig)  continue;
-						if(memcmp(pListMD->m_pSig,pMRD_pSig,pMRD_dwCSig)) continue;
-						if(strcmp(pListMD->m_szName,pMRD_szName)) continue;
-						tkMemberDef = pListMD->m_mdMethodTok;
-						break;
-					}
-				}
-			}
-			if(tkMemberDef == 0)
-			{
-				if((pMRD_pSig==NULL)||(*pMRD_pSig == IMAGE_CEE_CS_CALLCONV_FIELD))
-				{
-					FieldDescriptor* pListFD;
-                    for (i=0; (pSearch = m_lstClass.PEEK(i)); i++)
-					{
-						if(pMRD_tdClass != pSearch->m_cl) continue;
-                        for(j=0; (pListFD = pSearch->m_FieldDList.PEEK(j)); j++)
-						{
-							if(pListFD->m_pbsSig)
-							{
-								if(pListFD->m_pbsSig->length()  != pMRD_dwCSig)  continue;
-								if(memcmp(pListFD->m_pbsSig->ptr(),pMRD_pSig,pMRD_dwCSig)) continue;
-							}
-							else if(pMRD_dwCSig) continue;
-							if(strcmp(pListFD->m_szName,pMRD_szName)) continue;
-							tkMemberDef = pListFD->m_fdFieldTok;
-							break;
-						}
-					}
-				}
-			}
-			if(tkMemberDef==0)
-			{ // could not resolve ref to def, make new ref and leave it this way
-                if((pSearch = pMRD->m_pClass))
-				{
-					mdToken tkRef;
-					BinStr* pbs = new BinStr();
-					pbs->appendInt8(ELEMENT_TYPE_NAME);
-					strcpy((char*)(pbs->getBuff((unsigned int)strlen(pSearch->m_szFQN)+1)),pSearch->m_szFQN);
-					if(!ResolveTypeSpecToRef(pbs,&tkRef)) tkRef = mdTokenNil;
-					delete pbs;
-
-					if(RidFromToken(tkRef))
-					{
-						ULONG cTemp = (ULONG)(strlen(pMRD_szName)+1);
-						WCHAR* wzMemberName = new WCHAR[cTemp];
-						WszMultiByteToWideChar(g_uCodePage,0,pMRD_szName,-1,wzMemberName,cTemp);
-
-						hr = m_pEmitter->DefineMemberRef(tkRef, wzMemberName, pMRD_pSig, 
-							pMRD_dwCSig, &tkMemberDef);
-						ulRefs++;
-						delete [] wzMemberName;
-					}
-				}
-			}
-			else ulDefs++;
-			if(RidFromToken(tkMemberDef))
-			{
-				SET_UNALIGNED_VAL32((mdToken *)pMRD->m_ulOffset, tkMemberDef);
-				delete pMRD;
-			}
-			else
-			{
-				report->msg("Error: unresolved member ref '%s' of class 0x%08X\n",pMRD->m_szName,pMRD->m_tdClass);
-				hr = E_FAIL;
-				delete pMRD;
-				if(!OnErrGo) goto exit;
-			}
-		}
-		if(m_fReportProgress) printf("%d -> %d defs, %d refs\n",ulTotal,ulDefs,ulRefs);
-	}
-	if(bClock) cRef2DefEnd = GetTickCount();
-	// emit manifest info (if any)
+        // Emit the rest of the metadata
+	if(bClock) bClock->cMDEmit4 = GetTickCount();
 	hr = S_OK;
 	if(m_pManifest) 
 	{
 		if (FAILED(hr = m_pManifest->EmitManifest())) goto exit;
 	}
+    EmitUnresolvedCustomAttributes();
+	if(bClock) bClock->cMDEmitEnd = GetTickCount();
 
-	if(g_wzResourceFile)
-	    if (FAILED(hr=m_pCeeFileGen->SetResourceFileName(m_pCeeFile, g_wzResourceFile))) goto exit;
+    hr = DoLocalMemberRefFixups();
+    if(FAILED(hr) &&(!OnErrGo)) goto exit;
+    // Local member refs resolved and fixed up in BinStr method bodies. Emit the bodies.
+    {
+        Class* pClass;
+        Method* pMethod;
+        for (int i=0; (pClass = m_lstClass.PEEK(i)); i++)
+        {
+            for(int j=0; (pMethod = pClass->m_MethodList.PEEK(j)); j++)
+            {
+                if(!EmitMethodBody(pMethod))
+                {
+                    report->msg("Error: failed to emit body of '%s'\n",pMethod->m_szName);
+                    hr = E_FAIL;
+                    if(!OnErrGo) goto exit;
+                }
+            }
+        }
+    }
+
+    if (DoGlobalFixups() == FALSE)
+        return E_FAIL;
+
+    if(m_wzResourceFile)
+	    if (FAILED(hr=m_pCeeFileGen->SetResourceFileName(m_pCeeFile, m_wzResourceFile))) goto exit;
 
 	if (FAILED(hr=CreateTLSDirectory())) goto exit;
 
@@ -855,24 +996,24 @@ HRESULT Assembler::CreatePEFile(WCHAR *pwzOutputFilename)
 		{
             if((pGlobalLabel = FindGlobalLabel(pVTFEntry->m_szLabel)))
 			{
-				MethodDescriptor*	pMD;
+				Method*	pMD;
 				Class* pClass;
 				m_pVTable->appendInt32(pGlobalLabel->m_GlobalOffset);
 				m_pVTable->appendInt16(pVTFEntry->m_wCount);
 				m_pVTable->appendInt16(pVTFEntry->m_wType);
                 for(int i=0; (pClass = m_lstClass.PEEK(i)); i++)
 				{
-                    for(WORD j = 0; (pMD = pClass->m_MethodDList.PEEK(j)); j++)
+					for(WORD j = 0; (pMD = pClass->m_MethodList.PEEK(j)); j++)
 					{
 						if(pMD->m_wVTEntry == k+1)
 						{
 							char*	ptr;
 							if(SUCCEEDED(hr = m_pCeeFileGen->ComputeSectionPointer(m_pGlobalDataSection,pGlobalLabel->m_GlobalOffset,&ptr)))
 							{
-								DWORD dwDelta = (pMD->m_wVTSlot-1)*((pVTFEntry->m_wType & COR_VTABLE_32BIT) ? (DWORD) sizeof(DWORD) : (DWORD) sizeof(__int64));
+								DWORD dwDelta = (pMD->m_wVTSlot-1)*((pVTFEntry->m_wType & COR_VTABLE_32BIT) ? (DWORD)sizeof(DWORD) : (DWORD)sizeof(__int64));
 								ptr += dwDelta;
 								mdMethodDef* mptr = (mdMethodDef*)ptr;
-								*mptr = pMD->m_mdMethodTok;
+								*mptr = pMD->m_Tok;
 								if(pMD->m_dwExportOrdinal != 0xFFFFFFFF)
 								{
 									EATEntry*	pEATE = new EATEntry;
@@ -915,6 +1056,8 @@ HRESULT Assembler::CreatePEFile(WCHAR *pwzOutputFilename)
 	if(m_EATList.COUNT())
 	{
 		if(FAILED(CreateExportDirectory())) goto exit;
+        m_dwComImageFlags &= ~COMIMAGE_FLAGS_ILONLY; 
+        m_dwComImageFlags |= COMIMAGE_FLAGS_32BITREQUIRED;
 	}
     if (m_fWindowsCE)
     {
@@ -958,20 +1101,28 @@ HRESULT Assembler::CreatePEFile(WCHAR *pwzOutputFilename)
 			{
 				if (pListFD->m_rvaLabel != 0) 
 				{
-					GlobalLabel *pLabel = FindGlobalLabel(pListFD->m_rvaLabel);
-					if (pLabel == 0)
+					DWORD rva;
+					if(*(pListFD->m_rvaLabel)=='@')
 					{
-						report->msg("Error:Could not find label '%s' for the field '%s'\n", pListFD->m_rvaLabel, pListFD->m_szName);
-						hr = E_FAIL;
-						continue;
+						rva = (DWORD)atoi(pListFD->m_rvaLabel + 1);
 					}
-				
-					DWORD rva = pLabel->m_GlobalOffset;
-					if (pLabel->m_Section == m_pTLSSection)
-						rva += tlsSectionRVA;
-					else {
-						_ASSERTE(pLabel->m_Section == m_pGlobalDataSection);
-						rva += dataSectionRVA;
+					else
+					{
+						GlobalLabel *pLabel = FindGlobalLabel(pListFD->m_rvaLabel);
+						if (pLabel == 0)
+						{
+							report->msg("Error:Could not find label '%s' for the field '%s'\n", pListFD->m_rvaLabel, pListFD->m_szName);
+							hr = E_FAIL;
+							continue;
+						}
+					
+						rva = pLabel->m_GlobalOffset;
+						if (pLabel->m_Section == m_pTLSSection)
+							rva += tlsSectionRVA;
+						else {
+							_ASSERTE(pLabel->m_Section == m_pGlobalDataSection);
+							rva += dataSectionRVA;
+						}
 					}
 					if (FAILED(m_pEmitter->SetFieldRVA(pListFD->m_fdFieldTok, rva))) goto exit;
 				}
@@ -980,13 +1131,13 @@ HRESULT Assembler::CreatePEFile(WCHAR *pwzOutputFilename)
 		if (FAILED(hr)) goto exit;
 	}
 
-	if(bClock) cFilegenBegin = GetTickCount();
+	if(bClock) bClock->cFilegenBegin = GetTickCount();
 	// actually output the meta-data
     if (FAILED(hr=m_pCeeFileGen->EmitMetaDataAt(m_pCeeFile, m_pEmitter, m_pILSection, metaDataOffset, metaData, metaDataSize))) goto exit;
 	// actually output the resources
 	if(mresourceSize && mresourceData)
 	{
-		size_t  i, N = m_pManifest->m_dwMResNum, sizeread, L;
+		size_t i, N = m_pManifest->m_dwMResNum, sizeread, L;
 		BYTE	*ptr = (BYTE*)mresourceData;
 		BOOL	mrfail = FALSE;
 		FILE*	pFile;

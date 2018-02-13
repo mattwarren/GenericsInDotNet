@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -29,7 +34,10 @@ struct LinePC
 {
 	ULONG	Line;
 	ULONG	Column;
+	ULONG	LineEnd;
+	ULONG	ColumnEnd;
 	ULONG	PC;
+    ISymUnmanagedDocumentWriter* pWriter;
 };
 typedef FIFO<LinePC> LinePCList;
 
@@ -41,14 +49,6 @@ struct PInvokeDescriptor
 	DWORD	dwAttrs;
 };
 
-struct CustomDescr
-{
-	mdToken	tkType;
-	BinStr* pBlob;
-	CustomDescr(mdToken tk, BinStr* pblob) { tkType = tk; pBlob = pblob; };
-	~CustomDescr() { if(pBlob) delete pBlob; };
-};
-typedef FIFO<CustomDescr> CustomDescrList;
 struct TokenRelocDescr // for OBJ generation only!
 {
 	DWORD	offset;
@@ -57,9 +57,21 @@ struct TokenRelocDescr // for OBJ generation only!
 };
 typedef FIFO<TokenRelocDescr> TRDList;
 /* structure - element of [local] signature name list */
+
+struct CustomDescr
+{
+	mdToken	tkType;
+    mdToken tkOwner;
+	BinStr* pBlob;
+	CustomDescr(mdToken tko, mdToken tk, BinStr* pblob) { tkType = tk; pBlob = pblob; tkOwner = tko;};
+	CustomDescr(mdToken tk, BinStr* pblob) { tkType = tk; pBlob = pblob; tkOwner = 0;};
+	~CustomDescr() { if(pBlob) delete pBlob; };
+};
+typedef FIFO<CustomDescr> CustomDescrList;
 struct	ARG_NAME_LIST
 {
-	char szName[128];
+	char szName[1024];
+    DWORD dwName;
 	BinStr*   pSig; // argument's signature  ptr
 	BinStr*	  pMarshal;
 	BinStr*	  pValue;
@@ -67,11 +79,24 @@ struct	ARG_NAME_LIST
 	DWORD	  dwAttr;
 	CustomDescrList	CustDList;
 	ARG_NAME_LIST *pNext;
-	inline ARG_NAME_LIST(int i, char *sz, BinStr *pbSig, BinStr *pbMarsh, DWORD attr) 
-	{nNum = i; strcpy(szName,sz); pNext = NULL; pSig=pbSig; pMarshal = pbMarsh; dwAttr = attr; pValue=NULL; };
-	inline ~ARG_NAME_LIST() { if(pSig) delete pSig; if(pMarshal) delete pMarshal; if(pValue) delete pValue; }
+	__forceinline ARG_NAME_LIST(int i, char *sz, BinStr *pbSig, BinStr *pbMarsh, DWORD attr) 
+	{
+        nNum = i;
+        dwName = (DWORD)strlen(sz); 
+        strcpy(szName,sz); 
+        pNext = NULL; 
+        pSig=pbSig; 
+        pMarshal = pbMarsh; 
+        dwAttr = attr; 
+        pValue=NULL; 
+    };
+	inline ~ARG_NAME_LIST() 
+    { 
+        if(pSig) delete pSig; 
+        if(pMarshal) delete pMarshal; 
+        if(pValue) delete pValue; 
+    }
 };
-
 
 struct Scope;
 typedef FIFO<Scope> ScopeList;
@@ -97,13 +122,15 @@ class Method
 {
 public:
     Class  *m_pClass;
+    mdToken *m_TyParBounds;
+    LPCWSTR *m_TyParNames;
+    DWORD   m_NumTyPars;
     DWORD   m_SigInfoCount;
     DWORD   m_MaxStack;
     mdSignature  m_LocalsSig;
-    DWORD   m_numLocals;        // total Number of locals   
-    BYTE*   m_localTypes;       //  
     DWORD   m_Flags;
     char*   m_szName;
+    DWORD   m_dwName;
     char*   m_szExportAlias;
 	DWORD	m_dwExportOrdinal;
     COR_ILMETHOD_SECT_EH_CLAUSE_FAT *m_ExceptionList;
@@ -119,7 +146,6 @@ public:
     DWORD   m_headerOffset;
     BYTE *  m_pCode;
     DWORD   m_CodeSize;
-    WORD    m_dwExceptionFlags;
 	WORD	m_wImplAttr;
 	ULONG	m_ulLines[2];
 	ULONG	m_ulColumns[2];
@@ -137,14 +163,16 @@ public:
 	DWORD	m_dwRetAttr;
 	CustomDescrList m_RetCustDList;
 	// Member ref fixups
-	MemberRefDList  m_MemberRefDList;
+	LocalMemberRefFixupList  m_LocalMemberRefFixupList;
+    // Method body (header+code+EH)
+    BinStr* m_pbsBody;
+    mdToken m_Tok;
     Method(Assembler *pAssembler, Class *pClass, char *pszName, BinStr* pbsSig, DWORD Attr);
     ~Method() 
 	{ 
-		delete m_localTypes; 
 		delete [] m_szName;
 		if(m_szExportAlias) delete [] m_szExportAlias;
-		delArgNameList(m_firstArgName);
+        delArgNameList(m_firstArgName);
 		delArgNameList(m_firstVarName);
 		delete m_pbsMethodSig;
 		delete [] m_ExceptionList;
@@ -152,6 +180,7 @@ public:
 		if(m_pRetMarshal) delete m_pRetMarshal;
 		if(m_pRetValue) delete m_pRetValue;
 		while(m_MethodImplDList.POP()); // ptrs in m_MethodImplDList are dups of those in Assembler
+        if(m_pbsBody) delete m_pbsBody;
 	};
 
     BOOL IsGlobalMethod()
@@ -186,31 +215,28 @@ public:
 				for(pAN = pAdd; pAN; pAN->nNum = ++i, pAN = pAN->pNext);
 			}
 			else pBase = pAdd; //nothing to concatenate to, result == tail
-			//printf("catArgNameList:\n");
-			//for(pAN = pBase; pAN; pAN = pAN->pNext)
-			//	printf("      %d:%s\n",pAN->nNum,pAN->szName);
-
 		}
 		return pBase;
 	};
 
-	int	findArgNum(ARG_NAME_LIST *pFirst, char *szArgName)
+	int	findArgNum(ARG_NAME_LIST *pFirst, char *szArgName, DWORD dwArgName)
 	{
 		int ret=-1;
-		ARG_NAME_LIST *pAN;
-		for(pAN=pFirst; pAN; pAN = pAN->pNext)
-		{
-			//printf("findArgNum: %d:%s\n",pAN->nNum,pAN->szName);
-			if(!strcmp(pAN->szName,szArgName))
-			{
-				ret = pAN->nNum;
-				break;
-			}
-		}
+        if(dwArgName)
+        {
+    		ARG_NAME_LIST *pAN;
+    		for(pAN=pFirst; pAN; pAN = pAN->pNext)
+    		{
+    			if((pAN->dwName == dwArgName)&& !strcmp(pAN->szName,szArgName))
+    			{
+    				ret = pAN->nNum;
+    				break;
+    			}
+    		}
+        }
 		return ret;
 	};
 
-	char	*m_szClassName;
 	BinStr	*m_pbsMethodSig;
 	COR_SIGNATURE*	m_pMethodSig;
 	DWORD	m_dwMethodCSig;
@@ -221,10 +247,6 @@ public:
     unsigned m_LineNum;
 	// debug info
 	LinePCList m_LinePCList;
-	char m_szSourceFileName[MAX_FILENAME_LENGTH*3];
-	GUID	m_guidLang;
-	GUID	m_guidLangVendor;
-	GUID	m_guidDoc;
 	// custom values
 	CustomDescrList m_CustomDescrList;
 	// token relocs (used for OBJ generation only)

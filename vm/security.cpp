@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -98,8 +103,8 @@ void Security::InitData()
     {
         // Note: these buffers should be at least as big as the longest possible
         // string that will be placed into them by the code below.
-        WCHAR* cache = new WCHAR[MAX_PATH + sizeof( L"defaultusersecurity.config.cch" ) / sizeof( WCHAR ) + 1];
-        WCHAR* config = new WCHAR[MAX_PATH + sizeof( L"defaultusersecurity.config.cch" ) / sizeof( WCHAR ) + 1];
+        WCHAR* cache = new WCHAR[MAX_PATH + (wcslen( L"defaultusersecurity.config.cch" ) + 1) + 1];
+        WCHAR* config = new WCHAR[MAX_PATH + (wcslen( L"defaultusersecurity.config.cch" ) + 1) + 1];
 
         if (cache == NULL || config == NULL)
             FATAL_EE_ERROR();

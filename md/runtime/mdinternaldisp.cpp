@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -1270,4 +1275,38 @@ STDMETHODIMP AssemblyMDInternalImport::IsGlobal (                    // S_OK or 
     _ASSERTE(!"NYI");
     return E_NOTIMPL;
 }
+
+STDMETHODIMP AssemblyMDInternalImport::EnumGenericPars(HCORENUM *phEnum, mdToken tkOwner,
+        mdGenericPar rTokens[], ULONG cTokens, ULONG *pcTokens)
+{
+    _ASSERTE(!"NYI");
+    return E_NOTIMPL;
+}
+
+STDMETHODIMP AssemblyMDInternalImport::GetGenericParProps(
+        mdGenericPar rd,                    // [IN] The type parameter
+        ULONG* pulSequence,                 // [OUT] Parameter sequence number
+        DWORD* pdwAttr,                     // [OUT] Type parameter flags (for future use)       
+        mdToken *ptOwner,                   // [OUT] The owner (TypeDef or MethodDef) 
+	mdToken *ptKind,                    // [OUT] The kind (TypeDef/Ref/Spec, for future use)
+	mdToken *ptConstraint,              // [OUT] The constraint (TypeDef/Ref/Spec)
+        LPWSTR wzName,                      // [OUT] The name
+        ULONG cchName,                      // [IN] Size of name buffer
+        ULONG *pchName)                     // [OUT] Actual size of name
+{
+    _ASSERTE(!"NYI");
+    return E_NOTIMPL;
+}
+
+STDMETHODIMP AssemblyMDInternalImport::GetMethodSpecProps(
+        mdMethodSpec mi,                    // [IN] The method instantiation
+        mdToken *tkParent,                  // [OUT] MethodDef or MemberRef
+        PCCOR_SIGNATURE *ppvSigBlob,        // [OUT] point to the blob value of meta data   
+        ULONG       *pcbSigBlob)            // [OUT] actual size of signature blob  
+{
+    _ASSERTE(!"NYI");
+    return E_NOTIMPL;
+}
+
+
 

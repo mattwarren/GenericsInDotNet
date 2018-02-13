@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -357,6 +362,15 @@ public:
 
     LPCWSTR ZapSet()                        const { return pZapSet; }
 
+    //@GENERICS:
+    // Is generics enabled? If not, throw out uses of instantiated types, generic classes & methods, etc.
+    bool    IsGenericsEnabled()             const { return fGenerics; }
+
+    // Is code-sharing for generics enabled? 
+    bool    ShareGenericCode()              const { return fShareGenericCode; }
+
+    // Share compatible value-type instantiations? (Essentially, those having the same GC layout)
+    bool    ShareValInsts()                 const { return fShareValInsts; }
 
     // ZapMonitor
     // 0 == no monitor
@@ -525,6 +539,11 @@ private: //----------------------------------------------------------------
 
     LPCWSTR pZapSet;
 
+    //@GENERICS: controls for generics; see accessor methods for details
+    bool fGenerics;
+    bool fShareGenericCode;
+    bool fShareValInsts;
+   
     // Zap monitor
     DWORD dwMonitorZapStartup;
     DWORD dwMonitorZapExecution;

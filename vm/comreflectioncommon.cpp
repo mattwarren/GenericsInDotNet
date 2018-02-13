@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -22,7 +27,7 @@
 #include "commember.h"
 #include "reflectutil.h"
 #include "field.h"
-
+#include "generics.h"
 #include "wsperf.h"
 
 #define TABLESIZE 29
@@ -30,9 +35,9 @@ extern const DWORD g_rgPrimes[];
 
 // CheckVisibility
 // This is an internal routine that will check an accessor list for public visibility
-static bool CheckVisibility(EEClass* pEEC,IMDInternalImport *pInternalImport, mdToken event);
+static bool CheckVisibility(TypeHandle th,IMDInternalImport *pInternalImport, mdToken event);
 
-static bool IsMemberStatic(EEClass* pEEC,IMDInternalImport *pInternalImport, mdToken event);
+static bool IsMemberStatic(TypeHandle th,IMDInternalImport *pInternalImport, mdToken event);
 
 // getNode
 // The method will return a new Node object.
@@ -119,11 +124,11 @@ void ReflectBaseHash::operator delete(void* p, size_t s)
 **
 ** The maximum number of MethodDescs that might be returned by GetCtors
 **
-** pVMC - the EEClass to calculate the count for
+** th - the type to calculate the count for
 **/
-DWORD ReflectCtors::GetMaxCount(EEClass* pVMC)
+DWORD ReflectCtors::GetMaxCount(TypeHandle th)
 {
-    return pVMC->GetNumMethodSlots();
+    return th.GetNumMethodSlots();
 }
 
 /*=============================================================================
@@ -132,14 +137,12 @@ DWORD ReflectCtors::GetMaxCount(EEClass* pVMC)
 ** This will compile a table that includes all of the implemented and
 ** inherited methods for a class that are not included in the class' Vtable.
 **
-** pVMC - the EEClass to get the methods for
-** rgpMD - where to write the table
-** bImplementedOnly - only return those methods that are implemented by pVMC
 **/
 ReflectMethodList* ReflectCtors::GetCtors(ReflectClass* pRC)
 {
     THROWSCOMPLUSEXCEPTION();
 
+    TypeHandle      th = pRC->GetTypeHandle();
     EEClass*        pVMC = pRC->GetClass();
     DWORD           i;
     DWORD           dwCurIndex;
@@ -148,7 +151,7 @@ ReflectMethodList* ReflectCtors::GetCtors(ReflectClass* pRC)
     //_ASSERTE(!pVMC->IsThunking());
 
     // Get the maximum number of methods possible
-    dwCurIndex = ReflectCtors::GetMaxCount(pVMC);
+    dwCurIndex = ReflectCtors::GetMaxCount(th);
 
     // Allocate array on the stack
     rgpMD = (MethodDesc**) _alloca(sizeof(MethodDesc*) * dwCurIndex);
@@ -200,7 +203,9 @@ ReflectMethodList* ReflectCtors::GetCtors(ReflectClass* pRC)
         pCache->methods[i].pIgnNext = 0;
         pVMC->GetDomain()->AllocateObjRefPtrsInLargeTable(1, &(pCache->methods[i].pMethodObj));
         _ASSERTE(!pCache->methods[i].pMethod->GetMethodTable()->HasSharedMethodTable());
-        pCache->methods[i].typeHnd = TypeHandle(pCache->methods[i].pMethod->GetMethodTable());
+
+        // Constructors all come from the same class
+        pCache->methods[i].declType = th;
     }
     return pCache;
 }
@@ -210,17 +215,17 @@ ReflectMethodList* ReflectCtors::GetCtors(ReflectClass* pRC)
 
 // GetMaxCount
 // Get the total possible methods that we may support.
-DWORD ReflectMethods::GetMaxCount(EEClass* pEEC)
+DWORD ReflectMethods::GetMaxCount(TypeHandle th)
 {
     // We walk only the Method slots on the object itself and ignore
     //  all parents.
-    DWORD cnt = pEEC->GetNumMethodSlots();
-    pEEC = pEEC->GetParentClass();
-    while (pEEC) {
-        DWORD vtableSlots = pEEC->GetNumVtableSlots();
-        DWORD totalSlots = pEEC->GetNumMethodSlots();
+    DWORD cnt = th.GetNumMethodSlots();
+    th = th.GetParent();
+    while (!th.IsNull()) {
+        DWORD vtableSlots = th.GetNumVtableSlots();
+        DWORD totalSlots = th.GetNumMethodSlots();
         cnt += totalSlots - vtableSlots;
-        pEEC = pEEC->GetParentClass();
+        th = th.GetParent();
     }
     return cnt;
 }
@@ -228,7 +233,7 @@ DWORD ReflectMethods::GetMaxCount(EEClass* pEEC)
 // GetMethods
 // This method will return the list of all methods associated with
 //  the class
-ReflectMethodList* ReflectMethods::GetMethods(ReflectClass* pRC,int array)
+ReflectMethodList* ReflectMethods::GetMethods(ReflectClass* pRC)
 {
     THROWSCOMPLUSEXCEPTION();
 
@@ -236,21 +241,24 @@ ReflectMethodList* ReflectMethods::GetMethods(ReflectClass* pRC,int array)
     DWORD           dwCurIndex;
     DWORD           dwNonRollup;
     MethodDesc**    rgpMD;
+    TypeHandle*     declTypes;
     USHORT*         rgpSlots;
     DWORD           bValueClass;
     HashElem**      rgpTable;
     HashElem*       pHashElem = NULL;
 
+    TypeHandle th = pRC->GetTypeHandle();
     EEClass*        pEEC = pRC->GetClass();
 
     // Get the maximum number of methods possible
     //  NOTE: All classes will have methods.
-    dwCurIndex = ReflectMethods::GetMaxCount(pEEC);
+    dwCurIndex = ReflectMethods::GetMaxCount(th);
 
     // Allocate array on the stack
     // We need to remember the slot number here also.
     rgpMD = (MethodDesc**) _alloca(sizeof(MethodDesc*) * dwCurIndex);
     rgpSlots = (USHORT*) _alloca(sizeof(USHORT) * dwCurIndex);
+    declTypes = (TypeHandle*) _alloca(sizeof(TypeHandle) * dwCurIndex);
     ZeroMemory(rgpSlots,sizeof(USHORT) * dwCurIndex);
 
     // Allocate the hash table on the stack
@@ -298,14 +306,36 @@ ReflectMethodList* ReflectMethods::GetMethods(ReflectClass* pRC,int array)
         if(!pHashElem)
             pHashElem = (HashElem*) _alloca(sizeof(HashElem));
 
+	MethodTable *pMT  = pCurMethod->GetMethodTable();
+	TypeHandle declType = TypeHandle();
+	if (pMT->HasInstantiation())
+	  declType = Generics::GetMethodDeclaringType(th, pCurMethod, NULL);
+
+	else if (pMT->IsArray())
+	{
+	  TypeHandle t = th;
+	  do {
+	    if (pCurMethod->GetMethodTable() == t.GetMethodTable())
+	    {
+              declType = t;
+	      break;
+	    }
+            t = t.GetParent();
+	  } while (!t.IsNull());
+	}
+	else
+	  declType = TypeHandle(pMT);
+
         // Save this method and the slot.
-        if (InternalHash(pEEC,pCurMethod,rgpTable,&pHashElem)) {
+        if (InternalHash(pCurMethod,rgpTable,&pHashElem)) {
             rgpSlots[dwCurIndex] = i;
+	    declTypes[dwCurIndex] = declType;
             rgpMD[dwCurIndex++] = pCurMethod;
         }
     }
 
     // build the non-virtual part of the table
+    // this is the only bit that's shared for reference array types
     for (i=(int)vtableSlots;i<(int)totalSlots;i++) {
         // Get the MethodDesc for current method
         MethodDesc* pCurMethod = pEEC->GetUnknownMethodDescForSlot(i);
@@ -323,7 +353,7 @@ ReflectMethodList* ReflectMethods::GetMethods(ReflectClass* pRC,int array)
             if (pCurMethod->IsVirtual())
                 continue;
         }
-            //if (!pCurMethod->IsUnboxingStub() && !pCurMethod->IsStatic() && 
+            //if (!pCurMethod->IsSpecialStub() && !pCurMethod->IsStatic() && 
             //  !pCurMethod->IsPrivate() && pCurMethod->GetClass() == pEEC)
             //  continue;
 
@@ -336,8 +366,9 @@ ReflectMethodList* ReflectMethods::GetMethods(ReflectClass* pRC,int array)
         if(!pHashElem)
             pHashElem = (HashElem*) _alloca(sizeof(HashElem));
 
-        if (InternalHash(pEEC,pCurMethod,rgpTable,&pHashElem)) {
+        if (InternalHash(pCurMethod,rgpTable,&pHashElem)) {
             rgpSlots[dwCurIndex] = i;
+	    declTypes[dwCurIndex] = th;
             rgpMD[dwCurIndex++] = pCurMethod;
         }
     }
@@ -346,14 +377,14 @@ ReflectMethodList* ReflectMethods::GetMethods(ReflectClass* pRC,int array)
     //  of our parents...
     // If we are building an interface we skip all the parent methods.
     if (!fIsInterface) {
-        EEClass* parentEEC = pEEC->GetParentClass();
-        while (parentEEC) {
-            vtableSlots = parentEEC->GetNumVtableSlots();
-            totalSlots = parentEEC->GetNumMethodSlots();
+        TypeHandle parentTH = th.GetParent();
+        while (!parentTH.IsNull()) {
+            vtableSlots = parentTH.GetNumVtableSlots();
+            totalSlots = parentTH.GetNumMethodSlots();
             // build the non-virtual part of the table
             for (i=(int)vtableSlots;i<(int)totalSlots;i++) {
                 // Get the MethodDesc for current method
-                MethodDesc* pCurMethod = parentEEC->GetUnknownMethodDescForSlot(i);
+                MethodDesc* pCurMethod = parentTH.GetClass()->GetUnknownMethodDescForSlot(i);
                 if(pCurMethod == NULL)
                     continue;
 
@@ -383,25 +414,26 @@ ReflectMethodList* ReflectMethods::GetMethods(ReflectClass* pRC,int array)
                 if(!pHashElem)
                     pHashElem = (HashElem*) _alloca(sizeof(HashElem));
 
-                if (InternalHash(parentEEC,pCurMethod,rgpTable,&pHashElem)) {
+                if (InternalHash(pCurMethod,rgpTable,&pHashElem)) {
                     rgpSlots[dwCurIndex] = i;
+		    declTypes[dwCurIndex] = parentTH;
                     rgpMD[dwCurIndex++] = pCurMethod;
                 }
             }
-            parentEEC = parentEEC->GetParentClass();
+            parentTH = parentTH.GetParent();
         }
         dwNonRollup = dwCurIndex;
 
 
         // Calculate the rollup for statics.
-        parentEEC = pEEC->GetParentClass();
-        while (parentEEC) {
-            vtableSlots = parentEEC->GetNumVtableSlots();
-            totalSlots = parentEEC->GetNumMethodSlots();
+        parentTH = th.GetParent();
+        while (!parentTH.IsNull()) {
+            vtableSlots = parentTH.GetNumVtableSlots();
+            totalSlots = parentTH.GetNumMethodSlots();
             // build the non-virtual part of the table
             for (i=(int)vtableSlots;i<(int)totalSlots;i++) {
                 // Get the MethodDesc for current method
-                MethodDesc* pCurMethod = parentEEC->GetUnknownMethodDescForSlot(i);
+                MethodDesc* pCurMethod = parentTH.GetClass()->GetUnknownMethodDescForSlot(i);
                 if (pCurMethod == NULL)
                     continue;
 
@@ -431,12 +463,13 @@ ReflectMethodList* ReflectMethods::GetMethods(ReflectClass* pRC,int array)
                 if(!pHashElem)
                     pHashElem = (HashElem*) _alloca(sizeof(HashElem));
 
-                if (InternalHash(parentEEC,pCurMethod,rgpTable,&pHashElem)) {
+                if (InternalHash(pCurMethod,rgpTable,&pHashElem)) {
                     rgpSlots[dwCurIndex] = i;
+		    declTypes[dwCurIndex] = parentTH;
                     rgpMD[dwCurIndex++] = pCurMethod;
                 }
             }
-            parentEEC = parentEEC->GetParentClass();
+            parentTH = parentTH.GetParent();
         }
     }
     else {
@@ -461,11 +494,8 @@ ReflectMethodList* ReflectMethods::GetMethods(ReflectClass* pRC,int array)
         pCache->methods[i].pSignature = 0;
         pCache->methods[i].pNext = 0;
         pCache->methods[i].pIgnNext = 0;
+	pCache->methods[i].declType = declTypes[i];
         pEEC->GetDomain()->AllocateObjRefPtrsInLargeTable(1, &(pCache->methods[i].pMethodObj));
-        if (!array) 
-            pCache->methods[i].typeHnd = TypeHandle(pCache->methods[i].pMethod->GetMethodTable());
-        else
-            pCache->methods[i].typeHnd = TypeHandle();
     }
     pCache->hash.Init(pCache);
 
@@ -474,7 +504,7 @@ ReflectMethodList* ReflectMethods::GetMethods(ReflectClass* pRC,int array)
 
 // InternalHash
 // This will add a field value to the hash table
-bool ReflectMethods::InternalHash(EEClass* pEEC,MethodDesc* pCurMethod,
+bool ReflectMethods::InternalHash(MethodDesc* pCurMethod,
         HashElem** rgpTable,HashElem** pHashElem)
 {
 
@@ -563,8 +593,8 @@ int ReflectMethods::CheckForEquality(HashElem* p1, HashElem* p2)
     
     p1->pCurMethod->GetSig(&pP1Sig, &cP1Sig);
     p2->pCurMethod->GetSig(&pP2Sig, &cP2Sig);
-    return MetaSig::CompareMethodSigs(pP1Sig,cP1Sig,p1->pCurMethod->GetModule(),
-            pP2Sig,cP2Sig,p2->pCurMethod->GetModule());
+    return MetaSig::CompareMethodSigs(pP1Sig,cP1Sig,p1->pCurMethod->GetModule(),NULL,
+            pP2Sig,cP2Sig,p2->pCurMethod->GetModule(),NULL);
 };
 
 //||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
@@ -572,11 +602,12 @@ int ReflectMethods::CheckForEquality(HashElem* p1, HashElem* p2)
 
 // GetMaxCount
 // Calculate the maximum amount of fields we would have
-DWORD ReflectFields::GetMaxCount(EEClass* pVMC)
+DWORD ReflectFields::GetMaxCount(TypeHandle th)
 {
     THROWSCOMPLUSEXCEPTION();
 
-    _ASSERTE(pVMC);
+    _ASSERTE(!th.IsNull());
+    EEClass *pVMC = th.GetClass();
 
     // Set it to zero
     DWORD cFD = 0;
@@ -586,7 +617,7 @@ DWORD ReflectFields::GetMaxCount(EEClass* pVMC)
     do
     {
         cFD += pVMC->GetNumStaticFields();
-        cFD += g_pRefUtil->GetStaticFieldsCount(pVMC);
+        cFD += g_pRefUtil->GetStaticFieldsCount(th);
     } while((pVMC = pVMC->GetParentClass()) != NULL);
 
     return cFD;
@@ -597,7 +628,7 @@ DWORD ReflectFields::GetMaxCount(EEClass* pVMC)
 //  It basically walks the EEClas looking at the fields and then walks
 //  up the parent chain for the protected and publics.  We hide fields
 //  based upon Name/Type.
-ReflectFieldList* ReflectFields::GetFields(EEClass* pEEC)
+ReflectFieldList* ReflectFields::GetFields(TypeHandle th)
 {
     THROWSCOMPLUSEXCEPTION();
 
@@ -607,16 +638,19 @@ ReflectFieldList* ReflectFields::GetFields(EEClass* pEEC)
     DWORD       dwCurIndex  = 0;
     DWORD       dwRealFields;
     DWORD       dwNumParentInstanceFields = 0;
-    EEClass*    pCurEEC = pEEC;
+    EEClass*    pEEC = th.GetClass();
+    EEClass*    pCurEEC = pEEC;   
+    TypeHandle  curTH = th;
 
     // Get the maximum number of methods possible
     // If there are non-then we return
-    dwCurIndex = ReflectFields::GetMaxCount(pEEC);
+    dwCurIndex = ReflectFields::GetMaxCount(th);
     if (dwCurIndex == 0)
         return 0;
 
     DWORD curFld = 0;
     FieldDesc** pFldLst = (FieldDesc**) _alloca(sizeof(FieldDesc*) * dwCurIndex);
+    TypeHandle* declTypes = (TypeHandle*) _alloca(sizeof(TypeHandle) * dwCurIndex);
 
     // Allocate the hash table on the stack
     rgpTable = (HashElem**) _alloca(sizeof(HashElem*) * TABLESIZE);
@@ -644,7 +678,10 @@ ReflectFieldList* ReflectFields::GetFields(EEClass* pEEC)
 
         // Add all fields to the hash table and the list
         if (InternalHash(pCurField,rgpTable,&pHashElem))
+	{
+            declTypes[curFld] = th;
             pFldLst[curFld++] = pCurField;
+        }
     }
     }
 
@@ -667,6 +704,7 @@ ReflectFieldList* ReflectFields::GetFields(EEClass* pEEC)
         if (InternalHash(pCurField,rgpTable,&pHashElem))
         {
             _ASSERTE(pCurField);
+            declTypes[curFld] = th;
             pFldLst[curFld++] = pCurField;
         }
     }
@@ -675,7 +713,7 @@ ReflectFieldList* ReflectFields::GetFields(EEClass* pEEC)
     // The following are the constant statics.  These are only found
     //  in the meta data.
     int cStatics;
-    REFLECTCLASSBASEREF pRefClass = (REFLECTCLASSBASEREF) pCurEEC->GetExposedClassObject();
+    REFLECTCLASSBASEREF pRefClass = (REFLECTCLASSBASEREF) curTH.CreateClassObj();
     ReflectClass* pRC = (ReflectClass*) pRefClass->GetData();
     FieldDesc* fld = g_pRefUtil->GetStaticFields(pRC,&cStatics);
     for (i=0;(int)i<cStatics;i++) {
@@ -685,6 +723,7 @@ ReflectFieldList* ReflectFields::GetFields(EEClass* pEEC)
         FieldDesc* pCurField = &fld[i];
         if (InternalHash(pCurField,rgpTable,&pHashElem)){
             _ASSERTE(pCurField);
+            declTypes[curFld] = th;
             pFldLst[curFld++] = pCurField;
         }
     }
@@ -693,6 +732,7 @@ ReflectFieldList* ReflectFields::GetFields(EEClass* pEEC)
 
     // If we're not looking for Ctors, then examine parent chain for inherited static fields
     pEEC = pCurEEC->GetParentClass();
+    th = curTH.GetParent();
     while (pEEC)
     {
         // Since the parent's instance fields are not stored in the current fielddesc list,
@@ -717,10 +757,14 @@ ReflectFieldList* ReflectFields::GetFields(EEClass* pEEC)
             if (IsFdPublic(attr) || IsFdFamily(attr) || IsFdAssembly(attr) ||
                 IsFdFamANDAssem(attr) || IsFdFamORAssem(attr)) {
                 if (InternalHash(pCurField,rgpTable,&pHashElem))
+		{
+                    declTypes[curFld] = th;
                     pFldLst[curFld++] = pCurField;
+                }
             }
         }
         pEEC = pEEC->GetParentClass();
+        th = th.GetParent();
     }
 
     // Now add all of the statics (including static constants Blah!
@@ -728,6 +772,7 @@ ReflectFieldList* ReflectFields::GetFields(EEClass* pEEC)
 
     // examine parent chain for inherited static fields
     pEEC = pCurEEC->GetParentClass();
+    th = curTH.GetParent();
     while (pEEC)
     {
         // Add the static fields
@@ -753,6 +798,7 @@ ReflectFieldList* ReflectFields::GetFields(EEClass* pEEC)
             }
             if (InternalHash(pCurField,rgpTable,&pHashElem)){
                 _ASSERTE(pCurField);
+                declTypes[curFld] = th;
                 pFldLst[curFld++] = pCurField;
             }
         }
@@ -760,7 +806,7 @@ ReflectFieldList* ReflectFields::GetFields(EEClass* pEEC)
         // The following are the constant statics.  These are only found
         //  in the meta data.
         int cStatics;
-        REFLECTCLASSBASEREF pRefClass = (REFLECTCLASSBASEREF) pEEC->GetExposedClassObject();
+        REFLECTCLASSBASEREF pRefClass = (REFLECTCLASSBASEREF) th.CreateClassObj();
         ReflectClass* pRC = (ReflectClass*) pRefClass->GetData();
         FieldDesc* fld = g_pRefUtil->GetStaticFields(pRC,&cStatics);
         for (i=0;(int)i<cStatics;i++) {
@@ -776,10 +822,12 @@ ReflectFieldList* ReflectFields::GetFields(EEClass* pEEC)
             }
             if (InternalHash(pCurField,rgpTable,&pHashElem)){
                 _ASSERTE(pCurField);
+                declTypes[curFld] = th;
                 pFldLst[curFld++] = pCurField;
             }
         }
         pEEC = pEEC->GetParentClass();
+        th = th.GetParent();
     }
 
     if (curFld == 0)
@@ -799,6 +847,7 @@ ReflectFieldList* ReflectFields::GetFields(EEClass* pEEC)
         pCurEEC->GetDomain()->AllocateObjRefPtrsInLargeTable(1, &(pCache->fields[i].pFieldObj));
         pCache->fields[i].type = ELEMENT_TYPE_END;
         pCache->fields[i].dwAttr = 0;
+        pCache->fields[i].declType = declTypes[i];
     }
     return pCache;
 }
@@ -858,6 +907,7 @@ DWORD ReflectFields::GetHashCode(HashElem* pElem)
     return dwHashCode;
 };
 
+//@todo GENERICS: this won't work yet because LoadType is broken
 int ReflectFields::CheckForEquality(HashElem* p1, HashElem* p2)
 {
     if (p1->m_szKey) {
@@ -872,8 +922,8 @@ int ReflectFields::CheckForEquality(HashElem* p1, HashElem* p2)
         return 0;
     if (p1T == ELEMENT_TYPE_CLASS ||
         p1T == ELEMENT_TYPE_VALUETYPE) {
-        if (p1->pCurField->GetTypeOfField() !=
-            p2->pCurField->GetTypeOfField())
+        if (p1->pCurField->LoadType() !=
+            p2->pCurField->LoadType())
             return 0;
     }
 
@@ -886,15 +936,15 @@ int ReflectFields::CheckForEquality(HashElem* p1, HashElem* p2)
 /*=============================================================================
 ** GetMaxCount
 **
-** The maximum number of EEClass pointers returned by GetInterfaces
+** The maximum number of type handles returned by GetInterfaces
 **
-** pVMC - the EEClass to calculate the count for
+** th - the type to calculate the count for
 ** bImplementedOnly - only return those interfaces that are implemented by pVMC
 **/
 //                    For now, ignores bImplementedOnly and returns a count for all interfaces
-DWORD ReflectInterfaces::GetMaxCount(EEClass* pVMC, bool bImplementedOnly)
+DWORD ReflectInterfaces::GetMaxCount(TypeHandle th, bool bImplementedOnly)
 {
-    return (DWORD) pVMC->GetNumInterfaces();
+    return (DWORD) th.GetClass()->GetNumInterfaces();
 }
 
 /*=============================================================================
@@ -903,18 +953,20 @@ DWORD ReflectInterfaces::GetMaxCount(EEClass* pVMC, bool bImplementedOnly)
 ** This will compile a table that includes all of the interfaces
 ** supported by the class.
 **
-** pVMC - the EEClass to get the methods for
-** rgpMD - where to write the table
-** bImplementedOnly - only return those interfaces that are implemented by pVMC
+** th - the type to get the methods for
+** table - where to write the table
+** bImplementedOnly - only return those interfaces that are implemented by th
 **/
 //                    For now, ignores bImplementedOnly and returns all interfaces
-DWORD ReflectInterfaces::GetInterfaces(EEClass* pVMC, EEClass** rgpVMC, bool bImplementedOnly)
+DWORD ReflectInterfaces::GetInterfaces(TypeHandle th, TypeHandle* table, bool bImplementedOnly)
 {
     DWORD           i;
 
-    _ASSERTE(pVMC);
-    _ASSERTE(rgpVMC);
+    _ASSERTE(!th.IsNull());
+    _ASSERTE(table);
 
+    EEClass *pVMC = th.GetClass();
+    MethodTable *pMT = th.AsMethodTable();
     _ASSERTE(!pVMC->IsThunking());
 
     _ASSERTE("bImplementedOnly == true is NYI" && !bImplementedOnly);
@@ -922,11 +974,11 @@ DWORD ReflectInterfaces::GetInterfaces(EEClass* pVMC, EEClass** rgpVMC, bool bIm
     // Look for a matching interface
     for(i = 0; i < pVMC->GetNumInterfaces(); i++)
     {
-        // Get an interface's EEClass
-        EEClass* pVMCCurIFace = pVMC->GetInterfaceMap()[i].m_pMethodTable->GetClass();
-        _ASSERTE(pVMCCurIFace);
+        // Get an interface's type handle
+        TypeHandle intTH = TypeHandle(pMT->GetInterfaceMap()[i].m_pMethodTable);
+        _ASSERTE(!intTH.IsNull());
 
-        rgpVMC[i] = pVMCCurIFace;
+        table[i] = intTH;
     }
     return i;
 }
@@ -980,10 +1032,11 @@ LPUTF8 GetClassStringVars(STRINGREF stringRef, CQuickBytes *pBytes,
     return pStr;
 }
 
-DWORD ReflectProperties::GetMaxCount(EEClass* pEEC)
+DWORD ReflectProperties::GetMaxCount(TypeHandle th)
 {
     HRESULT hr;
     DWORD cnt = 0;
+    EEClass *pEEC = th.GetClass();
     while (pEEC) {
         HENUMInternal hEnum;
 
@@ -1002,7 +1055,7 @@ DWORD ReflectProperties::GetMaxCount(EEClass* pEEC)
 }
 
 ReflectPropertyList* ReflectProperties::GetProperties(ReflectClass* pRC,
-                                                      EEClass* pEEC)
+                                                      TypeHandle th)
 {
     HRESULT             hr;
     ReflectProperty*    rgpProp;
@@ -1011,11 +1064,13 @@ ReflectPropertyList* ReflectProperties::GetProperties(ReflectClass* pRC,
     DWORD               numProps;
     DWORD               cAssoc;
     bool                bVisible;
+    EEClass*            pEEC = th.GetClass();
     EEClass*            p;
+    TypeHandle          t = th;
     DWORD               attr=0;
 
     // Find the Max Properties...
-    dwCurIndex = GetMaxCount(pEEC);
+    dwCurIndex = GetMaxCount(th);
     rgpProp = (ReflectProperty*) _alloca(sizeof(ReflectProperty) * dwCurIndex);
 
     // Allocate some signature stuff so we can check for duplicates
@@ -1057,8 +1112,8 @@ ReflectPropertyList* ReflectProperties::GetProperties(ReflectClass* pRC,
             bool dup = false;
             for (DWORD j=0;j<pos;j++) {
                 if (strcmp(szName,rgpProp[j].szName) == 0) {
-                    if (MetaSig::CompareMethodSigs(ppSig[j],pcSig[j],pSigMod[j],
-                            pSig,cSig,p->GetModule()) != 0) { 
+		  if (MetaSig::CompareMethodSigs(ppSig[j],pcSig[j],pSigMod[j],NULL,
+                            pSig,cSig,p->GetModule(),NULL) != 0) { 
                         dup = true;
                         break;
                     }
@@ -1068,18 +1123,18 @@ ReflectPropertyList* ReflectProperties::GetProperties(ReflectClass* pRC,
                 continue;
 
             // If the property is visible then we need to add it to the list.
-            if (bVisible || (CheckVisibility(pEEC,p->GetMDImport(),Tok) && !IsMemberStatic(pEEC, p->GetMDImport(), Tok))) {
+            if (bVisible || (CheckVisibility(th,p->GetMDImport(),Tok) && !IsMemberStatic(th, p->GetMDImport(), Tok))) {
                 rgpProp[pos].propTok = Tok;
                 rgpProp[pos].pModule = p->GetModule();
                 rgpProp[pos].szName = szName;
-                rgpProp[pos].pDeclCls = p;
+                rgpProp[pos].declType = t;
                 rgpProp[pos].pRC = pRC;
-                rgpProp[pos].pSignature = ExpandSig::GetReflectSig(pSig,p->GetModule());
+                rgpProp[pos].pSignature = ExpandSig::GetReflectSig(pSig,p->GetModule(),t.GetInstantiation(),NULL);
                 rgpProp[pos].attr=attr;
                 rgpProp[pos].pSetter=0;
                 rgpProp[pos].pGetter=0;
                 rgpProp[pos].pOthers=0;
-                SetAccessors(&rgpProp[pos],p,pEEC);
+                SetAccessors(&rgpProp[pos],t,th);
                 pcSig[pos] = cSig;
                 ppSig[pos] = pSig;
                 pSigMod[pos] = p->GetModule();
@@ -1090,6 +1145,7 @@ ReflectPropertyList* ReflectProperties::GetProperties(ReflectClass* pRC,
         // Close the enum on this object and move on to the parent class
         p->GetMDImport()->EnumClose(&hEnum);
         p = p->GetParentClass();
+        t = t.GetParent();
         bVisible = false;
     }
 
@@ -1098,6 +1154,7 @@ ReflectPropertyList* ReflectProperties::GetProperties(ReflectClass* pRC,
 
     // Now add the static properties of derived classes.
     p = pEEC->GetParentClass();
+    t = th.GetParent();
     while (p) {
         HENUMInternal hEnum;
         mdToken       Tok;
@@ -1122,8 +1179,8 @@ ReflectPropertyList* ReflectProperties::GetProperties(ReflectClass* pRC,
             bool dup = false;
             for (DWORD j=0;j<pos;j++) {
                 if (strcmp(szName,rgpProp[j].szName) == 0) {
-                    if (MetaSig::CompareMethodSigs(ppSig[j],pcSig[j],pSigMod[j],
-                            pSig,cSig,p->GetModule()) != 0) { 
+		  if (MetaSig::CompareMethodSigs(ppSig[j],pcSig[j],pSigMod[j],NULL,
+                            pSig,cSig,p->GetModule(),NULL) != 0) { 
                         dup = true;
                         break;
                     }
@@ -1133,22 +1190,22 @@ ReflectPropertyList* ReflectProperties::GetProperties(ReflectClass* pRC,
                 continue;
 
             // Only add the property if it is static.
-            if (!IsMemberStatic(pEEC, p->GetMDImport(), Tok))
+            if (!IsMemberStatic(th, p->GetMDImport(), Tok))
                 continue;
 
             // if the property is visible then we need to add it to the list.
-            if (CheckVisibility(pEEC,p->GetMDImport(),Tok)) {
+            if (CheckVisibility(th,p->GetMDImport(),Tok)) {
                 rgpProp[pos].propTok = Tok;
                 rgpProp[pos].pModule = p->GetModule();
                 rgpProp[pos].szName = szName;
-                rgpProp[pos].pDeclCls = p;
+                rgpProp[pos].declType = t;
                 rgpProp[pos].pRC = pRC;
-                rgpProp[pos].pSignature = ExpandSig::GetReflectSig(pSig,p->GetModule());
+                rgpProp[pos].pSignature = ExpandSig::GetReflectSig(pSig,p->GetModule(),t.GetInstantiation(),NULL);
                 rgpProp[pos].attr=attr;
                 rgpProp[pos].pSetter=0;
                 rgpProp[pos].pGetter=0;
                 rgpProp[pos].pOthers=0;
-                SetAccessors(&rgpProp[pos],p,pEEC);
+                SetAccessors(&rgpProp[pos],t,th);
                 pcSig[pos] = cSig;
                 ppSig[pos] = pSig;
                 pSigMod[pos] = p->GetModule();
@@ -1159,6 +1216,7 @@ ReflectPropertyList* ReflectProperties::GetProperties(ReflectClass* pRC,
         // Close the enum on this object and move on to the parent class
         p->GetMDImport()->EnumClose(&hEnum);
         p = p->GetParentClass();
+        t = t.GetParent();
     }
 
     ReflectPropertyList* pList;
@@ -1189,7 +1247,7 @@ ReflectPropertyList* ReflectProperties::GetProperties(ReflectClass* pRC,
 
 // FindAccessor
 // This method will find the specified property accessor
-void ReflectProperties::SetAccessors(ReflectProperty* pProp,EEClass* baseClass,EEClass* targetClass)
+void ReflectProperties::SetAccessors(ReflectProperty* pProp,TypeHandle baseClass,TypeHandle targetClass)
 {
     ULONG           cAssoc;
     ASSOCIATE_RECORD* pAssoc;
@@ -1219,21 +1277,23 @@ void ReflectProperties::SetAccessors(ReflectProperty* pProp,EEClass* baseClass,E
     // This loop will search for an accessor based upon the signature
     ReflectMethodList* pML = pProp->pRC->GetMethods();
     for (ULONG i=0;i<cAssoc;i++) {
-        MethodDesc* pMeth = baseClass->FindMethod(pAssoc[i].m_memberdef);
+        MethodDesc *pMeth;
+        pMeth = baseClass.GetClass()->FindMethod(pAssoc[i].m_memberdef);
+	//@todo GENERICS: what about instantiating stubs
         if (pProp->pRC->GetClass()->IsValueClass()
-            && !pMeth->IsUnboxingStub()) {
+            && !pMeth->IsSpecialStub()) {
             MethodDesc* pMD = pProp->pRC->GetClass()->GetUnboxingMethodDescForValueClassMethod(pMeth);
             if (pMD)
                 pMeth = pMD;
         }
-        if (pProp->pDeclCls != targetClass) {           
+        if (pProp->declType != targetClass) {           
             DWORD attr = pMeth->GetAttrs();
             if (IsMdPrivate(attr))
                 continue;
             if (IsMdVirtual(attr)) {
                 WORD slot = pMeth->GetSlot();
-                if (slot <= pProp->pDeclCls->GetNumVtableSlots())
-                    pMeth = targetClass->GetMethodDescForSlot(slot);
+                if (slot <= pProp->declType.GetClass()->GetNumVtableSlots())
+                    pMeth = targetClass.GetClass()->GetMethodDescForSlot(slot);
             }
         }
 
@@ -1242,7 +1302,7 @@ void ReflectProperties::SetAccessors(ReflectProperty* pProp,EEClass* baseClass,E
         else if (pAssoc[i].m_dwSemantics & msGetter)
             pProp->pGetter = pML->FindMethod(pMeth);
         else if (pAssoc[i].m_dwSemantics &  msOther) {
-            PropertyOtherList *pOther = (PropertyOtherList*)targetClass->GetDomain()->GetReflectionHeap()->AllocMem(sizeof(PropertyOtherList));
+            PropertyOtherList *pOther = (PropertyOtherList*)targetClass.GetClass()->GetDomain()->GetReflectionHeap()->AllocMem(sizeof(PropertyOtherList));
             if (pOther == NULL)
                 FatalOutOfMemoryError();
             pOther->pNext = pProp->pOthers;
@@ -1290,7 +1350,7 @@ ReflectMethodList* ReflectModuleGlobals::GetGlobals(Module* pMod)
         pMeths->methods[i].pNext = 0;
         pMeths->methods[i].pIgnNext = 0;
         pM->GetClass()->GetDomain()->AllocateObjRefPtrsInLargeTable(1, &(pMeths->methods[i].pMethodObj));
-        pMeths->methods[i].typeHnd = TypeHandle(pM->GetMethodTable());
+        pMeths->methods[i].declType = TypeHandle(pM->GetMethodTable());
     }
     pMeths->hash.Init(pMeths);
     return pMeths;
@@ -1339,6 +1399,7 @@ ReflectFieldList* ReflectModuleGlobals::GetGlobalFields(Module* pMod)
         while ((pCurField = fdIterator.Next()) != NULL)
         {
             pFlds->fields[i].pField = pCurField;
+	    pFlds->fields[i].declType = TypeHandle(pMT);
             pMod->GetAssembly()->GetDomain()->AllocateObjRefPtrsInLargeTable(1, &(pFlds->fields[i].pFieldObj));
             ++i;
         }
@@ -1353,26 +1414,27 @@ ReflectFieldList* ReflectModuleGlobals::GetGlobalFields(Module* pMod)
 //  found for the type
 ReflectTypeList* ReflectNestedTypes::Get(ReflectClass* pRC)
 {
-    EEClass* pEEC = pRC->GetClass();
+    TypeHandle th = pRC->GetTypeHandle();
+    EEClass *pEEC = th.GetClass();
 
     // find out the max nested classes
-    ULONG cMax = MaxNests(pEEC);
+    ULONG cMax = MaxNests(th);
     if (cMax == 0)
         return 0;
     
     // Get all of the tokens...
-    EEClass** types;
-    types = (EEClass**) _alloca(sizeof(EEClass*) * cMax);
+    TypeHandle* types;
+    types = (TypeHandle*) _alloca(sizeof(TypeHandle) * cMax);
 
     ULONG pos = 0;
-    PopulateNests(pEEC,types,&pos);
+    PopulateNests(th,types,&pos);
     if (pos == 0)
         return 0;
 
     // Allocate the TypeList we will return
     ReflectTypeList* pCache = (ReflectTypeList*) 
         pEEC->GetDomain()->GetReflectionHeap()->AllocMem(sizeof(ReflectTypeList) + 
-        (sizeof(EEClass*) * (pos - 1)));
+        (sizeof(TypeHandle) * (pos - 1)));
     
     if (pCache == NULL)
         FatalOutOfMemoryError();
@@ -1387,8 +1449,9 @@ ReflectTypeList* ReflectNestedTypes::Get(ReflectClass* pRC)
 
 // This method will walk the hiearchy and find all of the possible
 //  nested classes that could be present on an object.
-ULONG ReflectNestedTypes::MaxNests(EEClass* pEEC)
+ULONG ReflectNestedTypes::MaxNests(TypeHandle th)
 {
+    EEClass* pEEC = th.GetClass();
     ULONG cnt = 0;
     while (pEEC) {
         cnt += pEEC->GetMDImport()->GetCountNestedClasses(pEEC->GetCl());
@@ -1397,11 +1460,12 @@ ULONG ReflectNestedTypes::MaxNests(EEClass* pEEC)
     return cnt;
 }
 
-void ReflectNestedTypes::PopulateNests(EEClass* pEEC,EEClass** typeArray,ULONG* pos)
+void ReflectNestedTypes::PopulateNests(TypeHandle th,TypeHandle* typeArray,ULONG* pos)
 {
     THROWSCOMPLUSEXCEPTION();
 
     // How many nests were defined on this class?
+    EEClass *pEEC = th.GetClass();
     ULONG cNests = pEEC->GetMDImport()->GetCountNestedClasses(pEEC->GetCl());
     if (cNests == 0)
         return;
@@ -1420,18 +1484,17 @@ void ReflectNestedTypes::PopulateNests(EEClass* pEEC,EEClass** typeArray,ULONG* 
     OBJECTREF Throwable = NULL;
     GCPROTECT_BEGIN(Throwable);
     for (unsigned int i=0;i<cNests;i++) {
-        EEClass *pEEC;
         NameHandle nh (pMod,types[i]);
-        pEEC = pLoader->LoadTypeHandle(&nh,&Throwable).GetClass();
-        if (pEEC)
+        TypeHandle t = pLoader->LoadTypeHandle(&nh,&Throwable);
+        if (!t.IsNull())
         {
             // we can have nested defined in metadata but ee does not know it yet in Reflection Emit scenario.
-        _ASSERTE(pEEC->IsNested());
-        typeArray[*pos] = pEEC;
-        if (Throwable != NULL)
-            COMPlusThrow(Throwable);
-        (*pos)++;
-    }
+            _ASSERTE(t.GetClass()->IsNested());
+            typeArray[*pos] = t;
+            if (Throwable != NULL)
+                COMPlusThrow(Throwable);
+            (*pos)++;
+        }
     }
     GCPROTECT_END();
 }
@@ -1439,17 +1502,19 @@ void ReflectNestedTypes::PopulateNests(EEClass* pEEC,EEClass** typeArray,ULONG* 
 // This method will return a ReflectPropertyList for all of the properties
 //   that exist for a class.
 //  NULL is returned if the class has not properties.
-ReflectEventList* ReflectEvents::GetEvents(ReflectClass* pRC,EEClass* pEEC)
+ReflectEventList* ReflectEvents::GetEvents(ReflectClass* pRC,TypeHandle th)
 {
     HRESULT             hr;
     DWORD               pos;
     DWORD               numEvents;
     DWORD               cAssoc;
     EEClass*            p;
+    TypeHandle          t;
     bool                bVisible;
+    EEClass* pEEC = th.GetClass();
 
     // Find the Max Events...
-    DWORD dwCurIndex = GetMaxCount(pEEC);
+    DWORD dwCurIndex = GetMaxCount(th);
 
     ReflectEvent* rgpEvent = (ReflectEvent*) _alloca(sizeof(ReflectEvent) * dwCurIndex);
 
@@ -1461,6 +1526,7 @@ ReflectEventList* ReflectEvents::GetEvents(ReflectClass* pRC,EEClass* pEEC)
     pos = 0;
     bVisible = true;
     p = pEEC;
+    t = th;
 
     // Start by adding the instance events and the static events of
     // the class we are getting events for.
@@ -1497,17 +1563,17 @@ ReflectEventList* ReflectEvents::GetEvents(ReflectClass* pRC,EEClass* pEEC)
                 continue;
 
             // If the event is visible then we must add it to the list.
-            if (bVisible || (CheckVisibility(pEEC,p->GetMDImport(),Tok) && !IsMemberStatic(pEEC, p->GetMDImport(), Tok))) {
+            if (bVisible || (CheckVisibility(th,p->GetMDImport(),Tok) && !IsMemberStatic(th, p->GetMDImport(), Tok))) {
                 rgpEvent[pos].eventTok = Tok;
                 rgpEvent[pos].pModule = p->GetModule();
                 rgpEvent[pos].szName = szName;
-                rgpEvent[pos].pDeclCls = p;
+                rgpEvent[pos].declType = t;
                 rgpEvent[pos].pRC = pRC;
                 rgpEvent[pos].attr=dwEventFlags;
                 rgpEvent[pos].pAdd=0;
                 rgpEvent[pos].pRemove=0;
                 rgpEvent[pos].pFire=0;
-                SetAccessors(&rgpEvent[pos],p,pEEC);
+                SetAccessors(&rgpEvent[pos],t,th);
                 pSigMod[pos] = p->GetModule();
                 pos++;
             }
@@ -1516,6 +1582,7 @@ ReflectEventList* ReflectEvents::GetEvents(ReflectClass* pRC,EEClass* pEEC)
         // Close the enum on this object and move on to the parent class
         p->GetMDImport()->EnumClose(&hEnum);
         p = p->GetParentClass();
+        t = t.GetParent();
         bVisible = false;
     }    
 
@@ -1524,6 +1591,7 @@ ReflectEventList* ReflectEvents::GetEvents(ReflectClass* pRC,EEClass* pEEC)
 
     // Now add the static events of derived classes.
     p = pEEC->GetParentClass();
+    t = th.GetParent();
     while (p) {
         HENUMInternal hEnum;
         mdToken       Tok;
@@ -1557,21 +1625,21 @@ ReflectEventList* ReflectEvents::GetEvents(ReflectClass* pRC,EEClass* pEEC)
                 continue;
 
             // Only add the property if it is static.
-            if (!IsMemberStatic(pEEC, p->GetMDImport(), Tok))
+            if (!IsMemberStatic(th, p->GetMDImport(), Tok))
                 continue;
 
             // If the event is visible then we must add it to the list.
-            if (CheckVisibility(pEEC,p->GetMDImport(),Tok)) {
+            if (CheckVisibility(th,p->GetMDImport(),Tok)) {
                 rgpEvent[pos].eventTok = Tok;
                 rgpEvent[pos].pModule = p->GetModule();
                 rgpEvent[pos].szName = szName;
-                rgpEvent[pos].pDeclCls = p;
+                rgpEvent[pos].declType = t;
                 rgpEvent[pos].pRC = pRC;
                 rgpEvent[pos].attr=dwEventFlags;
                 rgpEvent[pos].pAdd=0;
                 rgpEvent[pos].pRemove=0;
                 rgpEvent[pos].pFire=0;
-                SetAccessors(&rgpEvent[pos],p,pEEC);
+                SetAccessors(&rgpEvent[pos],t,th);
                 pSigMod[pos] = p->GetModule();
                 pos++;
             }
@@ -1580,6 +1648,7 @@ ReflectEventList* ReflectEvents::GetEvents(ReflectClass* pRC,EEClass* pEEC)
         // Close the enum on this object and move on to the parent class
         p->GetMDImport()->EnumClose(&hEnum);
         p = p->GetParentClass();
+        t = t.GetParent();
     }
 
     ReflectEventList* pList;
@@ -1603,10 +1672,11 @@ ReflectEventList* ReflectEvents::GetEvents(ReflectClass* pRC,EEClass* pEEC)
 
 // GetMaxCount
 // This method will calculate the maximum possible properties for a class
-DWORD  ReflectEvents::GetMaxCount(EEClass* pEEC)
+DWORD  ReflectEvents::GetMaxCount(TypeHandle th)
 {
     HRESULT     hr;
     DWORD       cnt = 0;
+    EEClass *pEEC = th.GetClass();
     while (pEEC) {
         HENUMInternal hEnum;
 
@@ -1626,7 +1696,7 @@ DWORD  ReflectEvents::GetMaxCount(EEClass* pEEC)
 
 // SetAccessors
 // This method will find the specified property accessor
-void ReflectEvents::SetAccessors(ReflectEvent* pEvent,EEClass* baseClass,EEClass* targetClass)
+void ReflectEvents::SetAccessors(ReflectEvent* pEvent,TypeHandle baseClass,TypeHandle targetClass)
 {
     ULONG               cAssoc;
     ASSOCIATE_RECORD*   pAssoc;
@@ -1656,14 +1726,16 @@ void ReflectEvents::SetAccessors(ReflectEvent* pEvent,EEClass* baseClass,EEClass
     // This loop will search for an accessor based upon the signature
     ReflectMethodList* pML = pEvent->pRC->GetMethods();
     for (ULONG i=0;i<cAssoc;i++) {
-        MethodDesc* pMeth = baseClass->FindMethod(pAssoc[i].m_memberdef);
+        MethodDesc *pMeth;
+        pMeth = baseClass.GetClass()->FindMethod(pAssoc[i].m_memberdef);
+	//@todo GENERICS: what about instantiating stubs
         if (pEvent->pRC->GetClass()->IsValueClass()
-            && !pMeth->IsUnboxingStub()) {
+            && !pMeth->IsSpecialStub()) {
             MethodDesc* pMD = pEvent->pRC->GetClass()->GetUnboxingMethodDescForValueClassMethod(pMeth);
             if (pMD)
                 pMeth = pMD;
         }
-        if (pEvent->pDeclCls != targetClass) {           
+        if (pEvent->declType != targetClass) {           
             DWORD attr = pMeth->GetAttrs();
             if (IsMdPrivate(attr))
                 continue;
@@ -1673,8 +1745,8 @@ void ReflectEvents::SetAccessors(ReflectEvent* pEvent,EEClass* baseClass,EEClass
             if (IsMdVirtual(attr))
             {
                 WORD slot = pMeth->GetSlot();
-                if (slot <= pEvent->pDeclCls->GetNumVtableSlots())
-                    pMeth = targetClass->GetMethodDescForSlot(slot);
+                if (slot <= pEvent->declType.GetClass()->GetNumVtableSlots())
+                    pMeth = targetClass.GetClass()->GetMethodDescForSlot(slot);
             }
         }
 
@@ -1690,7 +1762,7 @@ void ReflectEvents::SetAccessors(ReflectEvent* pEvent,EEClass* baseClass,EEClass
 // CheckVisibility
 // This method will check to see if a property or an event is visible.  This is done by looking
 //  at the visibility of the accessor methods.
-bool CheckVisibility(EEClass* pEEC,IMDInternalImport *pInternalImport, mdToken event)
+bool CheckVisibility(TypeHandle th,IMDInternalImport *pInternalImport, mdToken event)
 {
     ULONG               cAssoc;
     ULONG               cAccess;
@@ -1728,7 +1800,7 @@ bool CheckVisibility(EEClass* pEEC,IMDInternalImport *pInternalImport, mdToken e
 
 // IsMemberStatic
 // This method checks to see if a property or an event is static.
-bool IsMemberStatic(EEClass* pEEC,IMDInternalImport *pInternalImport, mdToken event)
+bool IsMemberStatic(TypeHandle th,IMDInternalImport *pInternalImport, mdToken event)
 {
     ULONG               cAssoc;
     ULONG               cAccess;

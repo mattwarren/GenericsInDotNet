@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -73,9 +78,9 @@ char *g_szMapElementType[] =
     "ByRef",        // 0x10
     "ValueClass",
     "Class",
-    "CopyCtor",
+    "Var",
     "MDArray",      // 0x14
-    "GENArray",
+    "With",
     "TypedByRef",
     "VALUEARRAY",
     "I",
@@ -84,10 +89,11 @@ char *g_szMapElementType[] =
     "FNPTR",
     "Object",
     "SZArray",
-    "GENERICArray",
+    "MVar",
     "CMOD_REQD",
     "CMOD_OPT",
     "INTERNAL",
+    "Combi",       
 };
 
 char *g_szMapUndecorateType[] = 
@@ -126,6 +132,7 @@ char *g_szMapUndecorateType[] =
     "CMOD_REQD",
     "CMOD_OPT",
     "INTERNAL",
+    "",       
 };
 
 char *g_strCalling[] = 
@@ -140,6 +147,7 @@ char *g_strCalling[] =
     "[LOCALSIG]",
     "[PROPERTY]",
     "[UNMANAGED]",
+    "[INSTANTIATION]",
 };
 
 char *g_szNativeType[] =
@@ -223,7 +231,7 @@ HRESULT MDInfo::AddToSigBuffer(char *string)
     return NOERROR;
 } // HRESULT MDInfo::AddToSigBuffer()
 
-MDInfo::MDInfo(IMetaDataImport* pImport, IMetaDataAssemblyImport* pAssemblyImport, LPCWSTR szScope, strPassBackFn inPBFn, ULONG DumpFilter)
+MDInfo::MDInfo(IMetaDataImport *pImport, IMetaDataAssemblyImport *pAssemblyImport, LPCWSTR szScope, strPassBackFn inPBFn, ULONG DumpFilter)
 {   // This constructor is specific to ILDASM/MetaInfo integration
 
     _ASSERTE(pImport != NULL);
@@ -685,7 +693,7 @@ int MDInfo::VWriteLine(char *str, ...)
     int     count;
 
     va_start(marker, str);
-    count = VWrite(str, marker);
+    count = VWriteMarker(str, marker);
     m_pbFn("\n");
     va_end(marker);
     return count;
@@ -697,12 +705,12 @@ int MDInfo::VWrite(char *str, ...)
     int     count;
 
     va_start(marker, str);
-    count = VWrite(str, marker);
+    count = VWriteMarker(str, marker);
     va_end(marker);
     return count;
 } // int MDInfo::VWrite()
 
-int MDInfo::VWrite(char *str, va_list marker)
+int MDInfo::VWriteMarker(char *str, va_list marker)
 {
     int     count = -1;
     int     i = 1;
@@ -1511,6 +1519,8 @@ LPCWSTR MDInfo::TypeDeforRefName(mdToken inToken, LPWSTR buffer, ULONG bufLen)
             return (TypeDefName((mdTypeDef) inToken, buffer, bufLen));
         else if (TypeFromToken(inToken) == mdtTypeRef)
             return (TypeRefName((mdTypeRef) inToken, buffer, bufLen));
+        else if (TypeFromToken(inToken) == mdtTypeSpec)
+            return L"[TypeSpec]";
         else
             return (L"[InvalidReference]");
     }
@@ -2055,9 +2065,9 @@ void MDInfo::DisplayCustomAttributeInfo(mdCustomAttribute inValue, const char *p
             PrettyPrintSig(pSig, cbSig, pwzName, &qSigName, m_pImport);
         }
 
-        VWrite("%s\tCustomAttributeName: %ls", preFix, rcName);
-        if (pSig && pMethName)
-            VWrite(" :: %S", qSigName.Ptr());
+    VWrite("%s\tCustomAttributeName: %ls", preFix, rcName);
+    if (pSig && pMethName)
+        VWrite(" :: %S", qSigName.Ptr());
 
     // Keep track of coff overhead.
         if (!wcscmp(L"__DecoratedName", rcName))
@@ -2590,6 +2600,8 @@ void MDInfo::DisplaySignature(PCCOR_SIGNATURE pbSigBlob, ULONG ulSigBlob, const 
         VWriteLine("%s\t\thasThis ", preFix);
     if (ulData & IMAGE_CEE_CS_CALLCONV_EXPLICITTHIS)
         VWriteLine("%s\t\texplicit ", preFix);
+    if (ulData & IMAGE_CEE_CS_CALLCONV_GENERIC)
+        VWriteLine("%s\t\tgeneric ", preFix);
 
     // initialize sigBuf
     InitSigBuffer();
@@ -2607,6 +2619,16 @@ void MDInfo::DisplaySignature(PCCOR_SIGNATURE pbSigBlob, ULONG ulSigBlob, const 
     }
     else 
     {
+        if (ulData & IMAGE_CEE_CS_CALLCONV_GENERIC)
+	{ 
+          ULONG ulTyArgs;         
+          cb = CorSigUncompressData(&pbSigBlob[cbCur], &ulTyArgs);
+          if (cb>ulSigBlob) 
+            goto ErrExit;
+          cbCur += cb;
+          ulSigBlob -= cb;
+          VWriteLine("%s\t\tType Arity:%d ", preFix, ulTyArgs);
+	}
         cb = CorSigUncompressData(&pbSigBlob[cbCur], &ulArgs);
         if (cb>ulSigBlob) 
             goto ErrExit;
@@ -2807,12 +2829,57 @@ HRESULT MDInfo::GetOneElementType(PCCOR_SIGNATURE pbSigBlob, ULONG ulSigBlob, UL
     }
     if (ulData == ELEMENT_TYPE_SZARRAY)
     {
-        // display the base type of SZARRAY or GENERICARRAY
+        // display the base type of SZARRAY
         if (FAILED(GetOneElementType(&pbSigBlob[cbCur], ulSigBlob-cbCur, &cb)))
             goto ErrExit;
         cbCur += cb;
         goto ErrExit;
     }
+
+    // instantiated type
+    if (ulData == ELEMENT_TYPE_WITH)
+    {
+        // display the type constructor
+        if (FAILED(GetOneElementType(&pbSigBlob[cbCur], ulSigBlob-cbCur, &cb)))
+            goto ErrExit;        
+        cbCur += cb;
+	ULONG numArgs;
+	cb = CorSigUncompressData(&pbSigBlob[cbCur], &numArgs);
+	cbCur += cb;
+        IfFailGo(AddToSigBuffer("<"));
+
+	while (numArgs > 0) 
+	{
+		if (cbCur > ulSigBlob)
+			goto ErrExit;
+		if (FAILED(GetOneElementType(&pbSigBlob[cbCur], ulSigBlob-cbCur, &cb)))
+			goto ErrExit;
+		cbCur += cb;
+		--numArgs;
+		if (numArgs > 0) 
+                  IfFailGo(AddToSigBuffer(","));
+	}
+        IfFailGo(AddToSigBuffer(">"));
+	goto ErrExit;
+    }
+    if (ulData == ELEMENT_TYPE_VAR) 
+      {
+        ULONG index;
+        cb = CorSigUncompressData(&pbSigBlob[cbCur], &index);
+        cbCur += cb;
+        sprintf(m_tempFormatBuffer, "!%d", index);
+        IfFailGo(AddToSigBuffer(m_tempFormatBuffer));
+        goto ErrExit;
+      }
+    if (ulData == ELEMENT_TYPE_MVAR) 
+      {
+        ULONG index;
+        cb = CorSigUncompressData(&pbSigBlob[cbCur], &index);
+        cbCur += cb;
+        sprintf(m_tempFormatBuffer, "!!%d", index);
+        IfFailGo(AddToSigBuffer(m_tempFormatBuffer));
+        goto ErrExit;
+      }
     if (ulData == ELEMENT_TYPE_FNPTR) 
     {
         cb = CorSigUncompressData(&pbSigBlob[cbCur], &ulData);
@@ -3403,7 +3470,6 @@ void MDInfo::DisplayUserStrings()
     ULONG       totalCount = 1;         // Running count of strings.
     bool        bUnprint = false;       // Is an unprintable character found?
     HRESULT     hr;                     // A result.
-
     while (SUCCEEDED(hr = m_pImport->EnumUserStrings( &stringEnum,
                              Strings, NumItems(Strings), &count)) &&
             count > 0)
@@ -3462,14 +3528,21 @@ void MDInfo::DisplayUserStrings()
             {
                 bUnprint = false;
                 szUserString = rUserString.Ptr();
-                rcBuf.ReSize(chBuf * 5 + 1);
+                rcBuf.ReSize(81); //(chBuf * 5 + 1);
                 szBuf = rcBuf.Ptr();
-                ULONG j;
-                for (j = 0; j < chBuf; j++)
-                    sprintf (&szBuf[j*5], "%04x ", szUserString[j]);
-                szBuf[j*5] = '\0';
+                ULONG j,k;
                 WriteLine("\t\tUser string has unprintables, hex format below:");
-                VWriteLine("\t\t%s", szBuf);
+                for (j = 0,k=0; j < chBuf; j++)
+                {
+                    sprintf (&szBuf[k*5], "%04x ", szUserString[j]);
+                    k++;
+                    if((k==16)||(j == (chBuf-1)))
+                    {
+                        szBuf[k*5] = '\0';
+                        VWriteLine("\t\t%s", szBuf);
+                        k=0;
+                    }
+                }
             }
         }
     }

@@ -8,6 +8,11 @@
 ;    By using this software in any fashion, you are agreeing to be bound by the
 ;    terms of this license.
 ;   
+;    This file contains modifications of the base SSCLI software to support generic
+;    type definitions and generic methods,  THese modifications are for research
+;    purposes.  They do not commit Microsoft to the future support of these or
+;    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+;   
 ;    You must not remove this notice, or any other, from this software.
 ;   
 ; 
@@ -437,7 +442,8 @@ Argument_DuplicateModuleName = Duplicate dynamic module name within an assembly.
 Argument_DuplicateTypeName = Duplicate type name within an assembly.
 Argument_InvalidAssemblyName = Assembly names may not begin with whitespace, or contain the characters '/' or '\\'.
 Argument_InvalidArrayName = The given array name was invalid.
-Argument_DuplicatedFileName = Duplicated file names.
+Argument_InvalidGenericInstantiation = The given generic instantiation was invalid.
+Argument_DuplicatedFileName = Duplicate file names.
 Argument_GlobalFunctionHasToBeStatic = Global members must be static.
 Argument_BadPInvokeOnInterface = PInvoke methods cannot exist on interfaces.
 Argument_BadPInvokeMethod = PInvoke methods must be static and native and cannot be abstract.

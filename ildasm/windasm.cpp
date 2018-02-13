@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -97,8 +102,10 @@ extern BOOL                 g_fHideAsm;
 extern BOOL                 g_fHideFAA;
 extern BOOL                 g_fHideFOA;
 extern BOOL                 g_fHidePrivScope;
+extern BOOL                 g_fForwardDecl;
 extern unsigned		    g_uCodePage;
 extern BOOL		    g_fOnUnicode;
+
 
 
 #include "../tools/metainfo/mdinfo.h"
@@ -225,6 +232,10 @@ int ProcessOneArg(char* szArg, char** ppszObjFileName)
         else if (_stricmp(szOpt, "per") == 0) 
         {
             g_fDumpToPerfWriter = TRUE;
+        }
+        else if (_stricmp(szOpt, "for") == 0) 
+        {
+            g_fForwardDecl = TRUE;
         }
         else if (_stricmp(szOpt, "pub") == 0)
         {
@@ -403,30 +414,42 @@ AssumeFileName:
     return 0;
 }
 
+char* UTF8toANSI(char* szUTF)
+{
+	ULONG32 L = (ULONG32) strlen(szUTF)+16;
+	WCHAR* wzUnicode = new WCHAR[L];
+	memset(wzUnicode,0,L*sizeof(WCHAR));
+	WszMultiByteToWideChar(CP_UTF8,0,szUTF,-1,wzUnicode,L);
+    L <<= 2;
+    char* szANSI = new char[L];
+    memset(szANSI,0,L);
+    WszWideCharToMultiByte(CP_ACP,0,wzUnicode,-1,szANSI,L,NULL,NULL);
+    delete [] wzUnicode;
+    return szANSI;
+}
+char* ANSItoUTF8(char* szANSI)
+{
+	ULONG32 L = (ULONG32) strlen(szANSI)+16;
+	WCHAR* wzUnicode = new WCHAR[L];
+	memset(wzUnicode,0,L*sizeof(WCHAR));
+	WszMultiByteToWideChar(CP_ACP,0,szANSI,-1,wzUnicode,L);
+    L *= 3;
+    char* szUTF = new char[L];
+    memset(szUTF,0,L);
+    WszWideCharToMultiByte(CP_UTF8,0,wzUnicode,-1,szUTF,L,NULL,NULL);
+    delete [] wzUnicode;
+    return szUTF;
+}
+
+
 
 FILE* OpenOutput(char* szFileName)
 {
 	FILE*	pFile = NULL;
-	ULONG32 L = (ULONG32) strlen(szFileName)+16;
-	WCHAR* wzFileName = new WCHAR[L];
-	memset(wzFileName,0,L*sizeof(WCHAR));
-	WszMultiByteToWideChar(CP_UTF8,0,szFileName,-1,wzFileName,L);
-	if(g_fOnUnicode)
-	{
-		if(g_uCodePage == 0xFFFFFFFF) pFile = _wfopen(wzFileName,L"wb");
-        else pFile = _wfopen(wzFileName,L"wt");
-	}
-	else
-	{
-		char* szFileNameANSI = new char[L*2];
-		memset(szFileNameANSI,0,L*2);
-		WszWideCharToMultiByte(CP_ACP,0,wzFileName,-1,szFileNameANSI,L*2,NULL,NULL);
-
-		if(g_uCodePage == 0xFFFFFFFF) pFile = fopen(szFileNameANSI,"wb");
-        else pFile = fopen(szFileNameANSI,"wt");
-		delete [] szFileNameANSI;
-	}
-	delete [] wzFileName;
+    char* szFileNameANSI = UTF8toANSI(szFileName);
+    if(g_uCodePage == 0xFFFFFFFF) pFile = fopen(szFileNameANSI,"wb");
+    else pFile = fopen(szFileNameANSI,"wt");
+    delete [] szFileNameANSI;
 	return pFile;
 }
 

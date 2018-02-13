@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -25,6 +30,11 @@ ULONG _skipMethodSignatureHeader(PCCOR_SIGNATURE sig,
 
     cb += CorSigUncompressData(&sig[0], &tmp);
     _ASSERTE(tmp != IMAGE_CEE_CS_CALLCONV_FIELD);
+    if (tmp & IMAGE_CEE_CS_CALLCONV_GENERIC)
+    {
+      ULONG tyCount;
+      cb += CorSigUncompressData(&sig[cb], &tyCount);
+    }
 
     cb += CorSigUncompressData(&sig[cb], pCount);
     cb += _skipTypeInSignature(&sig[cb]);
@@ -75,6 +85,14 @@ ULONG _skipTypeInSignature(PCCOR_SIGNATURE sig, bool *pfPassedVarArgSentinel)
             // Skip over extra embedded type.
             cb += _skipTypeInSignature(&sig[cb]);
         }
+        else if (elementType == ELEMENT_TYPE_WITH) 
+        {
+	         cb += _skipTypeInSignature(&sig[cb]);
+             ULONG argCnt;
+             cb += CorSigUncompressData(&sig[cb], &argCnt); // Get number of parameters
+             while (argCnt--)
+                cb += _skipTypeInSignature(&sig[cb]);        // Skip the parameters
+        }
         else if (elementType == ELEMENT_TYPE_ARRAY)
         {
             // Skip over extra embedded type.
@@ -110,7 +128,13 @@ ULONG _skipTypeInSignature(PCCOR_SIGNATURE sig, bool *pfPassedVarArgSentinel)
                     cb += CorSigUncompressSignedInt(&sig[cb], &lowerBound);
                 }
             }
-        }  else if ( (elementType == ELEMENT_TYPE_FNPTR) )
+        }  else if ((elementType == ELEMENT_TYPE_VAR) ||
+                    (elementType == ELEMENT_TYPE_MVAR))
+        {
+            ULONG tyvar_num;
+            cb += CorSigUncompressData(&sig[cb], &tyvar_num);
+        }
+        else if ( (elementType == ELEMENT_TYPE_FNPTR) )
         {
             // We've got a method signature within this signature,
             // so traverse it

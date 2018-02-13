@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -36,6 +41,8 @@ struct LineCodeDescr
 {
 	ULONG Line;
 	ULONG Column;
+	ULONG LineEnd;
+	ULONG ColumnEnd;
 	ULONG PC;
 	ULONG FileToken;
 };
@@ -54,8 +61,8 @@ void DumpCustomAttributes(mdToken tkOwner, void *GUICookie);
 void DumpByteArray(char* szString, BYTE* pBlob, ULONG ulLen, void* GUICookie);
 char* DumpDataPtr(char* buffer, DWORD ptr, DWORD size);
 
-void PrettyPrintMemberRef(char* szString, mdToken tk, IMDInternalImport *pImport, void* GUICookie);
-void PrettyPrintMethodDef(char* szString, mdToken tk, IMDInternalImport *pImport, void* GUICookie);
+void PrettyPrintMemberRef(char* szString, mdToken tk, PCCOR_SIGNATURE pInstSig, ULONG cInstSig, IMDInternalImport *pImport, void* GUICookie);
+void PrettyPrintMethodDef(char* szString, mdToken tk, PCCOR_SIGNATURE pInstSig, ULONG cInstSig, IMDInternalImport *pImport, void* GUICookie);
 void DumpPermissions(mdToken tkOwner, void* GUICookie);
 void DumpHeader(IMAGE_COR20_HEADER *CORHeader, void* GUICookie);
 void DumpHeaderDetails(IMAGE_COR20_HEADER *CORHeader, void* GUICookie);

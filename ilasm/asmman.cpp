@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -19,10 +24,6 @@
 #include "assembler.h"
 #include "strongname.h"
 #include "safegetfilesize.h"
-
-extern unsigned int g_uCodePage;
-extern WCHAR *g_wzKeySourceName;
-extern bool OnErrGo;
 
 BinStr* BinStrToUnicode(BinStr* pSource)
 {
@@ -61,7 +62,10 @@ AsmManFile*         AsmMan::GetFileByName(char* szFileName)
     AsmManFile* ret = NULL;
     if(szFileName)
     {
-        for(int i=0; (ret = m_FileLst.PEEK(i))&&strcmp(ret->szName,szFileName); i++);
+        AsmManFile X;
+        X.szName = szFileName;
+        ret = m_FileLst.FIND(&X);
+        X.szName = NULL;
     }
     return ret;
 }
@@ -77,7 +81,10 @@ AsmManComType*          AsmMan::GetComTypeByName(char* szComTypeName)
     AsmManComType*  ret = NULL;
     if(szComTypeName)
     {
-        for(int i=0; (ret = m_ComTypeLst.PEEK(i))&&strcmp(ret->szName,szComTypeName); i++);
+        AsmManComType X;
+        X.szName = szComTypeName;
+        ret = m_ComTypeLst.FIND(&X);
+        X.szName = NULL;
     }
     return ret;
 }
@@ -93,7 +100,10 @@ AsmManAssembly*     AsmMan::GetAsmRefByName(char* szAsmRefName)
     AsmManAssembly* ret = NULL;
     if(szAsmRefName)
     {
-        for(int i=0; (ret = m_AsmRefLst.PEEK(i))&&strcmp(ret->szAlias,szAsmRefName); i++);
+        AsmManAssembly X;
+        X.szAlias = szAsmRefName;
+        ret = m_AsmRefLst.FIND(&X);
+        X.szAlias = NULL;
     }
     return ret;
 }
@@ -107,11 +117,10 @@ void    AsmMan::SetModuleName(char* szName)
 {
 	if(m_szScopeName == NULL)	// ignore all duplicate declarations
 	{
-		WCHAR                   wzBuff[MAX_SCOPE_LENGTH];
-		wzBuff[0] = 0;
+		wzUniBuf[0] = 0;
 		if(szName && *szName)
 		{
-			ULONG L = (ULONG) strlen(szName);
+			ULONG L = (ULONG)strlen(szName);
 			if(L >= MAX_SCOPE_LENGTH)
 			{
 				((Assembler*)m_pAssembler)->report->warn("Module name too long (%d chars, max.allowed: %d chars), truncated\n",L,MAX_SCOPE_LENGTH-1);
@@ -119,9 +128,9 @@ void    AsmMan::SetModuleName(char* szName)
 			}
 			m_szScopeName = szName;
 			strcpy(((Assembler*)m_pAssembler)->m_szScopeName,szName);
-			WszMultiByteToWideChar(g_uCodePage,0,m_szScopeName,-1,wzBuff,MAX_SCOPE_LENGTH);
+			WszMultiByteToWideChar(g_uCodePage,0,m_szScopeName,-1,wzUniBuf,dwUniBuf);
 		}
-		m_pEmitter->SetModuleProps(wzBuff);
+		m_pEmitter->SetModuleProps(wzUniBuf);
 	}
 }
 //==============================================================================================================
@@ -216,10 +225,9 @@ void    AsmMan::AddFile(char* szName, DWORD dwAttr, BinStr* pHashBlob)
 		tmp->dwAttr = dwAttr;
 		tmp->pHash = pHashBlob;
 		{ // emit the file
-			WCHAR                   wzBuff[2048];
 			HRESULT                 hr = S_OK;
 
-			wzBuff[0] = 0;
+			wzUniBuf[0] = 0;
 
 			if(m_pAsmEmitter==NULL)
 				hr=m_pEmitter->QueryInterface(IID_IMetaDataAssemblyEmit, (void**) &m_pAsmEmitter);
@@ -229,13 +237,13 @@ void    AsmMan::AddFile(char* szName, DWORD dwAttr, BinStr* pHashBlob)
 				BYTE*       pHash=NULL;
 				DWORD       cbHash= 0;
 
-				WszMultiByteToWideChar(g_uCodePage,0,szName,-1,wzBuff,2048);
+				WszMultiByteToWideChar(g_uCodePage,0,szName,-1,wzUniBuf,dwUniBuf);
 				if(pHashBlob==NULL) // if hash not explicitly specified
 				{
 					if(m_pAssembly      // and assembly is defined
 						&& m_pAssembly->ulHashAlgorithm) // and hash algorithm is defined...
 					{ // then try to compute it
-						if(FAILED(GetHash(wzBuff,(ALG_ID)(m_pAssembly->ulHashAlgorithm),&pHash,&cbHash)))
+						if(FAILED(GetHash(wzUniBuf,(ALG_ID)(m_pAssembly->ulHashAlgorithm),&pHash,&cbHash)))
 						{
 							pHash = NULL;
 							cbHash = 0;
@@ -252,7 +260,7 @@ void    AsmMan::AddFile(char* szName, DWORD dwAttr, BinStr* pHashBlob)
 					cbHash = pHashBlob->length();
 				}
 
-				hr = m_pAsmEmitter->DefineFile(wzBuff,
+				hr = m_pAsmEmitter->DefineFile(wzUniBuf,
 											(const void*)pHash,
 											cbHash,
 											dwAttr,
@@ -281,6 +289,7 @@ void    AsmMan::AddFile(char* szName, DWORD dwAttr, BinStr* pHashBlob)
 
 void    AsmMan::StartAssembly(char* szName, char* szAlias, DWORD dwAttr, BOOL isRef)
 {
+    if(!isRef && (0==strcmp(szName,"mscorlib"))) ((Assembler*)m_pAssembler)->m_fIsMscorlib = TRUE;
     if(!isRef && (m_pAssembly != NULL))
     {
 		if(strcmp(szName, m_pAssembly->szName))
@@ -295,15 +304,17 @@ void    AsmMan::StartAssembly(char* szName, char* szAlias, DWORD dwAttr, BOOL is
             memset(m_pCurAsmRef,0,sizeof(AsmManAssembly));
             m_pCurAsmRef->szName = szName;
             m_pCurAsmRef->szAlias = szAlias ? szAlias : szName;
+            m_pCurAsmRef->dwAlias = strlen(m_pCurAsmRef->szAlias);
             m_pCurAsmRef->dwAttr = dwAttr;
             m_pCurAsmRef->isRef = isRef;
-            ((Assembler*)m_pAssembler)->m_tkCurrentCVOwner = 0;
-            ((Assembler*)m_pAssembler)->m_pCustomDescrList = &(m_pCurAsmRef->m_CustomDescrList);
             if(!isRef) m_pAssembly = m_pCurAsmRef;
         }
         else
             report->error("Failed to allocate AsmManAssembly structure\n");
     }
+    ((Assembler*)m_pAssembler)->m_tkCurrentCVOwner = 0;
+    ((Assembler*)m_pAssembler)->m_pCustomDescrList = m_pCurAsmRef ? &(m_pCurAsmRef->m_CustomDescrList) : NULL;
+
 }
 // copied from asmparse.y
 static void corEmitInt(BinStr* buff, unsigned data) 
@@ -312,23 +323,19 @@ static void corEmitInt(BinStr* buff, unsigned data)
     buff->remove(5 - cnt);
 }
 
-void AsmMan::EmitDebuggableAttribute(mdToken tkOwner, BOOL bIsMscorlib)
+void AsmMan::EmitDebuggableAttribute(mdToken tkOwner)
 {
     mdToken tkCA;
     Assembler* pAsm = (Assembler*)m_pAssembler;
-    BinStr  *pbsTypeSpec = new BinStr();
+    mdToken tkTypeSpec, tkMscorlib;
     BinStr  *pbsSig = new BinStr();
     BinStr  bsSigArg;
-    BinStr  bsBytes;
-    unsigned len;
-    const char*   sz;
+    BinStr* bsBytes = new BinStr();;
     char*   szName;
 
-    sz = bIsMscorlib ? "System.Diagnostics.DebuggableAttribute"
-        : "mscorlib^System.Diagnostics.DebuggableAttribute";
-    pbsTypeSpec->appendInt8(ELEMENT_TYPE_NAME);
-    len = (unsigned)(strlen(sz)+1);
-    memcpy(pbsTypeSpec->getBuff(len), sz, len);
+    tkMscorlib = pAsm->m_fIsMscorlib ? 1 : pAsm->GetAsmRef("mscorlib");
+    tkTypeSpec = pAsm->ResolveClassRef(tkMscorlib,"System.Diagnostics.DebuggableAttribute",NULL);
+
     bsSigArg.appendInt8(ELEMENT_TYPE_BOOLEAN);
     bsSigArg.appendInt8(ELEMENT_TYPE_BOOLEAN);
     
@@ -337,17 +344,17 @@ void AsmMan::EmitDebuggableAttribute(mdToken tkOwner, BOOL bIsMscorlib)
     pbsSig->appendInt8(ELEMENT_TYPE_VOID);
     pbsSig->append(&bsSigArg);
 
-    bsBytes.appendInt8(1);
-    bsBytes.appendInt8(0);
-    bsBytes.appendInt8(1);
-    bsBytes.appendInt8(1);
-    bsBytes.appendInt8(0);
-    bsBytes.appendInt8(0);
+    bsBytes->appendInt8(1);
+    bsBytes->appendInt8(0);
+    bsBytes->appendInt8(1);
+    bsBytes->appendInt8(1);
+    bsBytes->appendInt8(0);
+    bsBytes->appendInt8(0);
 
     szName = new char[16];
     strcpy(szName,".ctor");
-    tkCA = pAsm->MakeMemberRef(pbsTypeSpec,szName,pbsSig,0);
-    pAsm->DefineCV(tkOwner,tkCA,&bsBytes);
+    tkCA = pAsm->MakeMemberRef(tkTypeSpec,szName,pbsSig,0);
+    pAsm->DefineCV(new CustomDescr(tkOwner,tkCA,bsBytes));
 }
 void    AsmMan::EndAssembly()
 {
@@ -355,10 +362,9 @@ void    AsmMan::EndAssembly()
     {
         if(m_pCurAsmRef->isRef)
         { // emit the assembly ref
-            WCHAR                   wzBuff[2048];
             HRESULT                 hr = S_OK;
 
-            wzBuff[0] = 0;
+            wzUniBuf[0] = 0;
             if(GetAsmRefByName(m_pCurAsmRef->szAlias))
             {
                 //report->warn("Multiple declarations of Assembly Ref '%s', ignored except the 1st one\n",m_pCurAsmRef->szName);
@@ -377,7 +383,7 @@ void    AsmMan::EndAssembly()
                 md.usBuildNumber = m_pCurAsmRef->usBuild;
                 md.usRevisionNumber = m_pCurAsmRef->usRevision;
                 md.szLocale = m_pCurAsmRef->pLocale ? (LPWSTR)(m_pCurAsmRef->pLocale->ptr()) : NULL;
-                md.cbLocale = m_pCurAsmRef->pLocale ? m_pCurAsmRef->pLocale->length()/ ((ULONG) sizeof(WCHAR)) : 0;
+                md.cbLocale = m_pCurAsmRef->pLocale ? m_pCurAsmRef->pLocale->length()/((ULONG)sizeof(WCHAR)) : 0;
 
                 md.rProcessor = NULL;
                 md.rOS = NULL;
@@ -401,15 +407,15 @@ void    AsmMan::EndAssembly()
                     dwFlags |= afPublicKey;
                 }
                 // Convert name to Unicode
-                WszMultiByteToWideChar(g_uCodePage,0,m_pCurAsmRef->szName,-1,wzBuff,2048);
-                hr = m_pAsmEmitter->DefineAssemblyRef(           // S_OK or error.
+                WszMultiByteToWideChar(g_uCodePage,0,m_pCurAsmRef->szName,-1,wzUniBuf,dwUniBuf);
+                hr = m_pAsmEmitter->DefineAssemblyRef(       // S_OK or error.
                             pbPublicKeyOrToken,              // [IN] Public key or token of the assembly.
                             cbPublicKeyOrToken,              // [IN] Count of bytes in the key or token.
-                            (LPCWSTR)wzBuff,                 // [IN] Name of the assembly being referenced.
-                            (const ASSEMBLYMETADATA*)&md,  // [IN] Assembly MetaData.
+                            (LPCWSTR)wzUniBuf,               // [IN] Name of the assembly being referenced.
+                            (const ASSEMBLYMETADATA*)&md,    // [IN] Assembly MetaData.
                             (m_pCurAsmRef->pHashBlob ? (const void*)(m_pCurAsmRef->pHashBlob->ptr()) : NULL),           // [IN] Hash Blob.
                             (m_pCurAsmRef->pHashBlob ? m_pCurAsmRef->pHashBlob->length() : 0),            // [IN] Count of bytes in the Hash Blob.
-                            dwFlags,     // [IN] Flags.
+                            dwFlags,                         // [IN] Flags.
                             (mdAssemblyRef*)&(m_pCurAsmRef->tkTok));         // [OUT] Returned AssemblyRef token.
                 if(FAILED(hr)) report->error("Failed to define assembly ref '%s': 0x%08X\n",m_pCurAsmRef->szName,hr);
                 else
@@ -424,10 +430,9 @@ void    AsmMan::EndAssembly()
         }
         else
         { // emit the assembly
-            WCHAR                   wzBuff[2048];
             HRESULT                 hr = S_OK;
 
-            wzBuff[0] = 0;
+            wzUniBuf[0] = 0;
 
             if(m_pAsmEmitter==NULL)
                 hr=m_pEmitter->QueryInterface(IID_IMetaDataAssemblyEmit, (void**) &m_pAsmEmitter);
@@ -440,7 +445,7 @@ void    AsmMan::EndAssembly()
                 md.usBuildNumber = m_pAssembly->usBuild;
                 md.usRevisionNumber = m_pAssembly->usRevision;
                 md.szLocale = m_pAssembly->pLocale ? (LPWSTR)(m_pAssembly->pLocale->ptr()) : NULL;
-                md.cbLocale = m_pAssembly->pLocale ? m_pAssembly->pLocale->length()/ ((ULONG) sizeof(WCHAR)) : 0;
+                md.cbLocale = m_pAssembly->pLocale ? m_pAssembly->pLocale->length()/((ULONG)sizeof(WCHAR)) : 0;
 
                 md.rProcessor = NULL;
                 md.rOS = NULL;
@@ -448,7 +453,7 @@ void    AsmMan::EndAssembly()
                 md.ulOS = 0;
 
                 // Convert name to Unicode
-                WszMultiByteToWideChar(g_uCodePage,0,m_pAssembly->szName,-1,wzBuff,2048);
+                WszMultiByteToWideChar(g_uCodePage,0,m_pAssembly->szName,-1,wzUniBuf,dwUniBuf);
 
                 // Determine the strong name public key. This may have been set
                 // via a directive in the source or from the command line (which
@@ -456,11 +461,11 @@ void    AsmMan::EndAssembly()
                 // been provided with a file or the name of a CAPI key
                 // container. Either may contain a public key or a full key
                 // pair.
-                if (g_wzKeySourceName)
+                if (((Assembler*)m_pAssembler)->m_wzKeySourceName)
                 {
                     {
                         // Read public key or key pair from file.
-                        HANDLE hFile = WszCreateFile(g_wzKeySourceName,
+                        HANDLE hFile = WszCreateFile(((Assembler*)m_pAssembler)->m_wzKeySourceName,
                                                      GENERIC_READ,
                                                      FILE_SHARE_READ,
                                                      NULL,
@@ -470,7 +475,7 @@ void    AsmMan::EndAssembly()
                         if(hFile == INVALID_HANDLE_VALUE)
                         {
                             hr = GetLastError();
-                            report->error("Failed to open key file '%S': 0x%08X\n",g_wzKeySourceName,hr);
+                            report->error("Failed to open key file '%S': 0x%08X\n",((Assembler*)m_pAssembler)->m_wzKeySourceName,hr);
                             m_pCurAsmRef = NULL;
                             return;
                         }
@@ -495,7 +500,7 @@ void    AsmMan::EndAssembly()
                         DWORD dwBytesRead;
                         if (!ReadFile(hFile, m_sStrongName.m_pbPublicKey, m_sStrongName.m_cbPublicKey, &dwBytesRead, NULL)) {
                             hr = GetLastError();
-                            report->error("Failed to read key file '%S': 0x%08X\n",g_wzKeySourceName,hr);
+                            report->error("Failed to read key file '%S': 0x%08X\n",((Assembler*)m_pAssembler)->m_wzKeySourceName,hr);
                             m_pCurAsmRef = NULL;
                             return;
                         }
@@ -575,7 +580,7 @@ void    AsmMan::EndAssembly()
                     (const void*)(m_sStrongName.m_pbPublicKey), // [IN] Public key of the assembly.
                     m_sStrongName.m_cbPublicKey,                // [IN] Count of bytes in the public key.
                     m_pAssembly->ulHashAlgorithm,            // [IN] Hash algorithm used to hash the files.
-                    (LPCWSTR)wzBuff,                 // [IN] Name of the assembly.
+                    (LPCWSTR)wzUniBuf,                 // [IN] Name of the assembly.
                     (const ASSEMBLYMETADATA*)&md,  // [IN] Assembly MetaData.
                     m_pAssembly->dwAttr,        // [IN] Flags.
                     (mdAssembly*)&(m_pAssembly->tkTok));             // [OUT] Returned Assembly token.
@@ -589,8 +594,7 @@ void    AsmMan::EndAssembly()
                                          m_pAssembly->m_pPermissionSets);
                     if(pAsm->m_fIncludeDebugInfo)
                     {
-                        EmitDebuggableAttribute(m_pAssembly->tkTok,
-                            (_stricmp(m_pAssembly->szName,"mscorlib")== 0));
+                        EmitDebuggableAttribute(m_pAssembly->tkTok);
                     }
                     pAsm->EmitCustomAttributes(m_pAssembly->tkTok, &(m_pAssembly->m_CustomDescrList));
                 }
@@ -768,14 +772,13 @@ void    AsmMan::SetManifestResAsmRef(char* szAsmRefName)
 
 HRESULT AsmMan::EmitManifest()
 {
-    WCHAR                   wzBuff[2048];
     AsmManFile*             pFile;
     //AsmManAssembly*           pAsmRef;
     AsmManComType*          pComType;
     AsmManRes*              pManRes;
     HRESULT                 hr = S_OK;
 
-    wzBuff[0] = 0;
+    wzUniBuf[0] = 0;
 
     if(m_pAsmEmitter==NULL)
         hr=m_pEmitter->QueryInterface(IID_IMetaDataAssemblyEmit, (void**) &m_pAsmEmitter);
@@ -795,25 +798,19 @@ HRESULT AsmMan::EmitManifest()
         // Assembly and AssemblyRefs are already emitted
         if(((Assembler*)m_pAssembler)->m_fIncludeDebugInfo && (m_pAssembly == NULL))
         {
-            mdToken tkOwner;
-            BinStr  *pbsTypeSpec = new BinStr();
-            unsigned len;
-            char*   sz;
+            mdToken tkOwner, tkMscorlib;
+            tkMscorlib = ((Assembler*)m_pAssembler)->GetAsmRef("mscorlib");
+            tkOwner = ((Assembler*)m_pAssembler)->ResolveClassRef(tkMscorlib,
+                                                                  "System.Runtime.CompilerServices.AssemblyAttributesGoHere",
+                                                                  NULL);
 
-            sz = "mscorlib^System.Runtime.CompilerServices.AssemblyAttributesGoHere";
-            pbsTypeSpec->appendInt8(ELEMENT_TYPE_NAME);
-            len = (unsigned int)strlen(sz)+1;
-            memcpy(pbsTypeSpec->getBuff(len), sz, len);
-
-            tkOwner = ((Assembler*)m_pAssembler)->MakeTypeRef(pbsTypeSpec);
-
-            EmitDebuggableAttribute(tkOwner,FALSE);
+            EmitDebuggableAttribute(tkOwner);
         }
 
         // Emit all com types
         for(i = 0; (pComType = m_ComTypeLst.PEEK(i)); i++)
         {
-            WszMultiByteToWideChar(g_uCodePage,0,pComType->szName,-1,wzBuff,2048);
+            WszMultiByteToWideChar(g_uCodePage,0,pComType->szName,-1,wzUniBuf,dwUniBuf);
             mdToken     tkImplementation = mdTokenNil;
             if(pComType->szFileName)
             {
@@ -821,7 +818,7 @@ HRESULT AsmMan::EmitManifest()
                 if(tkImplementation==mdFileNil)
                 {
                     report->error("Undefined File '%s' in ExportedType '%s'\n",pComType->szFileName,pComType->szName);
-                    if(!OnErrGo) continue;
+                    if(!((Assembler*)m_pAssembler)->OnErrGo) continue;
                 }
             }
             else if(pComType->szComTypeName)
@@ -830,20 +827,22 @@ HRESULT AsmMan::EmitManifest()
                 if(tkImplementation==mdExportedTypeNil)
                 {
                     report->error("Undefined ExportedType '%s' in ExportedType '%s'\n",pComType->szComTypeName,pComType->szName);
-                    if(!OnErrGo) continue;
+                    if(!((Assembler*)m_pAssembler)->OnErrGo) continue;
                 }
             }
             else 
             {
                 report->warn("Undefined implementation in ExportedType '%s' -- ExportType not emitted\n",pComType->szName);
-                if(!OnErrGo) continue;
+                if(!((Assembler*)m_pAssembler)->OnErrGo) continue;
             }
             hr = m_pAsmEmitter->DefineExportedType(               // S_OK or error.
-                    (LPCWSTR)wzBuff,                              // [IN] Name of the Com Type.
-                    tkImplementation,                             // [IN] mdFile or mdAssemblyRef that provides the ComType.
-                    (mdTypeDef)pComType->tkClass,                 // [IN] TypeDef token within the file.
-                    pComType->dwAttr,                             // [IN] Flags.
-                    (mdExportedType*)&(pComType->tkTok));         // [OUT] Returned ComType token.
+
+                   (LPCWSTR)wzUniBuf,                 // [IN] Name of the Com Type.
+                   tkImplementation,       // [IN] mdFile or mdAssemblyRef that provides the ComType.
+                   (mdTypeDef)pComType->tkClass,              // [IN] TypeDef token within the file.
+                   pComType->dwAttr,         // [IN] Flags.
+                   (mdExportedType*)&(pComType->tkTok));           // [OUT] Returned ComType token.
+
             if(FAILED(hr)) report->error("Failed to define ExportedType '%s': 0x%08X\n",pComType->szName,hr);
             else
             {
@@ -856,7 +855,7 @@ HRESULT AsmMan::EmitManifest()
         {
 			BOOL fOK = TRUE;
             mdToken     tkImplementation = mdFileNil;
-            WszMultiByteToWideChar(g_uCodePage,0,pManRes->szName,-1,wzBuff,2048);
+            WszMultiByteToWideChar(g_uCodePage,0,pManRes->szName,-1,wzUniBuf,dwUniBuf);
 			if(pManRes->szAsmRefName)
 			{
 				tkImplementation = GetAsmRefTokByName(pManRes->szAsmRefName);
@@ -878,7 +877,7 @@ HRESULT AsmMan::EmitManifest()
             else // embedded mgd.resource, go after the file
             {
                 pManRes->ulOffset = m_dwMResSizeTotal;
-                HANDLE hFile = WszCreateFile(wzBuff, GENERIC_READ, FILE_SHARE_READ,
+                HANDLE hFile = WszCreateFile(wzUniBuf, GENERIC_READ, FILE_SHARE_READ,
                              0, OPEN_EXISTING, 0, 0);
                 if (hFile == INVALID_HANDLE_VALUE)
                 {
@@ -896,17 +895,17 @@ HRESULT AsmMan::EmitManifest()
                     else 
                     {
                         m_dwMResSizeTotal += m_dwMResSize[m_dwMResNum]+sizeof(DWORD);
-                        m_wzMResName[m_dwMResNum] = new WCHAR[wcslen(wzBuff)+1];
-                        wcscpy(m_wzMResName[m_dwMResNum],wzBuff);
+                        m_wzMResName[m_dwMResNum] = new WCHAR[wcslen(wzUniBuf)+1];
+                        wcscpy(m_wzMResName[m_dwMResNum],wzUniBuf);
                         m_dwMResNum++;
                     }
                     CloseHandle(hFile);
                 }
             }
-			if(fOK || OnErrGo)
+			if(fOK || ((Assembler*)m_pAssembler)->OnErrGo)
 			{
 				hr = m_pAsmEmitter->DefineManifestResource(      // S_OK or error.
-						(LPCWSTR)wzBuff,                 // [IN] Name of the resource.
+						(LPCWSTR)wzUniBuf,                 // [IN] Name of the resource.
 						tkImplementation,       // [IN] mdFile or mdAssemblyRef that provides the resource.
 						pManRes->ulOffset,               // [IN] Offset to the beginning of the resource within the file.
 						pManRes->dwAttr,        // [IN] Flags.

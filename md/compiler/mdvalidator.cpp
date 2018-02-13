@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -1992,7 +1997,10 @@ HRESULT RegMeta::ValidateMethod(RID rid)
         ParamRec* pRec;
         ULONG cbSig;
         PCCOR_SIGNATURE typePtr = pMiniMd->getSignatureOfMethod(pRecord,&cbSig);
-        CorSigUncompressData(typePtr);  // get the calling convention out of the way
+        unsigned  callConv = CorSigUncompressData(typePtr);  // get the calling convention out of the way  
+        unsigned  numTyArgs = 0;
+        if (callConv & IMAGE_CEE_CS_CALLCONV_GENERIC)
+          numTyArgs = CorSigUncompressData(typePtr);
         unsigned  numArgs = CorSigUncompressData(typePtr);
         USHORT    usPrevSeq = 0;
 
@@ -2237,6 +2245,39 @@ ErrExit:
     return hr;
 }   // RegMeta::ValidateInterfaceImpl()
 
+
+//*****************************************************************************
+// Validate the given GenericPar.
+//@todo GENERICS: check that owner is a type def or method def
+//@todo GENERICS: check that the sequence numbers start at zero and are contiguous
+//@todo GENERICS: check that no two type parameters have the same name (optional?)
+//*****************************************************************************
+HRESULT RegMeta::ValidateGenericPar(RID rid)
+{
+    CMiniMdRW   *pMiniMd = &(m_pStgdb->m_MiniMd);   // MiniMd of the scope.
+    GenericParRec *pRecord;            // GenericPar record.
+    /*
+    mdTypeDef   tkClass;                // Class with the formal type parameter.
+    mdToken     tkBound;                // TypeSpec for the bound.
+    */
+    VEContext   veCtxt;                 // Context record.
+    HRESULT     hr = S_OK;              // Value returned.
+    HRESULT     hrSave = S_OK;          // Save state.
+
+    // Get the GenericPar record.
+    veCtxt.Token = TokenFromRid(rid, mdtGenericPar);
+    veCtxt.uOffset = 0;
+    pRecord = pMiniMd->getGenericPar(rid);
+
+    // Get parameterized Class and the TypeSpec for the bound.
+    // <REVIEW>Generics</REVIEW>
+
+    hr = hrSave;
+    // ErrExit:
+    return hr;
+}   // RegMeta::ValidateGenericPar()
+
+
 //*****************************************************************************
 // Validate the given MemberRef.
 //*****************************************************************************
@@ -2304,12 +2345,21 @@ HRESULT RegMeta::ValidateMemberRef(RID rid)
     {
         ULONG   ulCallingConv;
         ULONG   ulArgCount;
+        ULONG   ulTyArgCount = 0;
         ULONG   ulCurByte = 0;
 
         // Extract calling convention.
         pbSigTmp = pbSig;
         ulCurByte += CorSigUncompressedDataSize(pbSigTmp);
         ulCallingConv = CorSigUncompressData(pbSigTmp);
+
+	// Get the type argument count
+        if (ulCallingConv & IMAGE_CEE_CS_CALLCONV_GENERIC)
+	{
+          ulCurByte += CorSigUncompressedDataSize(pbSigTmp);
+          ulTyArgCount = CorSigUncompressData(pbSigTmp);
+	}
+
         // Get the argument count.
         ulCurByte += CorSigUncompressedDataSize(pbSigTmp);
         ulArgCount = CorSigUncompressData(pbSigTmp);
@@ -2822,6 +2872,7 @@ HRESULT RegMeta::ValidateStandAloneSig(RID rid)
     ULONG       ulCurByte = 0;          // Current index into the signature.
     ULONG       ulCallConv;             // Calling convention.
     ULONG       ulArgCount;             // Count of arguments.
+    ULONG       ulTyArgCount = 0;       // Count of type arguments.
     ULONG       i;                      // Looping index.
     ULONG       ulNSentinels = 0;       // Number of sentinels in the signature
     BOOL        bNoVoidAllowed=TRUE;
@@ -2865,6 +2916,13 @@ HRESULT RegMeta::ValidateStandAloneSig(RID rid)
             SetVldtrCode(&hr, hrSave);
             goto ErrExit;
         }
+
+        // Get the type argument count.
+        if (ulCallConv & IMAGE_CEE_CS_CALLCONV_GENERIC)
+	{
+          ulCurByte += CorSigUncompressedDataSize(pbSig);
+          ulTyArgCount = CorSigUncompressData(pbSig);
+	}
 
         // Get the argument count.
         ulCurByte += CorSigUncompressedDataSize(pbSig);
@@ -3474,6 +3532,14 @@ HRESULT RegMeta::ValidateTypeSpec(RID rid)
 {
     return S_OK;
 }   // RegMeta::ValidateTypeSpec()
+
+//*****************************************************************************
+// Validate the given MethodSpec.
+//*****************************************************************************
+HRESULT RegMeta::ValidateMethodSpec(RID rid)
+{
+    return S_OK;
+}   // RegMeta::ValidateMethodSpec()
 
 //*****************************************************************************
 // Validate the given ImplMap.
@@ -4729,6 +4795,35 @@ HRESULT RegMeta::ValidateOneArg(
                 }
             }
             break;
+
+        case ELEMENT_TYPE_VAR: 
+        case ELEMENT_TYPE_MVAR: 
+            // Consume index.
+            *pulCurByte += CorSigUncompressedDataSize(pbSig);
+            CorSigUncompressData(pbSig);
+            break;
+
+        case ELEMENT_TYPE_WITH: 
+	    // Validate and consume the type constructor
+	    IfFailGo(ValidateOneArg(tk, pbSig, cbSig, pulCurByte, NULL, TRUE));
+
+	    // Consume argument count.
+	    *pulCurByte += CorSigUncompressedDataSize(pbSig);
+	    ulArgCnt = CorSigUncompressData(pbSig);
+
+	    // Validate and consume the arguments.
+            while(ulArgCnt--)
+            {
+     		IfFailGo(ValidateOneArg(tk, pbSig, cbSig, pulCurByte, NULL, TRUE));
+                if (hr != S_OK)
+                {
+                    SetVldtrCode(&hrSave, VLDTR_S_ERR);
+                    break;
+                }
+            }
+            break;
+
+
         case ELEMENT_TYPE_SENTINEL: // this case never works because all modifiers are skipped before switch
             if(TypeFromToken(tk) == mdtMethodDef)
             {
@@ -4760,6 +4855,7 @@ HRESULT RegMeta::ValidateMethodSig(
     ULONG       ulCurByte = 0;          // Current index into the signature.
     ULONG       ulCallConv;             // Calling convention.
     ULONG       ulArgCount;             // Count of arguments.
+    ULONG       ulTyArgCount;           // Count of type arguments.
     ULONG       i;                      // Looping index.
     VEContext   veCtxt;                 // Context record.
     HRESULT     hr = S_OK;              // Value returned.
@@ -4807,6 +4903,21 @@ HRESULT RegMeta::ValidateMethodSig(
             SetVldtrCode(&hrSave, VLDTR_S_ERR);
         }
     }
+
+    // Get the type argument count.
+    if (ulCallConv & IMAGE_CEE_CS_CALLCONV_GENERIC)
+    {
+      if (cbSig == ulCurByte)
+      {
+        REPORT_ERROR1(VLDTR_E_MD_NOARGCNT, ulCurByte+1);
+        SetVldtrCode(&hr, hrSave);
+        goto ErrExit;
+      }
+
+      ulCurByte += CorSigUncompressedDataSize(pbSig);
+      ulTyArgCount = CorSigUncompressData(pbSig);   
+    }
+
     // Is there any sig left for arguments?
     _ASSERTE(ulCurByte <= cbSig);
     if (cbSig == ulCurByte)

@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -90,25 +95,24 @@ void COMPlusThrowBoot(HRESULT hr)
 // This simply tests to see if the exception object is a subclass of
 // the descriminating class specified in the exception clause.
 //-------------------------------------------------------------------------------
-BOOL ExceptionIsOfRightType(EEClass *pClauseClass, EEClass *pThrownClass)
+BOOL ExceptionIsOfRightType(TypeHandle clauseType, TypeHandle thrownType)
 {
     // if not resolved to, then it wasn't loaded and couldn't have been thrown
-    if (! pClauseClass)
+    if (clauseType.IsNull())
         return FALSE;
-
-    if (pClauseClass == pThrownClass)
+    if (clauseType == thrownType)
         return TRUE;
 
     // now look for parent match
-    EEClass *pSuper = pThrownClass;
-    while (pSuper) {
-        if (pSuper == pClauseClass) {
+    TypeHandle superType = thrownType;
+    while (!superType.IsNull()) {
+        if (superType == clauseType) {
             break;
         }
-        pSuper = pSuper->GetParentClass();
+        superType = superType.GetParent();
     }
 
-    return pSuper != NULL;
+    return !superType.IsNull();
 }
 
 //===========================================================================
@@ -438,7 +442,7 @@ void CreateMethodExceptionObject(RuntimeExceptionKind reKind, MethodDesc *pMetho
     szMember = pMethod->GetName();
     DefineFullyQualifiedNameForClass();
     szClassName = GetFullyQualifiedNameForClass(pMethod->GetClass());
-    MetaSig tmp(pMethod->GetSig(), pMethod->GetModule());
+    MetaSig tmp(pMethod);
     SigFormat sigFormatter(tmp, szMember);
     const char * sigStr = sigFormatter.GetCStringParmsOnly();
     MAKE_FULLY_QUALIFIED_MEMBER_NAME(szFullName, NULL, szClassName, szMember, sigStr);

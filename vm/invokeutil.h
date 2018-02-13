@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -58,10 +63,13 @@ class RefSecContext
     bool            m_fCheckedPerm;
     bool            m_fCallerHasPerm;
     bool            m_fSkippingRemoting;
+    //<review>GENERICS: 
+    // These method descriptors may be shared between compatible instantiations
+    // Check that this does not open any security holes</REVIEW>
     MethodDesc     *m_pCaller;
     MethodDesc     *m_pLastCaller;
     StackCrawlMark *m_pStackMark;
-    EEClass        *m_pClassOfInstance;
+    TypeHandle      m_TypeOfInstance;
 
     static MethodDesc  *s_pMethPrivateProcessMessage;
     static MethodTable *s_pTypeRuntimeMethodInfo;
@@ -118,8 +126,8 @@ public:
     MethodTable *GetCallerMT();
     MethodDesc *GetCallerMethod();
     bool CallerHasPerm(DWORD dwFlags);
-    void SetClassOfInstance(EEClass *pClassOfInstance) { m_pClassOfInstance = pClassOfInstance; }
-    EEClass* GetClassOfInstance() { return m_pClassOfInstance; }
+    void SetClassOfInstance(TypeHandle ty) { m_TypeOfInstance = ty; }
+    TypeHandle GetClassOfInstance() { return m_TypeOfInstance; }
 };
 
 #define REFSEC_CHECK_MEMBERACCESS   0x00000001
@@ -214,11 +222,14 @@ public:
 
 	// GetMethodInfo
 	// Given a MethodDesc* get the methodInfo associated with it.
-	OBJECTREF GetMethodInfo(MethodDesc* pMeth);
+        // If pMeth lives in a parameterized class and its code is shared
+        // then the optional "owner" type is required so that the exact instantiation
+        // info can be recovered
+	OBJECTREF GetMethodInfo(MethodDesc* pMeth, TypeHandle owner = TypeHandle());
 
 	// GetGlobalMethodInfo
 	// Given a MethodDesc* and Module get the methodInfo associated with it.
-	OBJECTREF GetGlobalMethodInfo(MethodDesc* pMeth,Module* pMod);
+	OBJECTREF GetGlobalMethodInfo(MethodDesc* pMeth,Module* pMod, TypeHandle owner = TypeHandle());
 
 	EEClass* GetEEClass(TypeHandle th);
 
@@ -309,12 +320,12 @@ public:
 	// GetFieldTypeHandle
 	// This will return type type handle and CorElementType for a field.
 	//	It may throw an exception of the TypeHandle cannot be found due to a TypeLoadException.
-	TypeHandle GetFieldTypeHandle(FieldDesc* pField,CorElementType* pType);
+	TypeHandle GetFieldTypeHandle(FieldDesc* pField,CorElementType* pType, TypeHandle declType);
 
 	// ValidateObjectTarget
 	// This method will validate the Object/Target relationship
 	//	is correct.  It throws an exception if this is not the case.
-	void ValidateObjectTarget(FieldDesc* pField,EEClass* fldEEC,OBJECTREF target);
+	void ValidateObjectTarget(FieldDesc* pField,TypeHandle fldType,OBJECTREF target);
 
 	ReflectClass* GetPointerType(OBJECTREF* pObj);
 	void* GetPointerValue(OBJECTREF* pObj);

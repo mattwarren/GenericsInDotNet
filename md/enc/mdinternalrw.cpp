@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -1111,6 +1116,14 @@ HRESULT MDInternalRW::EnumInit(     // return S_FALSE if record not found
         }
         break;
 
+    case mdtGenericPar:
+        
+        if (TypeFromToken(tkParent) == mdtTypeDef)
+          phEnum->u.m_ulStart = m_pStgdb->m_MiniMd.getGenericParsForTypeDef(RidFromToken(tkParent), &phEnum->u.m_ulEnd);
+        else
+          phEnum->u.m_ulStart = m_pStgdb->m_MiniMd.getGenericParsForMethodDef(RidFromToken(tkParent), &phEnum->u.m_ulEnd);
+        break;
+    
     case mdtProperty:
         RID         ridPropertyMap;
         PropertyMapRec *pPropertyMapRec;
@@ -2366,6 +2379,40 @@ mdToken MDInternalRW::GetTypeOfInterfaceImpl( // return hresult
     return m_pStgdb->m_MiniMd.getInterfaceOfInterfaceImpl(pIIRec);      
 } // mdToken MDInternalRW::GetTypeOfInterfaceImpl()
 
+//*****************************************************************************
+// This routine gets the properties for the given MethodSpec token.
+//*****************************************************************************
+HRESULT MDInternalRW::GetMethodSpecProps(         // S_OK or error.
+        mdMethodSpec mi,           // [IN] The method instantiation
+        mdToken *tkParent,                  // [OUT] MethodDef or MemberRef
+        PCCOR_SIGNATURE *ppvSigBlob,        // [OUT] point to the blob value of meta data   
+        ULONG       *pcbSigBlob)            // [OUT] actual size of signature blob  
+{
+    HRESULT         hr = NOERROR;
+    MethodSpecRec  *pMethodSpecRec;
+
+    _ASSERTE(TypeFromToken(mi) == mdtMethodSpec && RidFromToken(mi));
+    
+    pMethodSpecRec = m_pStgdb->m_MiniMd.getMethodSpec(RidFromToken(mi));
+
+    if (tkParent)
+        *tkParent = m_pStgdb->m_MiniMd.getMethodOfMethodSpec(pMethodSpecRec);
+
+    if (ppvSigBlob || pcbSigBlob)
+    {   
+        // caller wants signature information
+        PCCOR_SIGNATURE pvSigTmp;
+        ULONG           cbSig;
+        pvSigTmp = m_pStgdb->m_MiniMd.getInstantiationOfMethodSpec(pMethodSpecRec, &cbSig);
+        if ( ppvSigBlob )
+            *ppvSigBlob = pvSigTmp;
+        if ( pcbSigBlob)
+            *pcbSigBlob = cbSig;                
+    }
+
+
+    return hr;
+} // HRESULT MDInternalRW::GetMethodSpecProps()
 
 //*****************************************************************************
 // Given a classname, return the typedef
@@ -3450,6 +3497,9 @@ BOOL MDInternalRW::IsValidToken(        // True or False.
         case mdtManifestResource:
             bRet = (rid <= m_pStgdb->m_MiniMd.getCountManifestResources());
             break;
+		case mdtMethodSpec:
+			bRet = (rid <= m_pStgdb->m_MiniMd.getCountMethodSpecs());
+			break;
         case mdtString:
             // need to check the user string heap
             if (m_pStgdb->m_MiniMd.m_USBlobs.IsValidCookie(rid))

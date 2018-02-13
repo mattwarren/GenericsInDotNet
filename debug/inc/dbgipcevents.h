@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -24,6 +29,8 @@
 #include <cordebug.h>
 #include <corjit.h> // for ICorJitInfo::VarLocType & VarLoc
 #include "common.h"
+
+#define CORDB_MAX_TYPARS 5
 
 // We want this available for DbgInterface.h - put it here.
 typedef enum
@@ -574,13 +581,13 @@ struct DebuggerREGDISPLAY
 
 #endif
 
-inline LPVOID GetRegdisplaySPAddress(DebuggerREGDISPLAY *display)
+inline SIZE_T* GetRegdisplaySPAddress(DebuggerREGDISPLAY *display)
 {
-    return (LPVOID)&display->SP;
+    return &display->SP;
 }
 
-inline LPVOID GetRegdisplayFPAddress(DebuggerREGDISPLAY *display) {
-    return (LPVOID)&display->FP;
+inline SIZE_T* GetRegdisplayFPAddress(DebuggerREGDISPLAY *display) {
+    return &display->FP;
 }
 
 inline void SetDebuggerRegDisplayFromContext(DebuggerREGDISPLAY *pRegDisplay, CONTEXT *pContext)
@@ -660,6 +667,46 @@ struct DebuggerIPCE_FuncData
     SIZE_T      ilToNativeMapSize;
 };
 
+// struct DebuggerIPCE_JITFuncData::DebuggerIPCE_JITFuncData holds 
+// a little bit about the JITted code for the function. 
+//
+// void* nativeStartAddressPtr
+//          Ptr to CORDB_ADDRESS, which is 
+//          the address of the real start address of the native code.  
+//          This field will be NULL only if the method hasn't been JITted
+//          yet (and thus no code is available).  Otherwise, it will be
+//          the adress of a CORDB_ADDRESS in the remote memory.  This
+//          CORDB_ADDRESS may be NULL, in which case the code is unavailable 
+//          has been pitched (return CORDBG_E_CODE_NOT_AVAILABLE)
+//
+// SIZE_T nativeSize
+//          Size of the native code.  
+//
+// SIZE_T nativeOffset
+//          Offset from the beginning of the function,
+//          in bytes.  This may be non-zero even when nativeStartAddressPtr
+//          is NULL
+// void * nativeCodeVersionToken
+//          An opaque value to hand back to the left
+//          side when refering to this.  It's actually a pointer in left side
+//          memory to the DebuggerJitInfo struct.
+struct DebuggerIPCE_JITFuncData
+{
+    void*       nativeStartAddressPtr; 
+    SIZE_T      nativeSize;
+    SIZE_T      nativeOffset;
+    void	   *nativeCodeVersionToken;
+
+	void*       ilToNativeMapAddr;
+    SIZE_T      ilToNativeMapSize;
+
+	// GENERICS: null except when the frame is an activation of
+	// a generic function or a method inside a generic class (or
+	// both!).
+	//
+    void           *methodDesc;  
+};
+
 
 //
 // DebuggerIPCE_STRData holds data for each stack frame or chain. This data is passed
@@ -685,25 +732,29 @@ struct DebuggerIPCE_STRData
         struct
         {
             struct DebuggerIPCE_FuncData funcData;
+            struct DebuggerIPCE_JITFuncData jitFuncData;
             void                        *ILIP;
-            CorDebugMappingResult        mapping;
+            bool        fVarArgs;
+            void       *rpSig;
+            SIZE_T      cbSig;
+            void       *rpFirstArg;
+            CorDebugMappingResult        mapping;                
         } v;
     };
 };
 
 //
-// DebuggerIPCE_FieldData holds data for each field within a class. This data
+// DebuggerIPCE_FieldData holds data for each field within a class or type. This data
 // is passed from the RC to the DI in response to a request for class info.
-// This struct is also used by CordbClass to hold the list of fields for the
+// This struct is also used by CordbClass and CordbType to hold the list of fields for the
 // class.
 //
 struct DebuggerIPCE_FieldData
 {
     mdFieldDef      fldMetadataToken;
-    CorElementType  fldType;          // If set to ELEMENT_TYPE_MAX, then EnC'd
+    BOOL            fldEnCAvailable;          // If set to ELEMENT_TYPE_MAX, then EnC'd
                                       // field isn't available, yet.
-    PCCOR_SIGNATURE fldFullSig;
-    ULONG           fldFullSigSize;
+    PCCOR_SIGNATURE fldFullSig; // GENERICS: always passed across as null -                                  
     SIZE_T          fldOffset;
     void           *fldDebuggerToken;
     bool            fldIsTLS;
@@ -711,6 +762,92 @@ struct DebuggerIPCE_FieldData
     bool            fldIsRVA;
     bool            fldIsStatic;
     bool            fldIsPrimitive;   // Only true if this is a value type masquerading as a primitive.
+};
+
+//
+// GENERICS: DebuggerIPCE_BasicTypeData and DebuggerIPCE_ExpandedTypeData
+// hold data for each type sent across the
+// boundary, whether it be a constructed type List<String> or a non-constructed
+// type such as String, Foo or Object.
+//
+// Logically speaking DebuggerIPCE_BasicTypeData might just be "typeHandle", as 
+// we could then send further events to ask what the elementtype, typeToken and moduleToken 
+// are for the type handle.  But as
+// nearly all types are non-generic we send across even the basic type information in 
+// the slightly expanded form shown below, sending the element type and the 
+// tokens with the type handle itself. The fields debuggerModuleToken, metadataToken and typeHandle
+// are only used as follows:
+//                                   elementType    debuggerModuleToken metadataToken      typeHandle
+//     E_T_INT8    :                  E_T_INT8        No                     No              No
+//     Boxed E_T_INT8:                E_T_CLASS       No                     No              No
+//     E_T_CLASS, non-generic class:  E_T_CLASS       Yes                    Yes             No
+//     E_T_VALUETYPE, non-generic:    E_T_VALUETYPE   Yes                    Yes             No
+//     E_T_CLASS,     generic class:  E_T_CLASS       Yes                    Yes             Yes
+//     E_T_VALUETYPE, generic class:  E_T_VALUETYPE   Yes                    Yes             Yes
+//     E_T_BYREF                   :  E_T_BYREF        No                   No              Yes
+//     E_T_PTR                     :  E_T_PTR          No                   No              Yes
+//     E_T_ARRAY etc.              :  E_T_ARRAY        No                   No              Yes
+//     E_T_FNPTR etc.              :  E_T_FNPTR        No                     No              Yes
+// This allows us to always set "typeHandle" to NULL except when dealing with highly nested
+// types or function-pointer types (the latter are too complexe to transfer over in one hit).
+//
+
+struct DebuggerIPCE_BasicTypeData
+{
+	CorElementType  elementType;
+	mdTypeDef       metadataToken;
+	void           *debuggerModuleToken;
+	void           *typeHandle;  
+};
+
+// DebuggerIPCE_ExpandedTypeData contains more information showing further details for
+// array types, byref types etc.  It's not as expanded as you can get though: for constructed types
+// and function pointer types you may need to as for the sequence of type parameters associated
+// with the type (for array types we know there is always one, so we just pass that across here).
+// 
+// Whenever you fetch type information from the left-side
+// you geet back one of these.  These in turn contain further DebuggerIPCE_BasicTypeData's
+// which you can then query to get further information.  This copes with the
+// nested cases, e.g. jagged arrays, String ****, &(String*), Pair<String,Pair<String>>
+// and so on.
+//
+struct DebuggerIPCE_ExpandedTypeData
+{
+    CorElementType  elementType; // this is _never_ E_T_VAR, E_T_WITH or E_T_MVAR
+	union 
+	{
+		// used for E_T_CLASS and E_T_VALUECLASS, E_T_PTR, E_T_BYREF etc.
+		// For non-constructed E_T_CLASS or E_T_VALUECLASS the tokens will be set and the typeHandle will be NULL  
+		// For constructed E_T_CLASS or E_T_VALUECLASS the tokens will be set and the typeHandle will be non-NULL  
+		// For E_T_PTR etc. the tokens will be NULL and the typeHandle will be non-NULL.
+		struct 
+ 		{
+            mdTypeDef       metadataToken;
+            void           *debuggerModuleToken;
+			void           *typeHandle; // further fetches needed to get type arguments
+		} ClassTypeData;  
+
+		// used for E_T_PTR, E_T_BYREF etc.
+		struct 
+ 		{
+            DebuggerIPCE_BasicTypeData unaryTypeArg; 
+		} UnaryTypeData;  
+
+
+		// used for E_T_ARRAY etc.
+		struct 
+		{
+            DebuggerIPCE_BasicTypeData arrayTypeArg; 
+			DWORD           arrayRank;
+		} ArrayTypeData;
+
+		// used for E_T_FNPTR
+		struct 
+ 		{
+			void           *typeHandle; // further fetches needed to get type arguments
+		} NaryTypeData;  
+
+	};
 };
 
 //
@@ -725,12 +862,10 @@ struct DebuggerIPCE_ObjectData
     bool            objRefBad;
     SIZE_T          objSize;
     SIZE_T          objOffsetToVars;
-    CorElementType  objectType;
     void           *objToken;
 
-    // These will be the class of array elements, if any, for arrays.
-    mdTypeDef       objClassMetadataToken;
-    void           *objClassDebuggerModuleToken;
+    // The type of the object....
+    struct DebuggerIPCE_ExpandedTypeData objTypeData;
     
     union
     {
@@ -748,14 +883,18 @@ struct DebuggerIPCE_ObjectData
                 
         struct
         {
+            SIZE_T          rank;
             SIZE_T          offsetToArrayBase;
             SIZE_T          offsetToLowerBounds; // 0 if not present
             SIZE_T          offsetToUpperBounds; // 0 if not present
             DWORD           componentCount;
-            DWORD           rank;
             SIZE_T          elementSize;
-            CorElementType  elementType;
         } arrayInfo;
+
+		struct 
+		{
+			struct DebuggerIPCE_BasicTypeData typedByrefType; // the type of the thing contained in a typedByref...
+		} typedByrefInfo;
     };
 };
 
@@ -823,18 +962,10 @@ struct DebuggerIPCE_FuncEvalArgData
 {
     RemoteAddress     argHome;  // enregistered variable home
     void             *argAddr;  // address if not enregistered
-    CorElementType    argType;  // basic type of the argument
+    DebuggerIPCE_BasicTypeData  argType;  // type of the argument
     bool              argRefsInHandles; // true if the ref could be a handle
     bool              argIsLiteral; // true if value is in argLiteralData
-    union
-    {
-        BYTE          argLiteralData[8]; // copy of generic value data
-        struct
-        {
-            mdTypeDef classMetadataToken;
-            void     *classDebuggerModuleToken;
-        } GetClassInfo;
-    };
+    BYTE          argLiteralData[8]; // copy of generic value data
 };
 
 //
@@ -843,6 +974,7 @@ struct DebuggerIPCE_FuncEvalArgData
 //
 struct DebuggerIPCE_FuncEvalInfo
 {
+	// 
     void                      *funcDebuggerThreadToken;
     DebuggerIPCE_FuncEvalType  funcEvalType;
     mdMethodDef                funcMetadataToken;
@@ -856,9 +988,8 @@ struct DebuggerIPCE_FuncEvalInfo
     SIZE_T                     stringSize;
     
     SIZE_T                     arrayRank;
-    mdTypeDef                  arrayClassMetadataToken;
-    void                      *arrayClassDebuggerModuleToken;
-    CorElementType             arrayElementType;
+
+    DebuggerIPCE_BasicTypeData arrayType;
     SIZE_T                     arrayDataLen;
 };
 
@@ -985,7 +1116,31 @@ struct DebuggerIPCEvent
             SIZE_T      nVersion;
         } GetFunctionData;
 
-        struct DebuggerIPCE_FuncData FunctionDataResult;
+        struct
+		{
+			DebuggerIPCE_FuncData basicData;
+			// GENERICS: The following is the data about one native-code version of the method
+			// if we have it available.  This is NOT the unique JITting of this version of
+			// the method, as generic methods can be JITted more than once.  However, for
+			// non-generic methods it is the unique version, and to implement certain V1
+			// functionality in a non-breaking way (in particular anything to do with looking
+			// at the native code for IL or setting breakpoints using native code offsets) we want to be
+			// able to get at a sample blob of native code if we can. 
+			DebuggerIPCE_JITFuncData possibleNativeData;
+		} FunctionData;
+
+        struct
+        {
+            void*  nativeCodeVersionToken; // points to the DebuggerJitInfo structure
+        } GetJITInfo;
+
+        struct
+        {
+            unsigned int            argumentCount;
+            unsigned int            totalNativeInfos;
+            unsigned int            nativeInfoCount; // for this event only
+            ICorJitInfo::NativeVarInfo nativeInfo;
+        } GetJITInfoResult;
 
         struct
         {
@@ -1031,13 +1186,41 @@ struct DebuggerIPCEvent
 
         struct
         {
+            void           *typeHandle;
+        } GetTypeHandleParams;
+
+        struct 
+        {
             mdTypeDef  classMetadataToken;
             void      *classDebuggerModuleToken;
-        } GetClassInfo;
+            unsigned int           typarCount; // for this event only - multiple events may get sent....
+            DebuggerIPCE_ExpandedTypeData  tyParData[CORDB_MAX_TYPARS]; // array of type parameters off the end....
+        } GetTypeHandleParamsResult;
+
+        struct
+        {
+            void           *typeHandle;
+        } ExpandType;
+        DebuggerIPCE_ExpandedTypeData        ExpandTypeResult;
+
+        struct
+        {
+            void           *methodDesc;
+        } GetMethodDescParams;
+
+        struct 
+        {
+            unsigned int           repTyParCount; // for this event only - multiple events may get sent....
+            unsigned int           repClassTyParCount; // how many are class type parameters?
+            DebuggerIPCE_ExpandedTypeData  repTyParData[CORDB_MAX_TYPARS]; // array of type parameters off the end....
+        } GetMethodDescParamsResult;
+
+        DebuggerIPCE_BasicTypeData GetClassInfo;
 
         struct
         {
             bool                   isValueClass;
+            unsigned int           typarCount;
             SIZE_T                 objectSize;
             void                  *staticVarBase;
             unsigned int           instanceVarCount;
@@ -1046,14 +1229,29 @@ struct DebuggerIPCEvent
             DebuggerIPCE_FieldData fieldData;
         } GetClassInfoResult;
 
-        struct 
+        struct
+		{
+            DebuggerIPCE_ExpandedTypeData typeData;
+            unsigned int           typarCount; // for this event only - multiple events should get sent....
+                                               // NOTE: currently sending only a limited number!!  
+                                               // @todo dsyme: fix this
+            DebuggerIPCE_BasicTypeData  tyParData[CORDB_MAX_TYPARS]; // array of type parameters off the end....
+        } GetTypeHandle;
+
+		struct
+        {
+            void           *typeHandle;
+        } GetTypeHandleResult;
+
+		struct 
         {
             mdMethodDef funcMetadataToken;
             void*       funcDebuggerModuleToken;
             bool        il;
             SIZE_T      start, end;
             BYTE        code;
-            void*       CodeVersionToken;
+            void*       ilCodeVersionToken;
+            void*       nativeCodeVersionToken;  // if this is set then we're getting the native code data
         } GetCodeData;
 
         struct
@@ -1091,21 +1289,6 @@ struct DebuggerIPCEvent
             	// Note that we'll have to read the pTable out of memory as well.
             ULONG32		cbErrorData;
         } CommitResult;
-
-        struct
-        {
-            mdMethodDef funcMetadataToken;
-            void*       funcDebuggerModuleToken;
-        } GetJITInfo;
-
-        struct
-        {
-            unsigned int            argumentCount;
-            unsigned int            totalNativeInfos;
-            SIZE_T                  nVersion; // of the function which has been jitted.
-            unsigned int            nativeInfoCount; // for this event only
-            ICorJitInfo::NativeVarInfo nativeInfo;
-        } GetJITInfoResult;
 
         struct
         {
@@ -1182,7 +1365,7 @@ struct DebuggerIPCEvent
             void        *debuggerThreadToken;
             void        *debuggerModule;
             mdMethodDef mdMethod;
-            void        *versionToken;
+            void        *nativeCodeVersionToken;
             SIZE_T      offset;
             bool        fIsIL;
             void        *firstExceptionHandler;
@@ -1323,10 +1506,8 @@ struct DebuggerIPCEvent
 
         struct
         {
-            void            *debuggerModuleToken;
-            mdTypeDef        classMetadataToken;
+            DebuggerIPCE_BasicTypeData objectTypeData;
             void            *pObject;
-            CorElementType   objectType;
             SIZE_T           offsetToVars;
             mdFieldDef       fldToken;
             void            *staticVarBase;
@@ -1345,8 +1526,7 @@ struct DebuggerIPCEvent
         {
             void      *oldData;
             void      *newData;
-            mdTypeDef  classMetadataToken;
-            void      *classDebuggerModuleToken;
+            DebuggerIPCE_BasicTypeData type;
         } SetValueClass;
     };
 };
@@ -1357,7 +1537,7 @@ struct DebuggerIPCEvent
 
 // *** WARNING *** WARNING *** WARNING ***
 // FIRST_VALID_VERSION_NUMBER MUST be equal to 
-// DebuggerJitInfo::DJI_VERSION_FIRST_VALID (in ee\debugger.h)
+// DebuggerJitInfo::DMI_VERSION_FIRST_VALID (in ee\debugger.h)
 
 #define FIRST_VALID_VERSION_NUMBER  3
 #define USER_VISIBLE_FIRST_VALID_VERSION_NUMBER 1

@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -354,7 +359,7 @@ VOID RealCOMPlusThrowArgumentException(LPCWSTR argName, LPCWSTR wszResourceName)
 // EE-specific types for storing/querying exception info in memory. Use these
 // rather than cor.h names directly to allow for decoupling in future if necessary
 // This structure should be exactly the same as IMAGE_COR_ILMETHOD_SECT_EH_CLAUSE_FAT, but with 
-// the offset/lenghts resolved to native instructions and the class token replace by pEEClass. 
+// the offset/lenghts resolved to native instructions and the class token replaced by exnType.
 // This is do that the code manager can resolve to the class and cache it
 // NOTE !!! NOTE This structure should line up with IMAGE_COR_ILMETHOD_SECT_EH_CLAUSE_FAT,
 // otherwise you'll have to adjust code in Excep.cpp, re: EHRangeTree NOTE !!! NOTE
@@ -366,6 +371,7 @@ struct EE_ILEXCEPTION_CLAUSE  {
     DWORD               HandlerStartPC;  
     DWORD               HandlerEndPC;  
     union { 
+        MethodTable*    exnType; //would like TypeHandle here but can't union it :-(
         EEClass*        pEEClass;
         DWORD           ClassToken;
         DWORD           FilterOffset;
@@ -403,15 +409,15 @@ struct EE_ILEXCEPTION : public COR_ILMETHOD_SECT_EH_FAT
 
 #define COR_ILEXCEPTION_CLAUSE_CACHED_CLASS 0x10000000
 
-inline BOOL HasCachedEEClass(EE_ILEXCEPTION_CLAUSE *EHClause)
+inline BOOL HasCachedTypeHandle(EE_ILEXCEPTION_CLAUSE *EHClause)
 {
     _ASSERTE(sizeof(EHClause->Flags) == sizeof(DWORD));
     return (EHClause->Flags & COR_ILEXCEPTION_CLAUSE_CACHED_CLASS);
 }
 
-inline void SetHasCachedEEClass(EE_ILEXCEPTION_CLAUSE *EHClause)
+inline void SetHasCachedTypeHandle(EE_ILEXCEPTION_CLAUSE *EHClause)
 {
-    _ASSERTE(! HasCachedEEClass(EHClause));
+    _ASSERTE(! HasCachedTypeHandle(EHClause));
     EHClause->Flags = (CorExceptionFlag)(EHClause->Flags | COR_ILEXCEPTION_CLAUSE_CACHED_CLASS);
 }
 
@@ -535,7 +541,9 @@ struct NestedHandlerExRecord : public FrameHandlerExRecord {
 // This simply tests to see if the exception object is a subclass of
 // the descriminating class specified in the exception clause.
 //-------------------------------------------------------------------------------
-extern "C" BOOL ExceptionIsOfRightType(EEClass *pClauseClass, EEClass *pThrownClass);
+
+extern "C" BOOL ExceptionIsOfRightType(TypeHandle clauseType, TypeHandle thrownType);
+
 
 //==========================================================================
 // The stuff below is what works "behind the scenes" of the public macros.

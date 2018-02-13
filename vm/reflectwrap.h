@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -17,6 +22,7 @@
 
 #include "classnames.h"
 #include "expandsig.h"
+#include "generics.h"
 #include "method.hpp"
 
 class ReflectClass;
@@ -40,14 +46,14 @@ class ReflectBase {
 // This class is abstracts a method from the low-level representation
 class ReflectMethod  : public ReflectBase {
 public:
-	MethodDesc*		pMethod;		// Pointer to Method
-	LPCUTF8			szName;			// Pointer to name
-	DWORD			dwNameCnt;		// Strlen of name
-	ExpandSig*		pSignature;		// Signature
-    OBJECTREF*      pMethodObj;    	// The method
-	DWORD			attrs;			// The Method Attributes
-	TypeHandle      typeHnd;		// The enclosing type (needed for arrays)
-    DWORD           dwFlags;        // Some properties of the method, to avoid recalculation
+        MethodDesc*             pMethod;                // Pointer to Method
+        LPCUTF8                 szName;                 // Pointer to name
+        DWORD                   dwNameCnt;              // Strlen of name
+        ExpandSig*              pSignature;             // Signature
+        OBJECTREF*              pMethodObj;             // The method
+        DWORD                   attrs;                  // The Method Attributes
+        TypeHandle              declType;               // The declaring type (needed for arrays and instantiated types)
+        DWORD                   dwFlags;                // Some properties of the method, to avoid recalculation
 
 	// Hash of the name
 	ReflectMethod*	pNext;
@@ -105,7 +111,8 @@ class ReflectField : public ReflectBase {
 public:
 	FieldDesc*		pField;			// Pointer to the Field
     OBJECTREF*      pFieldObj;    	// The field
-    TypeHandle      thField;        // Typehandle
+    TypeHandle      thField;        // Typehandle of field type itself, filled in lazily
+    TypeHandle      declType;       // Declaring type, filled in when created
     CorElementType  type;           //
     DWORD           dwAttr;          //
 
@@ -125,7 +132,7 @@ public:
 class ReflectTypeList {
 public:
 	DWORD			dwTypes;		// Number of types
-	EEClass*		types[1];		// Array of pointers to types
+	TypeHandle		types[1];		// Array of types
 };
 
 // the list of others method for a property
@@ -139,7 +146,7 @@ public:
 	LPCUTF8			    szName;			// Pointer to name
 	mdProperty		    propTok;		// Token for the property
 	Module*			    pModule;		// The module that defines the property
-	EEClass*		    pDeclCls;		// Pointer to declaring class
+	TypeHandle		    declType;		// Type of declaring class
 	ReflectClass*	    pRC;			// Parent Pointer....
 	ExpandSig*		    pSignature;		// Signature
 	DWORD               attr;           // Attributes
@@ -171,7 +178,7 @@ public:
 	LPCUTF8			szName;			// pointer to the name
 	mdEvent			eventTok;		// The event token
 	Module*			pModule;		// The module that defines the event
-	EEClass*		pDeclCls;		// The declaring class
+	TypeHandle		declType;		// The declaring type
 	DWORD			attr;			// The flags
 	ReflectClass*	pRC;			// Parent Pointer...
 	ReflectMethod*	pAdd;			// The add method
@@ -197,11 +204,11 @@ public:
 	ReflectEvent	events[1];		// Array of events.
 };
 
-// Base class for all Class implementations.  There
-//	are three types of classes supported by the runtime
-//	BaseClass are the normal objects used by the runtime.
-//	ArrayClass are the array objects used by the runtime.
-//  ComClass are the COM classic objects used by the runtime.
+// Base class for all Class implementations.  There are three types of classes supported by the runtime
+//	ReflectBaseClass are the normal types used by the runtime, 
+//        including instantiated types and uninstantiated generic types
+//	ReflectArrayClass are the array types used by the runtime.
+//      ReflectTypeDescClass are the pointer types used by the runtime
 class ReflectClass : public ReflectBase {
 public:
 
@@ -244,8 +251,7 @@ public:
 	// Init
 	// This is the initalization of the object.  There may be multiple
 	//	Init depending upon what the object is.
-	// pEEC -- The EEClass for this object.
-	virtual void Init(EEClass* pEEC) = 0;
+	virtual void Init(TypeHandle th) = 0;
 
     // Return the domain of the type
     virtual BaseDomain *GetDomain() = 0;
@@ -256,14 +262,18 @@ public:
 
 	inline EEClass* GetClass()
 	{
-		return m_pEEC;
+		return m_TH.GetClass();
 	}
 
 	virtual TypeHandle GetTypeHandle()
 	{
-		_ASSERTE(!IsArray());
-		return(TypeHandle(m_pEEC->GetMethodTable()));
+		return(m_TH);
 	}
+
+        inline MethodTable* GetMethodTable()
+	{
+                return m_TH.GetMethodTable();
+        }
 
 	// GetClassObject
 	// This will return the class object associated with this class.
@@ -387,7 +397,7 @@ protected:
 	virtual void InternalGetNestedTypes() = 0;
 	TypeHandle FindTypeHandleForMethod(MethodDesc* method);
 
-	EEClass*				m_pEEC;			// This is accessed a large number of times
+	TypeHandle			m_TH;			// This is accessed a large number of times
 	ReflectMethodList*		m_pMeths;		// The methods
 	ReflectPropertyList*	m_pProps;		// The properties
 	ReflectEventList*		m_pEvents;		// The events
@@ -422,9 +432,9 @@ public:
 
         if (m_CorType == ELEMENT_TYPE_CLASS)
         {            
-            if (g_Mscorlib.IsClass(m_pEEC->GetMethodTable(), CLASS__OBJECT))
+            if (g_Mscorlib.IsClass(m_TH.AsMethodTable(), CLASS__OBJECT))
                 sigType = ELEMENT_TYPE_OBJECT;
-            else if (g_Mscorlib.IsClass(m_pEEC->GetMethodTable(), CLASS__STRING))
+            else if (g_Mscorlib.IsClass(m_TH.AsMethodTable(), CLASS__STRING))
                 sigType = ELEMENT_TYPE_STRING;
         }
         else if (m_CorType == ELEMENT_TYPE_I)
@@ -445,7 +455,7 @@ public:
 
 	BOOL IsArray()
 	{
-		return m_pEEC->IsArrayClass();
+		return m_TH.IsArray();
 	}
 
 	BOOL IsTypeDesc()
@@ -460,7 +470,7 @@ public:
 
 	BOOL IsNested()
     {
-        return m_pEEC->IsNested();
+        return GetClass()->IsNested();
     }
 
     virtual BOOL IsClass() {
@@ -469,24 +479,24 @@ public:
 
 	DWORD GetAttributes()
 	{
-		return m_pEEC->GetAttrClass();
+		return GetClass()->GetAttrClass();
 	}
 
 	Module* GetModule()
 	{
-		return m_pEEC->GetModule();
+		return GetClass()->GetModule();
 	}
 
 	void GetName(LPCUTF8* szcName, LPCUTF8* szcNameSpace);
 
     BaseDomain *GetDomain()
     {
-        return m_pEEC->GetDomain();
+        return GetClass()->GetDomain();
     }
 
-	void Init(EEClass* pEEC)
+	void Init(TypeHandle th)
 	{
-		m_pEEC = pEEC;
+		m_TH = th;
 		m_pMeths = 0;
 		m_pCons = 0;
 		m_pFlds = 0;
@@ -497,31 +507,27 @@ public:
 		// There is a special case in reflection for 
 		//	Enums because they are typed by the runtime as their
 		//	underlying type.
-		if (!m_pEEC->IsEnum())
-			m_CorType = m_pEEC->GetMethodTable()->GetNormCorElementType();
+		if (!GetClass()->IsEnum())
+			m_CorType = m_TH.AsMethodTable()->GetNormCorElementType();
         else
 			m_CorType = ELEMENT_TYPE_VALUETYPE;
         m_SigType = ELEMENT_TYPE_END;
-	}
-
-	EEClass* GetClass()
-	{
-		return m_pEEC;
+	m_pSig = NULL;
 	}
 
 	OBJECTREF GetClassObject()
 	{
-		return m_pEEC->GetExposedClassObject();
+		return m_TH.AsMethodTable()->GetExposedClassObject();
 	}
 
 	IMDInternalImport* GetMDImport()
 	{
-		return m_pEEC->GetMDImport();
+		return GetClass()->GetMDImport();
 	}
 
 	mdTypeDef GetCl()
 	{
-		return m_pEEC->GetCl();
+		return GetClass()->GetCl();
 	}
 
 	ReflectMethodList* GetConstructors();
@@ -529,7 +535,7 @@ public:
 
 	MethodDesc* FindMethod(mdMethodDef mb)
 	{
-		return m_pEEC->FindMethod(mb);
+		return GetClass()->FindMethod(mb);
 	}
 
 	int GetStaticFieldCount()
@@ -562,6 +568,16 @@ public:
 		return m_pClassFact;
 	}
 
+	void SetSig(PCCOR_SIGNATURE sig)
+	{
+	  m_pSig = sig;
+	}
+
+	PCCOR_SIGNATURE GetSig()
+	{
+	  return m_pSig;
+	}
+
 protected:
 	void InternalGetMethods(); 
 	void InternalGetProperties(); 
@@ -576,6 +592,7 @@ private:
 	CorElementType			m_CorType;			// Do we really want to add this?
     CorElementType          m_SigType;          // the way this class will appear in metadata signature
 	void*					m_pClassFact;
+	PCCOR_SIGNATURE                 m_pSig;  // present for open types
 };
 
 // ReflectArrayClass
@@ -587,7 +604,7 @@ public:
 
 	CorElementType GetCorElementType() 
 	{
-		return m_pEEC->GetMethodTable()->GetNormCorElementType();
+		return GetClass()->GetMethodTable()->GetNormCorElementType();
 	}
 
 	// GetSigElementType
@@ -623,13 +640,13 @@ public:
 
 	DWORD GetAttributes()
 	{
-		return m_pEEC->GetAttrClass();
+		return GetClass()->GetAttrClass();
 	}
 
 	// Arrays simply differ to the EEClass.
 	Module* GetModule()
 	{
-		return m_pArrayType->GetModule();
+		return m_TH.AsArray()->GetModule();
 	}
 
 	// GetName
@@ -638,23 +655,23 @@ public:
 	void GetName(LPCUTF8* szcName,LPCUTF8* szcNameSpace);
 
 	void Init(ArrayTypeDesc* arrayType);
-	void Init(EEClass*) {_ASSERTE(!"You must call the Init(EEClass,LPCUTF8,LPCUTF8) version");}
+	void Init(TypeHandle) {_ASSERTE(!"You must call the Init(EEClass,LPCUTF8,LPCUTF8) version");}
 
 	EEClass* GetClass()
 	{
-		return m_pEEC;
+		return m_TH.GetClass();
 	}
 
 	OBJECTREF GetClassObject();
 
 	IMDInternalImport* GetMDImport()
 	{
-		return m_pEEC->GetMDImport();
+		return GetClass()->GetMDImport();
 	}
 
 	mdTypeDef GetCl()
 	{
-		return m_pEEC->GetCl();
+		return GetClass()->GetCl();
 	}
 
 	ReflectMethodList* GetConstructors();
@@ -695,18 +712,18 @@ public:
 	// GetElementType
 	TypeHandle GetElementTypeHandle()
 	{
-		return m_pArrayType->GetElementTypeHandle();
+		return m_TH.AsArray()->GetElementTypeHandle();
 	}
 
 	TypeHandle GetTypeHandle()
 	{
-		return TypeHandle(m_pArrayType);
+		return m_TH;
 	}
 
     BaseDomain *GetDomain()
     {
         // don't want the domain of the array template, want the actual domain of the type itself
-        return m_pArrayType->GetDomain();
+        return m_TH.AsArray()->GetDomain();
     }
 
 protected:
@@ -716,15 +733,14 @@ protected:
 	void InternalGetNestedTypes();
 
 private:
-	ArrayTypeDesc*			m_pArrayType;			// My array type
 	LPUTF8					m_szcName;				// Constructed Name
     OBJECTREF*			    m_ExposedClassObject;	// Pointer to the Class Object for this
 	ReflectMethodList*		m_pCons;				// The constructors
 	ReflectFieldList*		m_pFlds;				// The fields
 };
 
-// ReflectArrayClass
-// This class represents the array version of
+// ReflectTypeDescClass
+// This class represents the TypeDesc version of
 //	the internal class.
 class ReflectTypeDescClass : public ReflectClass
 {
@@ -732,7 +748,7 @@ public:
 
 	CorElementType GetCorElementType() 
 	{
-		return m_pTypeDesc->GetNormCorElementType();
+		return m_TH.GetNormCorElementType();
 	}
 
 	// GetSigElementType
@@ -754,7 +770,7 @@ public:
 
 	BOOL IsByRef()
 	{
-		return m_pTypeDesc->IsByRef();
+		return m_TH.IsByRef();
 	}
 
 	BOOL IsNested()
@@ -833,14 +849,14 @@ public:
         return GetTypeHandle().GetClassOrTypeParam()->GetDomain();
     }
 
-	void Init(ParamTypeDesc *td);
+	void Init(TypeHandle th);
 	void Init(EEClass*) {_ASSERTE(!"You must call the Init(EEClass,LPCUTF8,LPCUTF8) version");}
 
 	OBJECTREF GetClassObject();
 
 	TypeHandle GetTypeHandle()
 	{
-		return TypeHandle(m_pTypeDesc);
+		return m_TH;
 	}
 
 protected:
@@ -853,10 +869,11 @@ private:
 	LPUTF8					m_szcName;				// TypeDesc Name
 	LPUTF8					m_szcNameSpace;			// TypeDesc NameSpace
     OBJECTREF*			    m_ExposedClassObject;	// Pointer to the Class Object for this
-	ParamTypeDesc	        *m_pTypeDesc;			// The ParamTypeDesc for this type
 	ReflectMethodList*		m_pCons;				// Constructors
 	ReflectFieldList*		m_pFlds;				// The fields
 };
+
+
 
 
 inline ExpandSig* ReflectMethod::GetSig()
@@ -865,7 +882,7 @@ inline ExpandSig* ReflectMethod::GetSig()
         PCCOR_SIGNATURE pCorSig;     // The signature of the found method
         DWORD			cSignature;
         pMethod->GetSig(&pCorSig,&cSignature);
-        pSignature = ExpandSig::GetReflectSig(pCorSig,pMethod->GetModule());
+        pSignature = ExpandSig::GetReflectSig(pCorSig,pMethod->GetModule(),declType.GetInstantiation(),pMethod->GetMethodInstantiation());
     }
 	return pSignature;
 }

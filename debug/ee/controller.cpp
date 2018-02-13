@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -18,6 +23,7 @@
 // controller.cpp: Debugger execution control routines
 //
 // ****************************************************************************
+
 // Putting code & #includes, #defines, etc, before the stdafx.h will
 // cause the code,etc, to be silently ignored
 #include "stdafx.h"
@@ -890,7 +896,6 @@ DWORD DebuggerController::GetPatchedOpcode(const BYTE *address)
 void DebuggerController::UnapplyPatchesInCodeCopy(Module *module, 
                                                   mdMethodDef md,
                                                   DebuggerJitInfo *dji,
-                                                  MethodDesc *fd,
                                                   bool native,
                                                   BYTE *code, 
                                                   SIZE_T startOffset, 
@@ -918,10 +923,10 @@ void DebuggerController::UnapplyPatchesInCodeCopy(Module *module,
     }
     else
     {
-        _ASSERTE(fd != NULL);
+		_ASSERTE(dji->m_fd != NULL);
         
-        codeStart = g_pEEInterface->GetFunctionAddress(fd);
-        codeSize = g_pEEInterface->GetFunctionSize(fd);
+        codeStart = g_pEEInterface->GetFunctionAddress(dji->m_fd);
+        codeSize = g_pEEInterface->GetFunctionSize(dji->m_fd);
     }
     
     _ASSERTE(code != NULL);
@@ -1445,7 +1450,7 @@ void DebuggerController::UnbindFunctionPatches(MethodDesc *fd,
                 _ASSERTE( p->opcode == 0 || p->address != NULL);
                 
                 p->dji = (DebuggerJitInfo*)
-                        DebuggerJitInfo::DJI_VERSION_INVALID; // so we don't barf if
+                        DebuggerJitInfo::DJI_INVALID; // so we don't barf if
                     // we're doing this b/c of being pitched.  This also signals
                     // MapAndBindFunctionPatches that we'll be doing a rebind.
             }
@@ -2159,7 +2164,6 @@ void DebuggerController::ApplyTraceFlag(Thread *thread)
     g_pEEInterface->MarkThreadForDebugStepping(thread, true);
 
     LOG((LF_CORDB,LL_INFO1000, "DC::ApplyTraceFlag marked thread for debug stepping\n"));
-
 
     if (context == &tempContext)
     {
@@ -3215,7 +3219,7 @@ DebuggerBreakpoint::DebuggerBreakpoint(Module *module,
                                        AppDomain *pAppDomain,
                                        SIZE_T offset, 
                                        bool native, 
-                                       DebuggerJitInfo *dji,
+                                       DebuggerMethodInfo *dmi,
                                        BOOL *pSucceed,
                                        BOOL fDeferBinding)
   : DebuggerController(NULL, pAppDomain) 
@@ -3228,17 +3232,40 @@ DebuggerBreakpoint::DebuggerBreakpoint(Module *module,
         m_md = md;
         m_offset = offset;
         m_native = native; 
-        m_dji = dji;
+        m_dmi = dmi;
         (*pSucceed) = TRUE; // may or may not work, but we can't know it doesn't, now
     }
     else
-        (*pSucceed) = AddPatch(module, 
-                               md, 
-                               offset, 
-                               native, 
-                               NULL, 
-                               dji, 
-                               TRUE);
+	{
+		// dmi == NULL is a valid code path, e.g. if we've never JITted the code
+        // at all.  Just call AddPatch with dji == NULL.
+		if (dmi == NULL) 
+		{
+			(*pSucceed) = AddPatch(module, md, offset, native, NULL, NULL, TRUE);
+		} 
+		else
+		{
+			// Patch every active DJI.
+			//
+			// <REVIEW> do we need to lock the DMI table while doing this iteration
+			// e.g. what if code gets pitched and the dji's get deleted?  Or new dji's get added that won't
+			// get patched?</REVIEW>
+			//
+			// <REVIEW> Also, do we continue to patch other DJIs if one has failed? </REVIEW>
+			(*pSucceed) = TRUE;
+			for (DebuggerJitInfo *dji = dmi->m_latestJitInfo; dji != NULL; dji = dji->m_prevJitInfo) 
+			{
+				(*pSucceed) = AddPatch(module, 
+					md, 
+					offset, 
+					native, 
+					NULL, 
+					dji, 
+					TRUE) && (*pSucceed);
+			}
+		}
+	}
+
 }
 
 void DebuggerBreakpoint::DoDeferedPatch(DebuggerJitInfo *pDji,
@@ -3247,7 +3274,7 @@ void DebuggerBreakpoint::DoDeferedPatch(DebuggerJitInfo *pDji,
 {
     _ASSERTE(m_module != NULL);
     _ASSERTE(m_md != NULL);
-    _ASSERTE(m_dji != NULL);
+    _ASSERTE(m_dmi != NULL);
     HRESULT hr = S_OK;
 
     LOG((LF_CORDB, LL_INFO100000,
@@ -3259,7 +3286,8 @@ void DebuggerBreakpoint::DoDeferedPatch(DebuggerJitInfo *pDji,
         CorDebugMappingResult map;
         DWORD which;
         
-        m_offset = m_dji->MapNativeOffsetToIL(m_offset, &map, &which);
+		_ASSERTE(m_dmi->m_latestJitInfo != NULL);
+        m_offset = m_dmi->m_latestJitInfo->MapNativeOffsetToIL(m_offset, &map, &which);
         m_native = false;
     }
     _ASSERTE(!m_native);
@@ -3267,14 +3295,14 @@ void DebuggerBreakpoint::DoDeferedPatch(DebuggerJitInfo *pDji,
     // Since the defered patches were placed relative to the 'next'
     // version, we should only do this map-forwards if it's a couple of 
     // versions behind.
-    if (m_dji->m_nextJitInfo != NULL &&
-        m_dji->m_nextJitInfo != pDji)
+    if (m_dmi->m_nextMethodInfo != NULL &&
+        m_dmi->m_nextMethodInfo != pDji->m_methodInfo)
     {
         BOOL fAccurateIgnore;
         hr = g_pDebugger->MapThroughVersions(m_offset,
-                                             m_dji->m_nextJitInfo, 
+                                             m_dmi->m_nextMethodInfo, 
                                              &m_offset, 
-                                             pDji, 
+                                             pDji->m_methodInfo, 
                                              TRUE,
                                              &fAccurateIgnore);
     }
@@ -4399,7 +4427,7 @@ void DebuggerStepper::Step(void *fp, bool in,
 
     m_djiVersion = dji; // Record the version we started in....
     LOG((LF_CORDB,LL_INFO100000, "DS::Step: Starting in dji 0x%x (ver:0x%x)\n",
-        dji, (dji!=NULL?dji->m_nVersion:0)));
+        dji, (dji!=NULL?dji->m_methodInfo->m_nVersion:0)));
 
 
 
@@ -4947,8 +4975,8 @@ void DebuggerStepper::MoveToCurrentVersion( DebuggerJitInfo *djiNew)
         if (m_djiVersion != djiNew)
         {
             LOG((LF_CORDB,LL_INFO100000, "DS::MTCV: from ver 0x%x (dji:0x%x) "
-                "to ver 0x%x (dji:0x%x)\n", m_djiVersion->m_nVersion, 
-                m_djiVersion, djiNew->m_nVersion, djiNew));
+                "to ver 0x%x (dji:0x%x)\n", m_djiVersion->m_methodInfo->m_nVersion, 
+                m_djiVersion, djiNew->m_methodInfo->m_nVersion, djiNew));
 
             for(UINT i = 0; i < m_realRangeCount;i++)
             {

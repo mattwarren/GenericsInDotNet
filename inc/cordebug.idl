@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -134,6 +139,7 @@ interface ICorDebugModule;
 interface ICorDebugFunction;
 interface ICorDebugCode;
 interface ICorDebugClass;
+interface ICorDebugType;
 
 interface ICorDebugValue;
 interface ICorDebugGenericValue;
@@ -151,6 +157,7 @@ interface ICorDebugStepperEnum;
 interface ICorDebugModuleEnum;
 interface ICorDebugThreadEnum;
 interface ICorDebugChainEnum;
+interface ICorDebugTypeEnum;
 interface ICorDebugFrameEnum;
 interface ICorDebugValueEnum;
 interface ICorDebugAppDomainEnum;
@@ -981,6 +988,28 @@ interface ICorDebugAppDomain : ICorDebugController
 
     HRESULT GetID([out] ULONG32 *pId);
 
+    /*
+     * GetArrayOrPointerType returns an array, pointer, byref or function pointer type.  
+     * elementType indicated the kind of type to be created and 
+     * must be one of ELEMENT_TYPE_PTR, ELEMENT_TYPE_BYREF, 
+     * ELEMENT_TYPE_ARRAY or ELEMENT_TYPE_SZARRAY.  If used with 
+     * ELEMENT_TYPE_PTR or ELEMENT_TYPE_BYREF then nRank must be zero.
+     */
+    
+    HRESULT GetArrayOrPointerType([in] CorElementType elementType,
+                                  [in] ULONG32 nRank,
+                                  [in] ICorDebugType *pTypeArg, 
+                                  [out] ICorDebugType **ppType);
+    
+    /*
+     * GetFunctionPointerType returns a function pointer type.  
+     * This corresponds to ELEMENT_TYPE_FNPTR.  The first type in the type arguments
+     * must be the return type and the remainder the argument types.
+     */
+
+     HRESULT GetFunctionPointerType( [in] ULONG32 nTypeArgs,
+                                     [in, size_is(nTypeArgs)] ICorDebugType *ppTypeArgs[], 
+                                     [out] ICorDebugType **ppType);
 };
 
 
@@ -2174,6 +2203,15 @@ interface ICorDebugILFrame : ICorDebugFrame
 
 	HRESULT CanSetIP([in] ULONG32 nOffset);
 
+    /*
+	 * EnumerateTypeParameters returns the type parameters active on a frame.
+	 * This will include both the class type parameters and the method type 
+	 * parameters if the method is a generic instance method inside a generic
+	 * class.  The type parameters will not always be available.
+	 */
+
+	HRESULT EnumerateTypeParameters([out] ICorDebugTypeEnum **ppTyParEnum);
+
 };
 
 /*
@@ -2516,6 +2554,7 @@ interface ICorDebugFunction : IUnknown
      */
 
      HRESULT GetCurrentVersionNumber([out] ULONG32 *pnCurrentVersion);
+
 };
 
 [
@@ -2639,6 +2678,14 @@ interface ICorDebugClass : IUnknown
 	HRESULT GetStaticFieldValue([in] mdFieldDef fieldDef,
                                 [in] ICorDebugFrame *pFrame,
 								[out] ICorDebugValue **ppValue);
+
+    /*
+	* GetType returns a type that corresponds to this class.
+	*/
+	HRESULT GetType([in] ULONG32 nTypeArgs,
+				    [in, size_is(nTypeArgs)] ICorDebugType **ppTypeArgs, 
+					[out] ICorDebugType **ppType);
+
 
 };
 
@@ -3048,6 +3095,29 @@ interface ICorDebugObjectValue : ICorDebugValue
      */
 
     HRESULT SetFromManagedCopy([in] IUnknown *pObject);
+
+	/*
+	 * GetExactType returns the runtime type of the object in the value. 
+	 */
+
+	HRESULT GetExactType([out] ICorDebugType **ppType);
+
+	/*
+     * GetFieldValue returns a value for the given field in the given
+	 * type.  The type must be on the hierarchy of the object's
+	 * type, e.g. if C inherits from B<string> then you may fetch
+	 * a field from B<string>.  The field must be a field of the given type. Use this one
+	 * in preference to the one above when the type from which the value
+	 * is being fetched might be a constructed type such as List<String> 
+	 * or Pair<int,int>.  
+	 *
+     */
+
+	HRESULT GetFieldValueForType([in] ICorDebugType *pType,
+                                 [in] mdFieldDef fieldDef,
+						         [out] ICorDebugValue **ppValue);
+
+
 };
 
 /*
@@ -3337,6 +3407,92 @@ interface ICorDebugValueEnum : ICorDebugEnum
 
 
 
+// GENERICS; TODO: generate a proper UUID for this one....
+[
+	object,
+    uuid(CC7BCB0C-8A68-11d2-983C-0000F808342D),
+	pointer_default(unique)
+]
+interface ICorDebugTypeEnum : ICorDebugEnum
+{
+    HRESULT Next([in] ULONG celt,
+				 [out, size_is(celt), length_is(*pceltFetched)]  
+					ICorDebugType *values[],
+				 [out] ULONG *pceltFetched);
+};
+
+// GENERICS; TODO: generate a proper UUID for this one....
+[
+	object,
+    uuid(CC7BCB0C-8A68-11d2-983C-0000F808342E),
+	pointer_default(unique)
+]
+interface ICorDebugType : IUnknown
+{
+    /*
+	* GetType gets the basic type of the generic parameter.  This can be used to
+	* determine if it is necessary to all GetClass to find the full information for the 
+	* generic type parameter.
+	*/
+	HRESULT GetType([out] CorElementType *ty);
+
+	/*
+	* GetClass is used if the CorElementType returned by GetType is ELEMENT_TYPE_CLASS,
+	* ELEMENT_TYPE_VALUETYPE.  If the type is a constructed type, e.g. List<String>,
+	* then this will return the ICorDebugClass for the type constructor, i.e. "List<T>".
+	*
+	* GetClass may NOT be used if the element type is anything other than these two element
+	* types.  In particular, it may not be used if the element type is ELEMENT_TYPE_STRING
+	* or ELEMENT_TYPE_OBJECT.  
+	*
+	* @review dsyme: this may be a breaking change.  reconsider this - it
+	* would not be hard to either treat this as a special case internally on the right-side
+	* or plumb the information over to the right side from the left-side.
+	*/
+	HRESULT GetClass([out] ICorDebugClass **value);
+
+    /*
+	* EnumerateTypeParameters is used if the CorElementType returned by GetType is 
+	* one of ELEMENT_TYPE_CLASS, ELEMENT_TYPE_VALUETYPE, ELEMENT_TYPE_ARRAY, ELEMENT_TYPE_SZARRAY,
+	* ELEMENT_TYPE_INVARRAY, ELEMENT_TYPE_INVSZARRAY, ELEMENT_TYPE_BYREF, ELEMENT_TYPE_PTR
+	* or ELEMENT_TYPE_FNPTR encodings.  For example, if the type is "class Dict<String,int32>"
+	* then EnumerateTypeParameters will return "String" and "int32" in sequence.
+	*
+	* GetFirstTypeParameter can be used in those cases where the type only takes one type
+	* parameter: you can determine this from the element type, e.g. for ELEMENT_TYPE_ARRAY.
+	*/
+	HRESULT EnumerateTypeParameters([out] ICorDebugTypeEnum **ppTyParEnum);
+	HRESULT GetFirstTypeParameter([out] ICorDebugType **value);
+
+	/*
+	 * GetBase returns the ICorDebugType object for the base type of this type, if it
+	 * has one, i.e. if the type is a class type.  	 * For example, if 
+	 *        class MyStringDict<T> : Dict<String,T>
+	 * then the base type of "MyStringDict<int32>" will be "Dict<String,int32>".
+     *
+	 * This is a helper function - you could compute this from EnumerateTypeParemeters,
+	 * GetClass and the relevant metadata, but it is relatively painful: you would 
+	 * have to lookup the class, then the metadata of that class
+	 * to find the "generic" base type, then instantiate this generic base type by
+	 * looking up the type paramaters to the initial type,
+	 * and then perform the appropriate instantiation in the case where the class 
+	 * happens to be either a generic class or a normal class with a constructed type 
+	 * as its parent.  Looking up the base types is useful to implement common
+	 * debugger functionality, e.g. printing out all the fields of an object, including its
+	 * superclasses.
+	 *
+	 */
+
+	HRESULT GetBase([out] ICorDebugType **pBase);
+
+    /*
+     * GetRank returns the number of dimensions in an array type
+     */
+
+    HRESULT GetRank([out] ULONG32 *pnRank);
+};
+
+
 /* ------------------------------------------------------------------------- *
  * *****  WARNING:   NOT IMPLEMENTED FOR VERSION 1 *****
  *
@@ -3395,7 +3551,6 @@ interface ICorDebugAssemblyEnum : ICorDebugEnum
 				 [out] ULONG *pceltFetched);
 
 };
-
 
 
 /* ------------------------------------------------------------------------- *

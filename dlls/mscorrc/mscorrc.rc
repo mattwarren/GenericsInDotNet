@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -505,8 +510,11 @@ BEGIN
     TLBX_I_DUPLICATE_DISPID                 "The type had one or more duplicate DISPIDs specified.  The duplicate DISPIDs were ignored."
     TLBX_E_BAD_NAMES                        "The names list was not valid."
     TLBX_I_REF_TYPE_AS_STRUCT               "The reference type had sequential or explicit layout, and so was exported as a struct."
-        TLBX_E_ARRAY_NEEDS_NT_FIXED                             "Arrays in structs need [MarshalAs(UnmanagedType.ByValArray, SizeConst=n)]."
-        TLBX_E_CLASS_NEEDS_NT_INTF                              "Reference types in structs need [MarshalAs(UnmanagedType.Interface)]."
+    TLBX_E_ARRAY_NEEDS_NT_FIXED                             "Arrays in structs need [MarshalAs(UnmanagedType.ByValArray, SizeConst=n)]."
+    TLBX_E_CLASS_NEEDS_NT_INTF                              "Reference types in structs need [MarshalAs(UnmanagedType.Interface)]."
+    TLBX_E_GENERICINST_SIGNATURE            "Type library exporter encountered a generic type instance in a signature.  Generic code may not be exported to COM."
+    TLBX_E_GENERICPAR_SIGNATURE             "Type library exporter encountered a generic type parameter in a signature.  Generic code may not be exported to COM."
+    TLBX_I_GENERIC_TYPE                     "Type library exporter encountered a generic type.  Generic code may not be exported to COM."
 END
 
 // These strings are generated from within the EE.

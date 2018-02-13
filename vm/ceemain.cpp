@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -542,7 +547,6 @@ STDAPI ClrCreateManagedInstance(LPCWSTR typeName,
     BEGINCANNOTTHROWCOMPLUSEXCEPTION();
 
     MAKE_UTF8PTR_FROMWIDE(pName, typeName);
-    EEClass* pClass = NULL;
 
     hr = CoInitializeEE(0);
     if (FAILED(hr))
@@ -558,26 +562,34 @@ STDAPI ClrCreateManagedInstance(LPCWSTR typeName,
 
     COMPLUS_TRY
     {
+        MethodTable* pMT = NULL;
+
+
         GCPROTECT_BEGIN(Throwable)
 
         AppDomain* pDomain = SystemDomain::GetCurrentDomain();
         _ASSERTE(pDomain);
-        
-        pClass = pDomain->FindAssemblyQualifiedTypeHandle(pName,
-                                                          true,
-                                                          NULL,
-                                                          NULL, 
-                                                          &Throwable).GetClass();
+  
+
+        TypeHandle th = pDomain->FindAssemblyQualifiedTypeHandle(pName,
+                                                                 true,
+                                                                 NULL,
+                                                                 NULL,
+                                                                 &Throwable);
+        MethodTable* pMT = th.GetMethodTable();
+        EEClass* pClass = pMT ? pMT->GetClass() : 0;
+
         if (!pClass)
         {
             if(Throwable != NULL)
                 COMPlusThrow(Throwable);
             hr = CLASS_E_CLASSNOTAVAILABLE;
         }
-        else {
+        else
+        {
             MethodDesc *pMD = NULL;
-            if (pClass->GetMethodTable()->HasDefaultConstructor())
-                pMD = pClass->GetMethodTable()->GetDefaultConstructor();
+            if (pMT->HasDefaultConstructor())
+                pMD = pMT->GetDefaultConstructor();
             if (pMD == NULL || !pMD->IsPublic()) {
                 hr = COR_E_MEMBERACCESS;
             }
@@ -598,14 +610,14 @@ STDAPI ClrCreateManagedInstance(LPCWSTR typeName,
         BOOL fCtorAlreadyCalled = FALSE;
         OBJECTREF       newobj; 
 
-        if (CRemotingServices::RequiresManagedActivation(pClass) != NoManagedActivation)
+        if (CRemotingServices::RequiresManagedActivation(pMT) != NoManagedActivation)
         {
             fCtorAlreadyCalled = TRUE;
-            newobj = CRemotingServices::CreateProxyOrObject(pClass->GetMethodTable(), TRUE);
+            newobj = CRemotingServices::CreateProxyOrObject(pMT, TRUE);
         }
         else
         {
-            newobj = FastAllocateObject(pClass->GetMethodTable());
+            newobj = FastAllocateObject(pMT);
         }
         
         GCPROTECT_BEGIN(newobj);

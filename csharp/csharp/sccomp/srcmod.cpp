@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -3446,6 +3451,10 @@ void CSourceModule::UpdateTokenIndexes (BASENODE *pNode, BASENODE *pChild)
                     pNode->tokidx += m_iTokDelta;
             }
             break;
+            
+        case NK_GENERICNAME:
+            if (pChild != pNode->asGENERICNAME()->pParams)  UpdateTokenIndexes (pNode->asGENERICNAME()->pParams, NULL);
+            break;
 
         case NK_OP:
         case NK_CONSTVAL:
@@ -3461,6 +3470,8 @@ void CSourceModule::UpdateTokenIndexes (BASENODE *pNode, BASENODE *pChild)
             if (pChild != pClass->pAttr)                    UpdateTokenIndexes (pClass->pAttr, NULL);
             if (pChild != pClass->pName)                    UpdateTokenIndexes (pClass->pName, NULL);
             if (pChild != pClass->pBases)                   UpdateTokenIndexes (pClass->pBases, NULL);
+            if (pChild != pClass->pTypeParams)              UpdateTokenIndexes (pClass->pTypeParams, NULL);
+            if (pChild != pClass->pConstraints)             UpdateTokenIndexes (pClass->pConstraints, NULL);
 
             MEMBERNODE  *pMbr = pClass->pMembers;
 
@@ -3493,6 +3504,8 @@ void CSourceModule::UpdateTokenIndexes (BASENODE *pNode, BASENODE *pChild)
             if (pChild != pDel->pType)                      UpdateTokenIndexes (pDel->pType, NULL);
             if (pChild != pDel->pName)                      UpdateTokenIndexes (pDel->pName, NULL);
             if (pChild != pDel->pParms)                     UpdateTokenIndexes (pDel->pParms, NULL);
+            if (pChild != pDel->pTypeParams)                UpdateTokenIndexes (pDel->pTypeParams, NULL);
+            if (pChild != pDel->pConstraints)               UpdateTokenIndexes (pDel->pConstraints, NULL);
             UPDTOK (pDel->iSemi);
             break;
         }
@@ -3525,6 +3538,7 @@ void CSourceModule::UpdateTokenIndexes (BASENODE *pNode, BASENODE *pChild)
             if (pMethod->kind == NK_METHOD && pChild != pMethod->pName)         UpdateTokenIndexes (pMethod->pName, NULL);
             else if (pMethod->kind == NK_CTOR && pChild != pMethod->pCtorArgs)  UpdateTokenIndexes (pMethod->pCtorArgs, NULL);
             if (pChild != pMethod->pParms)                                      UpdateTokenIndexes (pMethod->pParms, NULL);
+            if (pChild != pMethod->pConstraints)                                UpdateTokenIndexes (pMethod->pConstraints, NULL);
 
             UPDTOK (pMethod->iOpen);
             UPDTOK (pMethod->iClose);
@@ -3601,6 +3615,14 @@ void CSourceModule::UpdateTokenIndexes (BASENODE *pNode, BASENODE *pChild)
             break;
         }
 
+        case NK_CONSTRAINT:
+        {
+            CONSTRAINTNODE *pConstraint = pNode->asCONSTRAINT();
+            if (pChild != pConstraint->pName)               UpdateTokenIndexes (pConstraint->pName, NULL);
+            if (pChild != pConstraint->pType)               UpdateTokenIndexes (pConstraint->pType, NULL);
+            break;
+        }
+        
         case NK_ARRAYINIT:
         case NK_UNOP:
         {

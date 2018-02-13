@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -29,7 +34,7 @@ IPC_EVENT_TYPE1(DB_IPCE_UNLOAD_CLASS                 ,0x0108)
 IPC_EVENT_TYPE1(DB_IPCE_EXCEPTION                    ,0x0109)
 IPC_EVENT_TYPE1(DB_IPCE_UNHANDLED_EXCEPTION          ,0x010A)
 IPC_EVENT_TYPE1(DB_IPCE_STACK_TRACE_RESULT           ,0x010B)
-IPC_EVENT_TYPE1(DB_IPCE_FUNCTION_DATA_RESULT         ,0x010C)
+IPC_EVENT_TYPE1(DB_IPCE_GET_FUNCTION_DATA_RESULT         ,0x010C)
 IPC_EVENT_TYPE1(DB_IPCE_BREAKPOINT_ADD_RESULT        ,0x010D)
 IPC_EVENT_TYPE1(DB_IPCE_STEP_RESULT                  ,0x010E)
 IPC_EVENT_TYPE1(DB_IPCE_STEP_COMPLETE                ,0x010F)
@@ -67,6 +72,10 @@ IPC_EVENT_TYPE1(DB_IPCE_ENC_REMAP                    ,0x0131)
 IPC_EVENT_TYPE1(DB_IPCE_GET_SYNC_BLOCK_FIELD_RESULT  ,0x0132)
 IPC_EVENT_TYPE1(DB_IPCE_SET_VALUE_CLASS_RESULT		 ,0x0133)
 IPC_EVENT_TYPE1(DB_IPCE_BREAKPOINT_SET_ERROR         ,0x0134)
+IPC_EVENT_TYPE1(DB_IPCE_GET_TYPE_HANDLE_PARAMS_RESULT              ,0x0135)
+IPC_EVENT_TYPE1(DB_IPCE_GET_EXPANDED_TYPE_INFO_RESULT              ,0x0136)
+IPC_EVENT_TYPE1(DB_IPCE_GET_TYPE_HANDLE_RESULT              ,0x0138)
+IPC_EVENT_TYPE1(DB_IPCE_GET_METHOD_DESC_REPPARAMS_RESULT              ,0x0139)
 
 // Events that travel from the DI to the RC (Right to Left)
 IPC_EVENT_TYPE2(DB_IPCE_DEBUGGER_FIRST               ,0x0200)
@@ -119,3 +128,7 @@ IPC_EVENT_TYPE2(DB_IPCE_FUNC_EVAL_CLEANUP            ,0x0231)
 IPC_EVENT_TYPE2(DB_IPCE_SET_ALL_DEBUG_STATE          ,0x0232)
 IPC_EVENT_TYPE2(DB_IPCE_GET_SYNC_BLOCK_FIELD         ,0x0233)
 IPC_EVENT_TYPE2(DB_IPCE_SET_VALUE_CLASS				 ,0x0234)
+IPC_EVENT_TYPE2(DB_IPCE_GET_TYPE_HANDLE_PARAMS       ,0x0235)
+IPC_EVENT_TYPE2(DB_IPCE_GET_EXPANDED_TYPE_INFO              ,0x0236)
+IPC_EVENT_TYPE2(DB_IPCE_GET_TYPE_HANDLE         ,0x0238)
+IPC_EVENT_TYPE2(DB_IPCE_GET_METHOD_DESC_REPPARAMS         ,0x0239)

@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -103,7 +108,14 @@ unsigned NameHandle::GetFullName(char* buff, unsigned buffLen)
     {  
         CorElementType kind = GetKind();
       
-        return TypeDesc::ConstructName(kind, 
+        if (kind == ELEMENT_TYPE_WITH) {
+          TypeHandle genTy = GetGenericTypeDefinition();
+          unsigned len = genTy.GetName(buff, buffLen);
+	  Generics::PrettyInstantiation(buff+len, buffLen-len, genTy.GetNumGenericArgs(), GetInstantiation());
+          return (unsigned)strlen(buff);
+	}
+        else
+          return TypeDesc::ConstructName(kind, 
                                        CorTypeInfo::IsModifier(kind) ? GetElementType() : TypeHandle(),
                                        kind == ELEMENT_TYPE_ARRAY ? GetRank() : 0,
                                        buff, buffLen);
@@ -119,11 +131,44 @@ unsigned NameHandle::GetFullName(char* buff, unsigned buffLen)
 }
 
 
+int NameHandle::operator==(const NameHandle& n) const
+{
+  CorElementType k = GetKind();
+  if (k != n.GetKind()) 
+    return 0;        
+  if (k == ELEMENT_TYPE_WITH)
+  {
+	  TypeHandle g1 = GetGenericTypeDefinition();
+	  TypeHandle g2 = n.GetGenericTypeDefinition();
+	  if (g1 != g2) 
+	    return 0;
+	  TypeHandle *inst1 = GetInstantiation();
+	  TypeHandle *inst2 = n.GetInstantiation();
+	  if (inst1 == inst2)
+	    return 1;
+	  DWORD ntypars = g1.GetNumGenericArgs();
+	  for (DWORD i = 0; i < ntypars; i++)
+	  {
+            if (inst1[i] != inst2[i]) 
+	      return 0;
+	  }
+	  return 1;
+  }
+  else if (IsConstructed())
+    return Key1 == n.Key1 && Key2 == n.Key2;
+  if (GetTypeModule() != n.GetTypeModule())
+    return 0;
+  if (GetTypeToken() != n.GetTypeToken())
+    return 0;
+  return 1;	  
+}
+
 //
 // Find a class given name, using the classloader's global list of known classes.  
 // Returns NULL if class not found.
 TypeHandle ClassLoader::FindTypeHandle(NameHandle* pName, 
-                                       OBJECTREF *pThrowable)
+                                       OBJECTREF *pThrowable,
+				       Pending *pending)
 {
     SAFE_REQUIRES_N4K_STACK(3);
 
@@ -132,7 +177,7 @@ TypeHandle ClassLoader::FindTypeHandle(NameHandle* pName,
 #endif
 
     // Lookup in the classes that this class loader knows about
-    TypeHandle typeHnd = LookupTypeHandle(pName, pThrowable);
+    TypeHandle typeHnd = LookupTypeHandle(pName, pThrowable, pending);
 
     if(typeHnd.IsNull()) {
         
@@ -580,7 +625,8 @@ HRESULT ClassLoader::FindClassModule(NameHandle* pName,
 // Find or load a class known to this classloader (any module).  Does NOT look
 // in the system assembly or any other 'magic' place 
 TypeHandle ClassLoader::LookupTypeHandle(NameHandle* pName, 
-                                         OBJECTREF *pThrowable /*=NULL*/)
+                                         OBJECTREF *pThrowable,
+					 Pending *pending)
 {
     TypeHandle  typeHnd; 
     Module*     pFoundModule = NULL;
@@ -605,6 +651,15 @@ TypeHandle ClassLoader::LookupTypeHandle(NameHandle* pName,
     if (!typeHnd.IsNull())  // Found the cached value
         return typeHnd;
     
+    // Now check if it's in the pending list
+    Pending *here = pending;
+    while (here != NULL)
+    {
+      if (*here->m_pHandle == *pName)
+          return here->m_Type;
+      here = here->m_pNext;
+    }
+
     if(SUCCEEDED(hr)) {         // Found a cl, pModule pair
         if(pFoundModule->GetClassLoader() == this) {
             BOOL fTrustTD = TRUE;
@@ -657,7 +712,7 @@ TypeHandle ClassLoader::LookupTypeHandle(NameHandle* pName,
                                                             pFoundModule->GetMDImport(),
                                                             &FoundCl))) {
                         name.SetTypeToken(pFoundModule, FoundCl);
-                        typeHnd = LoadTypeHandle(&name, pThrowable, FALSE);
+                        typeHnd = LoadTypeHandle(&name, pThrowable);
                     }
                     else {
                         return TypeHandle();
@@ -666,7 +721,7 @@ TypeHandle ClassLoader::LookupTypeHandle(NameHandle* pName,
             }
         }
         else {
-            typeHnd = pFoundModule->GetClassLoader()->LookupTypeHandle(pName, pThrowable);
+            typeHnd = pFoundModule->GetClassLoader()->LookupTypeHandle(pName, pThrowable, pending);
         }
 
         // Replace AvailableClasses Module entry with EEClass entry
@@ -674,7 +729,7 @@ TypeHandle ClassLoader::LookupTypeHandle(NameHandle* pName,
             pEntry->Data = typeHnd.AsPtr();
     } 
     else {// See if it is an array, or other type constructed on the fly
-        typeHnd = FindParameterizedType(pName, pThrowable);
+        typeHnd = FindParameterizedType(pName, pThrowable, pending);
     }
 
     if (!typeHnd.IsNull() && typeHnd.IsRestored()) 
@@ -688,6 +743,74 @@ TypeHandle ClassLoader::LookupTypeHandle(NameHandle* pName,
     }
 
     return typeHnd;
+}
+
+TypeHandle ClassLoader::GetPointerOrByrefType(CorElementType typ, TypeHandle baseType, OBJECTREF *pThrowable, BOOL dontLoadTypes)
+{
+	if (baseType.IsNull())
+	{
+		return TypeHandle();
+	}
+
+    NameHandle typeName(typ, baseType);
+    if (dontLoadTypes)
+        typeName.SetTokenNotToLoad(tdAllTypes);
+
+    return baseType.GetModule()->GetClassLoader()->FindTypeHandle(&typeName, pThrowable);
+}
+
+
+
+TypeHandle ClassLoader::GetArrayType(CorElementType typ, TypeHandle elemType, unsigned rank, OBJECTREF *pThrowable, BOOL dontLoadTypes)
+{
+    if (elemType.IsNull())
+    {
+        return TypeHandle();
+    }
+    if (typ == ELEMENT_TYPE_ARRAY) {
+        _ASSERTE(0 < rank);
+    }
+    return(elemType.GetModule()->GetClassLoader()->FindArrayForElem(elemType, typ, rank, pThrowable));
+}
+
+
+TypeHandle ClassLoader::GetFnptrType(TypeHandle* inst, DWORD ntypars, OBJECTREF *pThrowable, BOOL dontLoadTypes)
+{
+	_ASSERTE(!"unimplemented");
+	return TypeHandle();
+}
+
+// Find an instantiation of a generic type if it has already been created.
+// If genericTy is not a generic type or is already instantiated then throw an exception
+// If its arity does not match ntypars then throw an exception
+TypeHandle ClassLoader::LoadGenericInstantiation(TypeHandle genericTy, TypeHandle* inst, DWORD ntypars, OBJECTREF *pThrowable,
+				    Pending *pending, BOOL dontLoadTypes /* =FALSE */)
+
+{
+  ClassLoader *pLoader = genericTy.GetModule()->GetClassLoader();
+  Assembly* pAssembly = genericTy.GetAssembly();
+  IMDInternalImport *pInternalImport = genericTy.GetModule()->GetMDImport();
+  TypeHandle typeHnd = TypeHandle();
+
+  _ASSERTE(pLoader != NULL);
+
+  if (!genericTy.GetClass()->IsGenericTypeDefinition())
+  {
+    pAssembly->PostTypeLoadException(pInternalImport, genericTy.GetClass()->GetCl(), IDS_CLASSLOAD_GENERIC, pThrowable);
+    return typeHnd;
+  }
+
+  if (genericTy.GetNumGenericArgs() != ntypars)
+  {
+    pAssembly->PostTypeLoadException(pInternalImport, genericTy.GetClass()->GetCl(), IDS_CLASSLOAD_GENERIC, pThrowable);
+    return typeHnd;
+  }
+   
+  NameHandle name(genericTy, inst);
+  if (dontLoadTypes)
+     name.SetTokenNotToLoad(tdAllTypes);
+  typeHnd = pLoader->FindTypeHandle(&name, pThrowable, pending);
+  return typeHnd;
 }
 
 BOOL ClassLoader::MapInterfaceToCurrDomain(TypeHandle InterfaceType, OBJECTREF *pThrowable)
@@ -798,7 +921,8 @@ BOOL ClassLoader::CreateCanonicallyCasedKey(LPCUTF8 pszNameSpace, LPCUTF8 pszNam
 
 /* load a parameterized type */
 TypeHandle ClassLoader::FindParameterizedType(NameHandle* pName,
-                                              OBJECTREF *pThrowable /*=NULL*/)
+                                              OBJECTREF *pThrowable /*=NULL*/,
+					      Pending *pending)
 {
     // We post an exception if of GetArrayTypeHandle returns null. By the time we are 
     // done with GetArrayTypeHandle() we have searched all the available assemblies 
@@ -816,10 +940,11 @@ TypeHandle ClassLoader::FindParameterizedType(NameHandle* pName,
     char* name = NULL;
 #endif
 
-    // Legacy mangling: deconstruct string to determine ELEMENT_TYPE_?, rank (for arrays), and paramType
-    // Also required for Type::GetType in reflection
-    if (kind == ELEMENT_TYPE_CLASS)
-    {
+    switch (kind) {
+      // Legacy mangling: deconstruct string to determine ELEMENT_TYPE_?, rank (for arrays), and paramType
+      // Also required for Type::GetType in reflection
+      case ELEMENT_TYPE_CLASS :
+      {
         // _ASSERTE(!"You should be creating arrays using typespecs");
 
         LPCUTF8 pszClassName = pName->GetName();
@@ -832,6 +957,11 @@ TypeHandle ClassLoader::FindParameterizedType(NameHandle* pName,
         LPUTF8 ptr = const_cast<LPUTF8>(&pszClassName[len-1]);
 
         switch(*ptr) {
+
+	  // <NICE>GENERICS: better would be to move this stuff to the parser code in COMClass::GetClassInnerHelper and AssemblyNative::GetTypeInnerHelper
+	  // Why? Because the loader no longer uses string-based representations for its tables and we've introduced a bunch of other syntax to support
+          // instantiated types. These are only required for reflection, so should be in the COMClass and AssemblyNative methods just mentioned.</NICE>
+
         case ']':
             --ptr;
             if (*ptr == '[') {
@@ -879,40 +1009,50 @@ TypeHandle ClassLoader::FindParameterizedType(NameHandle* pName,
             return(typeHnd);        // Fail
         }
     
-        /* If we are here, then we have found a parameterized type.  ptr points
-           just beyond the end of the element type involved.  */
-        SIZE_T iParamName = ptr - pszClassName;
-        CQuickBytes qb;
-        LPSTR paramName = (LPSTR) qb.Alloc(iParamName+1);
-        memcpy(paramName, pszClassName, iParamName);
-        paramName[iParamName] = 0;
+          /* If we are here, then we have found a array or pointer type.  ptr points
+             just beyond the end of the element type involved.  */
+          SIZE_T iParamName = ptr - pszClassName;
+          CQuickBytes qb;
+          LPSTR paramName = (LPSTR) qb.Alloc(iParamName+1);
+          memcpy(paramName, pszClassName, iParamName);
+          paramName[iParamName] = 0;
         
-        /* Get the element type */ 
-        paramHandle = NameHandle(*pName);
-        paramHandle.SetName(paramName);
+          /* Get the element type */ 
+          paramHandle = NameHandle(*pName);
+          paramHandle.SetName(paramName);
         
-        paramType = LookupTypeHandle(&paramHandle, pThrowable);
-        if (paramType.IsNull())
+          paramType = LookupTypeHandle(&paramHandle, pThrowable, pending);
+          if (paramType.IsNull())
             return(typeHnd);
     
-        normHandle = NameHandle(kind, paramType, rank);
-    }
+          normHandle = NameHandle(kind, paramType, rank);
+          break;
+      }
 
     // New hash-consed scheme for constructed types
-    else
-    {
-        paramType = pName->GetElementType();
-        if (paramType.IsNull())
-            return(typeHnd);
+      case ELEMENT_TYPE_WITH :
+          paramType = pName->GetGenericTypeDefinition();
+          if (paramType.IsNull())
+              return(typeHnd);
     
-        kind = (CorElementType) pName->GetKind();
-        rank = pName->GetRank();
-        normHandle = *pName;    
+          normHandle = *pName;    
+          break;
 
-        _ASSERTE((kind != ELEMENT_TYPE_ARRAY) || rank > 0);
-        _ASSERTE((kind != ELEMENT_TYPE_SZARRAY) || rank == 1);
-    }
+      default :
+          rank = pName->GetRank();
+
+          // Arrays live in class loader of element type
+          paramType = pName->GetElementType();
+          _ASSERTE((kind != ELEMENT_TYPE_ARRAY) || rank > 0);
+          _ASSERTE((kind != ELEMENT_TYPE_SZARRAY) || rank == 1);
+          if (paramType.IsNull())
+              return(typeHnd);
     
+          normHandle = *pName;    
+          break;
+    }
+
+      
     /* Parameterized types live in the class loader of the element type */
     ClassLoader* paramLoader = paramType.GetModule()->GetClassLoader();
     
@@ -938,6 +1078,32 @@ TypeHandle ClassLoader::FindParameterizedType(NameHandle* pName,
     }
 
     _ASSERTE(typeHnd.IsNull());
+
+    if (kind == ELEMENT_TYPE_WITH)
+    {
+      typeHnd = NewInstantiation(paramType, normHandle.GetInstantiation(), pending);
+
+      if (typeHnd.IsNull()) {
+        m_pAssembly->PostTypeLoadException(pName, IDS_CLASSLOAD_GENERIC, pThrowable);
+        availableClassLock.Leave();
+        return(typeHnd);
+      }
+
+    // If we're not loading any types at all, then we're not creating
+    // instantiations either because we're in FORBIDGC_LOADER_USE mode, so 
+    // we should bail out here.  
+    if (pName->GetTokenNotToLoad() == tdAllTypes)
+       return(typeHnd);
+
+      // Reset the instantiation so that the key persists into the hash table
+      normHandle.SetInstantiation(typeHnd.GetInstantiation());
+
+      // Insert into table of parameterized types
+      paramLoader->m_pAvailableParamTypes->InsertValue(&normHandle, typeHnd.AsPtr());
+
+      availableClassLock.Leave();
+      return(typeHnd);
+    }
 
     // Create a new type descriptor and insert into constructed type table
     if (CorTypeInfo::IsArray(kind)) {
@@ -994,7 +1160,8 @@ TypeHandle ClassLoader::FindParameterizedType(NameHandle* pName,
     }
 
 #ifdef _DEBUG
-    if (CorTypeInfo::IsArray(kind) && ! ((ArrayClass*)(templateMT->GetClass()))->m_szDebugClassName) {
+    if (CorTypeInfo::IsArray(kind) && templateMT != NULL &&
+        ! ((ArrayClass*)(templateMT->GetClass()))->m_szDebugClassName) {
         char pszClassName[MAX_CLASSNAME_LENGTH+1];
         int len = pName->GetFullName(pszClassName, MAX_CLASSNAME_LENGTH);
         BYTE* mem = (BYTE*) paramLoader->GetAssembly()->GetLowFrequencyHeap()->AllocMem(len+1);   
@@ -1025,6 +1192,7 @@ TypeHandle ClassLoader::FindParameterizedType(NameHandle* pName,
 
 //
 // Return a class that is already loaded
+// Only for type refs and type defs (not type specs), so must be ground
 // 
 TypeHandle ClassLoader::LookupInModule(NameHandle* pName)
 {
@@ -1169,6 +1337,7 @@ ClassLoader::~ClassLoader()
         DeleteCriticalSection(&m_UnresolvedClassLock);
         DeleteCriticalSection(&m_AvailableClassLock);
         DeleteCriticalSection(&m_ModuleListCrst);
+	DeleteCriticalSection(&m_ChunksLock);
     }
 }
 
@@ -1226,6 +1395,7 @@ BOOL ClassLoader::Init()
     InitializeCriticalSection(&m_UnresolvedClassLock);
     InitializeCriticalSection(&m_AvailableClassLock);
     InitializeCriticalSection(&m_ModuleListCrst);
+    InitializeCriticalSection(&m_ChunksLock);
     m_fCreatedCriticalSections = TRUE;
 
     fSuccess = TRUE;
@@ -1285,8 +1455,11 @@ LoadingEntry_t *ClassLoader::FindUnresolvedClass(Module *pModule, mdTypeDef cl)
 // loaded.  Note that the class can be defined in other modules than 'pModule' (that is
 // 'cl' can be a typeRef as well as a typeDef
 //
-TypeHandle ClassLoader::LoadTypeHandle(NameHandle* pName, OBJECTREF *pThrowable,
-                                       BOOL dontLoadInMemoryType/*=TRUE*/)
+TypeHandle ClassLoader::LoadTypeHandle(NameHandle* pName,
+                                       OBJECTREF *pThrowable,
+                                       TypeHandle *classInst /*=NULL*/,
+                                       TypeHandle *methodInst /*=NULL*/,
+                                       Pending *pending /*=NULL*/)
 {
     _ASSERTE(IsProtectedByGCFrame(pThrowable));
     if (pThrowable == THROW_ON_ERROR) {
@@ -1298,11 +1471,22 @@ TypeHandle ClassLoader::LoadTypeHandle(NameHandle* pName, OBJECTREF *pThrowable,
     IMDInternalImport *pInternalImport;
     TypeHandle  typeHnd;
 
-    // First, attempt to find the class if it is already loaded
+    // GCC complains if a goto crosses an initialisation, so we put
+    // this initialisation before the first occurrence of "goto exit".
+    Pending *here = pending;
 
+    // First, attempt to find the class if it is already loaded
     typeHnd = LookupInModule(pName);
     if (!typeHnd.IsNull() && (typeHnd.IsRestored() || !pName->GetRestore()))
         goto exit;
+
+    // Now check if it's in the pending list
+    while (here != NULL)
+    {
+      if (*here->m_pHandle == *pName)
+          return here->m_Type;
+      here = here->m_pNext;
+    }
 
     // We do not allow loading type handle during GC,
     // or by a thread without EEE setup, such as concurrent GC thread.
@@ -1339,7 +1523,8 @@ TypeHandle ClassLoader::LoadTypeHandle(NameHandle* pName, OBJECTREF *pThrowable,
 
         pInternalImport->GetTypeSpecFromToken(pName->GetTypeToken(), &pSig, &cSig);
         SigPointer sigptr(pSig);
-        typeHnd = sigptr.GetTypeHandle(pName->GetTypeModule(), pThrowable);
+        typeHnd = sigptr.GetTypeHandle(pName->GetTypeModule(), pThrowable, FALSE, FALSE, FALSE, classInst, methodInst,
+          pending);
         goto exit;
     }   
     _ASSERTE(TypeFromToken(pName->GetTypeToken()) == mdtTypeDef);
@@ -1393,18 +1578,18 @@ TypeHandle ClassLoader::LoadTypeHandle(NameHandle* pName, OBJECTREF *pThrowable,
                 if (pAssembly) {
                     pName->SetName(nameSpace, className);
                     pName->SetTokenNotToLoad(tdAllAssemblies);
-                    typeHnd = pAssembly->LookupTypeHandle(pName, pThrowable);
+                    typeHnd = pAssembly->LookupTypeHandle(pName, pThrowable, pending);
                 }
             }
 
-            if (typeHnd.IsNull())
-                m_pAssembly->PostTypeLoadException(pszFullName,
+            if (typeHnd.IsNull() && (pName->GetTokenNotToLoad() != tdAllTypes))
+                m_pAssembly->PostTypeLoadException(pName,
                                                    IDS_CLASSLOAD_GENERIC,
                                                    pThrowable);
         }
         else {
             BEGIN_ENSURE_PREEMPTIVE_GC();
-            typeHnd = LoadTypeHandle(pName->GetTypeModule(), pName->GetTypeToken(), pThrowable);
+            typeHnd = LoadTypeHandle(pName->GetTypeModule(), pName->GetTypeToken(), pThrowable, pending);
             END_ENSURE_PREEMPTIVE_GC();
         }
     }
@@ -1432,17 +1617,89 @@ HRESULT ClassLoader::GetEnclosingClass(IMDInternalImport *pInternalImport, Modul
     return S_OK;
 }
 
-HRESULT ClassLoader::LoadParent(IMDInternalImport *pInternalImport, Module *pModule, mdToken cl, EEClass** ppClass, OBJECTREF *pThrowable)
+
+//@GENERICS:
+// Load a parent type or implemented interface type.
+// If this is an instantiated type represented by a type spec, then instead of attempting to load the
+// exact type just load either the generic type (if approxInst=FALSE: used for interfaces) 
+// or approximate instantiation (if approxInst=TRUE: used for parent) 
+// and fill in formalInst with the formal instantiation.
+// The exact instantiated type will be loaded later.
+// We do this to avoid loops in the class loader on definitions such as
+//   class M : ICloneable<M>
+//   class C<T> : D<C<T>,int>
+// So here, for example, we load ICloneable and D<object,int> respectively. 
+TypeHandle ClassLoader::LoadRawType(IMDInternalImport *pInternalImport, Module *pModule, mdToken tok, OBJECTREF *pThrowable,
+  PCCOR_SIGNATURE *formalInst,TypeHandle *typars, BOOL approxInst)
+{
+  _ASSERTE(formalInst != NULL);
+
+  if (TypeFromToken(tok) == mdtTypeSpec)
+  {
+    ULONG cSig;
+    PCCOR_SIGNATURE pSig;         
+    pInternalImport->GetTypeSpecFromToken(tok, &pSig, &cSig);
+    SigPointer sigptr = SigPointer(pSig);
+    CorElementType type = sigptr.GetElemType();
+
+    // The only kind of type specs that we recognise are instantiated types
+    if (type != ELEMENT_TYPE_WITH) {
+      m_pAssembly->PostTypeLoadException(pInternalImport, tok, IDS_CLASSLOAD_GENERIC, pThrowable);
+      return TypeHandle();
+    }
+
+    // Of these, we outlaw instantiated value classes (they can't be interfaces and can't be subclassed)
+    type = sigptr.GetElemType();
+    if (type != ELEMENT_TYPE_CLASS) {
+      m_pAssembly->PostTypeLoadException(pInternalImport, tok, IDS_CLASSLOAD_GENERIC, pThrowable);
+      return TypeHandle();
+    }
+
+    mdToken genericTok = sigptr.GetToken();
+    DWORD ntypars = sigptr.GetData();
+    *formalInst = sigptr.GetPtr();
+
+    // Try to load the generic type itself
+    _ASSERTE(TypeFromToken(genericTok) == mdtTypeRef || TypeFromToken(genericTok) == mdtTypeDef);
+    NameHandle genericName(pModule, genericTok);
+    TypeHandle genericType = LoadTypeHandle(&genericName, pThrowable);
+
+    if (approxInst)
+    {
+      TypeHandle *inst = (TypeHandle*) _alloca(ntypars * sizeof(TypeHandle));
+      for (DWORD i = 0; i < ntypars; i++)
+      {
+        inst[i] = sigptr.GetTypeHandle(pModule, pThrowable, FALSE, FALSE, TRUE, typars);
+        if (inst[i].IsNull())
+          return TypeHandle();
+        sigptr.Skip();
+      }
+      return ClassLoader::LoadGenericInstantiation(genericType, inst, ntypars, pThrowable);
+    }
+    else return genericType;        
+  }
+  else {           
+    *formalInst = NULL;
+    NameHandle name(pModule, tok);
+    return LoadTypeHandle(&name, pThrowable);
+  }
+}
+
+
+HRESULT ClassLoader::LoadParent(IMDInternalImport *pInternalImport, Module *pModule, mdToken cl, 
+  MethodTable** ppMethodTable, PCCOR_SIGNATURE *pParentInst, TypeHandle *typars, OBJECTREF *pThrowable)
 {
 
-    _ASSERTE(ppClass);
+    _ASSERTE(ppMethodTable);
 
     mdTypeRef   crExtends;
-    EEClass *   pParentClass = NULL;
+    MethodTable*   pParentMethodTable = NULL;
+    TypeHandle  parentType;
     DWORD       dwAttrClass;
 
     // Initialize the return value;
-    *ppClass = NULL;
+    *ppMethodTable = NULL;
+    *pParentInst = NULL;
 
     // Now load all dependencies of this class
     pInternalImport->GetTypeDefProps(
@@ -1458,18 +1715,22 @@ HRESULT ClassLoader::LoadParent(IMDInternalImport *pInternalImport, Module *pMod
     }
     else
     {
-        // Load and resolve parent class
-        NameHandle pParent(pModule, crExtends);
-        pParentClass = LoadTypeHandle(&pParent, pThrowable).GetClass();
+        //@GENERICS: if parent is instantiated then do an approximate load, replacing reference type instantiations by Object
+	    //<NICE>GENERICS: avoid this:
+		// The only reason we need the parent *instantiated* type (as opposed to generic type) is that it's used for field layout
+		// Instead, it would be better to determine the representation (i.e. field layout) independent of a full load</NICE>
+		parentType = LoadRawType(pInternalImport, pModule, crExtends, pThrowable, pParentInst, typars, TRUE);
 
-        if (pParentClass == NULL)
+		pParentMethodTable = parentType.GetMethodTable();
+
+        if (pParentMethodTable == NULL)
         {
             m_pAssembly->PostTypeLoadException(pInternalImport, cl, IDS_CLASSLOAD_PARENTNULL, pThrowable);
             return COR_E_TYPELOAD;
         }
 
         // cannot inherit from an interface
-        if (pParentClass->IsInterface())
+        if (pParentMethodTable->IsInterface())
         {
             m_pAssembly->PostTypeLoadException(pInternalImport, cl, IDS_CLASSLOAD_PARENTINTERFACE, pThrowable);
             return COR_E_TYPELOAD;
@@ -1478,7 +1739,7 @@ HRESULT ClassLoader::LoadParent(IMDInternalImport *pInternalImport, Module *pMod
         if (IsTdInterface(dwAttrClass))
         {
             // Interfaces must extend from Object
-            if (! pParentClass->IsObjectClass())
+            if (! pParentMethodTable->GetClass()->IsObjectClass())
             {
                 m_pAssembly->PostTypeLoadException(pInternalImport, cl, IDS_CLASSLOAD_INTERFACEOBJECT, pThrowable);
                 return COR_E_TYPELOAD;
@@ -1486,13 +1747,14 @@ HRESULT ClassLoader::LoadParent(IMDInternalImport *pInternalImport, Module *pMod
         }
     }
 
-    *ppClass = pParentClass;
+    *ppMethodTable = pParentMethodTable;
     return S_OK;
 }
 
 
 TypeHandle ClassLoader::LoadTypeHandle(Module *pModule, mdTypeDef cl, OBJECTREF *pThrowable,
-                                       BOOL dontRestoreType)
+                                       Pending *pending, BOOL dontRestoreType, 
+				       TypeHandle genericType, TypeHandle *typars)
 {
     HRESULT hr = E_FAIL;
     EEClass *   pClass = NULL;
@@ -1514,7 +1776,6 @@ TypeHandle ClassLoader::LoadTypeHandle(Module *pModule, mdTypeDef cl, OBJECTREF 
         m_pAssembly->PostTypeLoadException("<unknown>", IDS_CLASSLOAD_BADFORMAT, pThrowable);
         return TypeHandle();       // return NULL
     }
-
 
 #ifdef _DEBUG
     if (pThrowable == THROW_ON_ERROR) {
@@ -1648,7 +1909,7 @@ retry:
 
         {
             _ASSERTE( typeHnd.IsNull() );
-            hr = LoadTypeHandleFromToken(pModule, cl, &pClass, pThrowable);
+            hr = LoadTypeHandleFromToken(pModule, cl, &pClass, pThrowable, pending, genericType, typars);
         }
 
 
@@ -1811,11 +2072,13 @@ done:
 
 // This service is called for normal classes -- and for the pseudo class we invent to
 // hold the module's public members.
-HRESULT ClassLoader::LoadTypeHandleFromToken(Module *pModule, mdTypeDef cl, EEClass** ppClass, OBJECTREF *pThrowable)
+HRESULT ClassLoader::LoadTypeHandleFromToken(Module *pModule, mdTypeDef cl, EEClass** ppClass, OBJECTREF *pThrowable, 
+  Pending *pending, TypeHandle genericType, TypeHandle *typars)
 {
     HRESULT hr = S_OK;
     EEClass *pClass;
-    EEClass *pParentClass;
+    MethodTable *pParentMethodTable;
+    PCCOR_SIGNATURE parentInst;
     mdTypeDef tdEnclosing = mdTypeDefNil;
     DWORD       cInterfaces;
     BuildingInterfaceInfo_t *pInterfaceBuildInfo = NULL;
@@ -1836,13 +2099,16 @@ HRESULT ClassLoader::LoadTypeHandleFromToken(Module *pModule, mdTypeDef cl, EECl
         return COR_E_TYPELOAD;
     }
 
-    hr = LoadParent(pInternalImport, pModule, cl, &pParentClass, pThrowable);
+    //@GENERICS: if the parent type is instantiated, at this point we just pick up the uninstantiated generic type
+    hr = LoadParent(pInternalImport, pModule, cl, &pParentMethodTable, &parentInst, typars, pThrowable);
     if(FAILED(hr)) return hr;
     
-    if (pParentClass) {
+    EEClass *pParentClass = NULL;
+    if (pParentMethodTable) {
             // Since methods on System.Array assume the layout of arrays, we can not allow
             // subclassing of arrays, it is sealed from the users point of view.  
-        if (IsTdSealed(pParentClass->GetAttrClass()) || pParentClass->GetMethodTable() == g_pArrayClass) {
+        pParentClass = pParentMethodTable->GetClass();
+        if (IsTdSealed(pParentClass->GetAttrClass()) || pParentMethodTable == g_pArrayClass) {
             m_pAssembly->PostTypeLoadException(pInternalImport, cl, IDS_CLASSLOAD_SEALEDPARENT, pThrowable);
             return COR_E_TYPELOAD;
         }
@@ -1864,12 +2130,17 @@ HRESULT ClassLoader::LoadTypeHandleFromToken(Module *pModule, mdTypeDef cl, EECl
     fHasLayout = (hr == S_OK);
 
     BOOL        fIsEnum;
-    fIsEnum = g_pEnumClass != NULL && pParentClass == g_pEnumClass->GetClass();
+    fIsEnum = g_pEnumClass != NULL && pParentMethodTable == g_pEnumClass;
 
     BOOL        fIsAnyDelegateClass = pParentClass && pParentClass->IsAnyDelegateExact();
 
+    // Work out what kind of EEClass we're creating w.r.t. generics.
+    BOOL sharable = false;
+    if (!genericType.IsNull())
+        sharable = TypeHandle::IsSharableInstantiation(genericType.GetNumGenericArgs(), typars);
+
     // Create a EEClass entry for it, filling out a few fields, such as the parent class token.
-    hr = EEClass::CreateClass(pModule, cl, fHasLayout, fIsAnyDelegateClass, fIsEnum, &pClass);
+    hr = EEClass::CreateClass(pModule, cl, fHasLayout, fIsAnyDelegateClass, fIsEnum, genericType, sharable, &pClass);
     if(FAILED(hr)) 
         return hr;
 
@@ -1942,6 +2213,7 @@ HRESULT ClassLoader::LoadTypeHandleFromToken(Module *pModule, mdTypeDef cl, EECl
         {
             mdTypeRef crInterface;
             mdToken   crIntType;
+            TypeHandle intType;
 
             // Get properties on this interface
             crInterface = pInternalImport->GetTypeOfInterfaceImpl(ii);
@@ -1962,18 +2234,17 @@ HRESULT ClassLoader::LoadTypeHandleFromToken(Module *pModule, mdTypeDef cl, EECl
                 }
             }
 
-            // Load and resolve interface
-            NameHandle myInterface(pModule, crInterface);
-            pInterfaceBuildInfo[i].m_pClass = LoadTypeHandle(&myInterface, pThrowable).GetClass();
-            if (pInterfaceBuildInfo[i].m_pClass == NULL)
-            {
+	    intType = LoadRawType(pInternalImport, pModule, crInterface, pThrowable, &pInterfaceBuildInfo[i].inst, NULL, FALSE);
+
+            pInterfaceBuildInfo[i].m_pMethodTable = intType.AsMethodTable();
+            if (pInterfaceBuildInfo[i].m_pMethodTable == NULL) {
                 m_pAssembly->PostTypeLoadException(pInternalImport, cl, IDS_CLASSLOAD_INTERFACENULL, pThrowable);
                 hr = COR_E_TYPELOAD;
                 EE_LEAVE;
             }
 
             // Ensure this is an interface
-            if (pInterfaceBuildInfo[i].m_pClass->IsInterface() == FALSE)
+            if (pInterfaceBuildInfo[i].m_pMethodTable->IsInterface() == FALSE)
             {
                 m_pAssembly->PostTypeLoadException(pInternalImport, cl, IDS_CLASSLOAD_NOTINTERFACE, pThrowable);
                 hr = COR_E_TYPELOAD;
@@ -2017,7 +2288,7 @@ HRESULT ClassLoader::LoadTypeHandleFromToken(Module *pModule, mdTypeDef cl, EECl
                                         nstructPackingSize, 
                                         nstructNLT, 
                                         fExplicitOffsets,
-                                        pClass->GetParentClass(), 
+                                        pParentClass,
                                         cFields, 
                                         &hEnumField, 
                                         pModule, 
@@ -2030,20 +2301,23 @@ HRESULT ClassLoader::LoadTypeHandleFromToken(Module *pModule, mdTypeDef cl, EECl
 
 
     // Resolve this class, given that we know now that all of its dependencies are loaded and resolved.  
-    hr = pClass->BuildMethodTable(pModule, cl, pInterfaceBuildInfo, pLayoutRawFieldInfos, pThrowable);
+    hr = pClass->BuildMethodTable(pModule, cl, pInterfaceBuildInfo, pLayoutRawFieldInfos, pThrowable, pParentMethodTable, 
+				  typars, parentInst, pending);
 
     // Be very careful about putting more code here. The class is already accessable by other threads
     // Therefore, pClass should not be modified after BuildMethodTable.
 
     // This is legal, since it only affects perf.
-    if (SUCCEEDED(hr) && pParentClass)
-        pParentClass->NoticeSubtype(pClass);
+    //@GENERICS: we don't put generic types into this chain because they only contain static methods
+    // Also note that we use the fixed-up parent class as pParentClass may be an approximation
+    if (SUCCEEDED(hr) && pParentClass && !pClass->IsGenericTypeDefinition())
+        pClass->GetParentClass()->NoticeSubtype(pClass);
 
     return hr;
 }
 
-TypeHandle ClassLoader::FindArrayForElem(TypeHandle elemType, CorElementType arrayKind, unsigned rank, OBJECTREF *pThrowable) {
 
+TypeHandle ClassLoader::FindArrayForElem(TypeHandle elemType, CorElementType arrayKind, unsigned rank, OBJECTREF *pThrowable, BOOL dontLoadTypes) {
     // Try finding it in our cache of primitive SD arrays
     if (arrayKind == ELEMENT_TYPE_SZARRAY) {
         CorElementType type = elemType.GetSigCorElementType();
@@ -2067,6 +2341,8 @@ TypeHandle ClassLoader::FindArrayForElem(TypeHandle elemType, CorElementType arr
         rank = 1;
     }
     NameHandle arrayName(arrayKind, elemType, rank);
+    if (dontLoadTypes)
+        arrayName.SetTokenNotToLoad(tdAllTypes);
     return elemType.GetModule()->GetClassLoader()->FindTypeHandle(&arrayName, pThrowable);
 }
 
@@ -2402,15 +2678,15 @@ HRESULT ClassLoader::AddExportedTypeHaveLock(LPCUTF8 pszNameSpace,
 //
 // Returns whether we can cast the provided objectref to the provided template.
 //
-// pTemplate CANNOT be an array class.  However, pRef can be.
+// pMT CANNOT be an array class.  However, pRef can be.
 //
 // However, pRef can be an array class, and the appropriate thing will happen.
 //
 // If an interface, does a dynamic interface check on pRef.
 //
-/* static */ BOOL ClassLoader::CanCastToClassOrInterface(OBJECTREF pRef, EEClass *pTemplate)
+/* static */ BOOL ClassLoader::CanCastToClassOrInterface(OBJECTREF pRef, MethodTable *pTargetMT)
 {
-    _ASSERTE(pTemplate->IsArrayClass() == FALSE);
+    _ASSERTE(pTargetMT->IsArray() == FALSE);
 
     // Try to make this as fast as possible in the non-context (typical) case.  In
     // effect, we just hoist the test out of GetTrueMethodTable() and do it here.
@@ -2418,9 +2694,9 @@ HRESULT ClassLoader::AddExportedTypeHaveLock(LPCUTF8 pszNameSpace,
 
     EEClass *pRefClass = pMT->GetClass();
 
-    if (pTemplate->IsInterface())
+    if (pMT->IsInterface())
     {
-        return pRefClass->SupportsInterface(pRef, pTemplate->GetMethodTable());
+        return pRefClass->SupportsInterface(pRef, pTargetMT);
     }
     else
     {
@@ -2429,11 +2705,11 @@ HRESULT ClassLoader::AddExportedTypeHaveLock(LPCUTF8 pszNameSpace,
         // Check inheritance hierarchy
         do
         {
-            if (pRefClass == pTemplate)
-                return TRUE;
+            if (pMT == pTargetMT)
+              return TRUE;
 
-            pRefClass = pRefClass->GetParentClass();
-        } while (pRefClass);
+            pMT = pMT->GetParentMethodTable();
+        } while (pMT);
 
         return FALSE;
     }
@@ -2447,16 +2723,15 @@ HRESULT ClassLoader::AddExportedTypeHaveLock(LPCUTF8 pszNameSpace,
 //
 // Does NOT do a dynamic interface check -does a static check.
 //
-/* static */ BOOL ClassLoader::StaticCanCastToClassOrInterface(EEClass *pRefClass, EEClass *pTemplate)
+/* static */ BOOL ClassLoader::StaticCanCastToClassOrInterface(MethodTable *pMTRef, MethodTable *pMTTemplate)
 {
-    MethodTable *pMTTemplate = pTemplate->GetMethodTable();
-
+    // Reference array type descriptors have been dealt with in ParamTypeDesc::CanCastTo
     if (pMTTemplate->IsArray())
         return FALSE;
 
-    if (pTemplate->IsInterface())
+    if (pMTTemplate->IsInterface())
     {
-        return pRefClass->StaticSupportsInterface(pMTTemplate);
+      return pMTRef->StaticSupportsInterface(pMTTemplate);
     }
     else
     {
@@ -2465,11 +2740,11 @@ HRESULT ClassLoader::AddExportedTypeHaveLock(LPCUTF8 pszNameSpace,
         // Check inheritance hierarchy
         do
         {
-            if (pRefClass == pTemplate)
+            if (pMTRef == pMTTemplate)
                 return TRUE;
 
-            pRefClass = pRefClass->GetParentClass();
-        } while (pRefClass);
+            pMTRef = pMTRef->GetParentMethodTable();
+          } while (pMTRef); 
 
         return FALSE;
     }
@@ -2508,7 +2783,7 @@ HRESULT ClassLoader::AddExportedTypeHaveLock(LPCUTF8 pszNameSpace,
         _ASSERTE(clsHandle.AsMethodTable()->IsArray() == FALSE);
 
         // Follow regular code path
-        if (CanCastToClassOrInterface(pRef, clsHandle.AsClass()))
+        if (CanCastToClassOrInterface(pRef, clsHandle.AsMethodTable()))
             return S_OK;
         else
             return COR_E_TYPELOAD;
@@ -2679,7 +2954,7 @@ BOOL ClassLoader::CheckAccess(EEClass *pCurrentClass,
     
     // Nested classes can access all members of the parent class.
     do {
-        if (pCurrentClass == pTargetClass)
+        if (pCurrentClass->StripInstantiation() == pTargetClass->StripInstantiation())
             return TRUE;
 
         if (IsMdFamORAssem(dwMemberAccess)) {
@@ -2714,7 +2989,7 @@ BOOL ClassLoader::CheckAccess(EEClass *pCurrentClass,
         else  {  // fam, famANDassem
             EEClass *pClass = pCurrentClass->GetParentClass();
             while (pClass) {
-                if (pClass == pTargetClass)
+                if (pClass->StripInstantiation() == pTargetClass->StripInstantiation())
                     return TRUE;
                 
                 pClass = pClass->GetParentClass();
@@ -2776,7 +3051,7 @@ BOOL ClassLoader::CanAccess(EEClass  *pClassOfAccessingMethod,
             _ASSERTE(!"Family flag is not allowed on global functions");
 #endif
 
-        if (pClassOfMember == pClassOfAccessingMethod)
+        if (pClassOfMember->StripInstantiation() == pClassOfAccessingMethod->StripInstantiation())
             return TRUE;
 
         if (IsMdPrivate(dwMemberAccess)) {

@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -63,6 +68,9 @@ typedef mdToken mdManifestResource;     // ManifestResource token.
 
 typedef mdToken mdTypeSpec;             // TypeSpec object 
 
+typedef mdToken mdGenericPar;           // formal type parameter to generic type or method
+typedef mdToken mdMethodSpec;           // instantiation of a generic method
+
 // Application string.
 typedef mdToken mdString;               // User literal string token.
 
@@ -87,6 +95,7 @@ typedef enum ReplacesGeneralNumericDefines
 
 
 #define   COMIMAGE_FLAGS_STRONGNAMESIGNED      0x00000008
+
 
 #ifndef __IMAGE_COR20_HEADER_DEFINED__
 #define __IMAGE_COR20_HEADER_DEFINED__
@@ -693,9 +702,9 @@ typedef enum CorElementType
     // Please use ELEMENT_TYPE_VALUETYPE. ELEMENT_TYPE_VALUECLASS is deprecated.
     ELEMENT_TYPE_VALUETYPE      = 0x11,     // VALUETYPE <class Token> 
     ELEMENT_TYPE_CLASS          = 0x12,     // CLASS <class Token>  
-
+    ELEMENT_TYPE_VAR            = 0x13,     // a class type variable VAR <U1>
     ELEMENT_TYPE_ARRAY          = 0x14,     // MDARRAY <type> <rank> <bcount> <bound1> ... <lbcount> <lb1> ...  
-
+    ELEMENT_TYPE_WITH           = 0x15,     // instantiated type  
     ELEMENT_TYPE_TYPEDBYREF     = 0x16,     // This is a simple type.   
 
     ELEMENT_TYPE_I              = 0x18,     // native integer size  
@@ -704,6 +713,7 @@ typedef enum CorElementType
     ELEMENT_TYPE_OBJECT         = 0x1C,     // Shortcut for System.Object
     ELEMENT_TYPE_SZARRAY        = 0x1D,     // Shortcut for single dimension zero lower bound array
                                             // SZARRAY <type>
+    ELEMENT_TYPE_MVAR           = 0x1e,     // a method type variable MVAR <U1>
 
     // This is only for binding
     ELEMENT_TYPE_CMOD_REQD      = 0x1F,     // required C modifier : E_T_CMOD_REQD <mdTypeRef/mdTypeDef>
@@ -766,13 +776,15 @@ typedef enum CorCallingConvention
     IMAGE_CEE_CS_CALLCONV_LOCAL_SIG = 0x7,
     IMAGE_CEE_CS_CALLCONV_PROPERTY  = 0x8,
     IMAGE_CEE_CS_CALLCONV_UNMGD     = 0x9,
-    IMAGE_CEE_CS_CALLCONV_MAX       = 0x10,  // first invalid calling convention    
+    IMAGE_CEE_CS_CALLCONV_INSTANTIATION = 0x0a,  // generic method instantiation
+    IMAGE_CEE_CS_CALLCONV_MAX       = 0x0b,  // first invalid calling convention    
 
 
         // The high bits of the calling convention convey additional info   
     IMAGE_CEE_CS_CALLCONV_MASK      = 0x0f,  // Calling convention is bottom 4 bits 
     IMAGE_CEE_CS_CALLCONV_HASTHIS   = 0x20,  // Top bit indicates a 'this' parameter    
     IMAGE_CEE_CS_CALLCONV_EXPLICITTHIS = 0x40,  // This parameter is explicitly in the signature
+    IMAGE_CEE_CS_CALLCONV_GENERIC   = 0x10,  // Generic method sig with explicit number of type arguments (precedes ordinary parameter count)
 } CorCallingConvention;
 
 
@@ -1288,6 +1300,8 @@ typedef enum CorTokenType
     mdtFile                 = 0x26000000,       //
     mdtExportedType         = 0x27000000,       //
     mdtManifestResource     = 0x28000000,       //
+    mdtGenericPar           = 0x2a000000,       //
+    mdtMethodSpec           = 0x2b000000,       //
 
     mdtString               = 0x70000000,       //          
     mdtName                 = 0x71000000,       //
@@ -1327,6 +1341,9 @@ typedef enum CorTokenType
 #define mdFileNil                   ((mdFile)mdtFile)
 #define mdExportedTypeNil           ((mdExportedType)mdtExportedType)
 #define mdManifestResourceNil       ((mdManifestResource)mdtManifestResource)
+
+#define mdGenericParNil             ((mdGenericPar)mdtGenericPar)
+#define mdMethodSpecNil             ((mdMethodSpec)mdtMethodSpec)
 
 #define mdStringNil                 ((mdString)mdtString)               
 

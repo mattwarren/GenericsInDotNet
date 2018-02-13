@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -599,7 +604,17 @@ DECLARE_INTERFACE_(IMetaDataEmit, IUnknown)
 
     STDMETHOD(MergeEnd)() PURE;             // S_OK or error.
 
+    STDMETHOD(SetGenericPars)(              // S_OK or error.
+        mdToken     tk,                     // [IN] TypeDef or MethodDef
+        ULONG       ulNum,                  // [IN] Number of type parameters
+	mdToken     rtkConstraints[],       // [IN] Bounds (TypeDef/Ref/Spec) on the parameters
+        LPCWSTR     wzNames[]) PURE;        // [IN] Names for the parameters
 
+    STDMETHOD(DefineMethodSpec)(
+        mdToken     tkParent,               // [IN] MethodDef or MemberRef
+        PCCOR_SIGNATURE pvSigBlob,          // [IN] point to a blob value of COM+ signature 
+        ULONG       cbSigBlob,              // [IN] count of bytes in the signature blob    
+        mdMethodSpec *pmi) PURE;   // [OUT] method instantiation token
 };      // IMetaDataEmit
 
 
@@ -650,8 +665,8 @@ DECLARE_INTERFACE_(IMetaDataImport, IUnknown)
     STDMETHOD(GetInterfaceImplProps)(       // S_OK or error.
         mdInterfaceImpl iiImpl,             // [IN] InterfaceImpl token.
         mdTypeDef   *pClass,                // [OUT] Put implementing class token here.
-        mdToken     *ptkIface) PURE;        // [OUT] Put implemented interface token here.              
-
+        mdToken     *ptkIface) PURE;        // [OUT] Put implemented interface token here.  
+            
     STDMETHOD(GetTypeRefProps)(             // S_OK or error.
         mdTypeRef   tr,                     // [IN] TypeRef token.
         mdToken     *ptkResolutionScope,    // [OUT] Resolution scope, ModuleRef or AssemblyRef.
@@ -1019,6 +1034,30 @@ DECLARE_INTERFACE_(IMetaDataImport, IUnknown)
     STDMETHOD(IsGlobal)(                    // S_OK or error.
         mdToken     pd,                     // [IN] Type, Field, or Method token.
         int         *pbGlobal) PURE;        // [OUT] Put 1 if global, 0 otherwise.
+
+    STDMETHOD(EnumGenericPars)(            // S_OK or error.
+        HCORENUM *phEnum,                   // [IN,OUT] enumerator.
+        mdToken     tkOwner,                // [IN] TypeDef or MethodDef
+        mdGenericPar rTokens[],             // [OUT] The type parameters themselves
+        ULONG cTokens,                      // [IN] Size of rTokens buffer
+        ULONG *pcTokens) PURE;              // [OUT] Actual number of tokens stored
+
+    STDMETHOD(GetGenericParProps)(
+        mdGenericPar rd,                    // [IN] The type parameter
+        ULONG* pulSequence,                 // [OUT] Parameter sequence number
+        DWORD* pdwAttr,                     // [OUT] Type parameter flags (for future use)       
+        mdToken *ptOwner,                   // [OUT] The owner (TypeDef or MethodDef) 
+	mdToken *ptKind,                    // [OUT] The kind (TypeDef/Ref/Spec, for future use)
+	mdToken *ptConstraint,              // [OUT] The constraint (TypeDef/Ref/Spec)
+        LPWSTR wzName,                      // [OUT] The name
+        ULONG cchName,                      // [IN] Size of name buffer
+        ULONG *pchName) PURE;               // [OUT] Actual size of name
+
+    STDMETHOD(GetMethodSpecProps)(
+        mdMethodSpec mi,                    // [IN] The method instantiation
+        mdToken *tkParent,                  // [OUT] MethodDef or MemberRef
+        PCCOR_SIGNATURE *ppvSigBlob,        // [OUT] point to the blob value of meta data   
+        ULONG       *pcbSigBlob) PURE;      // [OUT] actual size of signature blob  
 
 };      // IMetaDataImport
 

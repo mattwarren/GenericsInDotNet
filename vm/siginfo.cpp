@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -149,13 +154,11 @@ DEFINEELEMENTTYPEINFO(ELEMENT_TYPE_PTR,            sizeof(LPVOID), TYPE_GC_NONE,
 DEFINEELEMENTTYPEINFO(ELEMENT_TYPE_BYREF,          sizeof(LPVOID), TYPE_GC_BYREF, 0, 1, 0)
 DEFINEELEMENTTYPEINFO(ELEMENT_TYPE_VALUETYPE,      -1,             TYPE_GC_OTHER, 0, 0,  0)
 DEFINEELEMENTTYPEINFO(ELEMENT_TYPE_CLASS,          sizeof(LPVOID), TYPE_GC_REF,   0, 1,  0)
-DEFINEELEMENTTYPEINFO(ELEMENT_TYPE_VAR,            sizeof(LPVOID), TYPE_GC_REF,   0, 1,  0)
+DEFINEELEMENTTYPEINFO(ELEMENT_TYPE_VAR,            -1,             TYPE_GC_OTHER, 0, 1,  0)
 
 DEFINEELEMENTTYPEINFO(ELEMENT_TYPE_ARRAY,          sizeof(LPVOID), TYPE_GC_REF,  0, 1,  0)
 
-// The following element used to be ELEMENT_TYPE_COPYCTOR, but it was removed, though the gap left.
-//DEFINEELEMENTTYPEINFO(ELEMENT_TYPE_COPYCTOR,       sizeof(LPVOID), TYPE_GC_BYREF, 0, 1,  0)       
-DEFINEELEMENTTYPEINFO(ELEMENT_TYPE_ARRAY+1,        0,              TYPE_GC_NONE,  0, 0,  0)       
+DEFINEELEMENTTYPEINFO(ELEMENT_TYPE_WITH,           -1,             TYPE_GC_OTHER, 0, 0,  0) 
 
 DEFINEELEMENTTYPEINFO(ELEMENT_TYPE_TYPEDBYREF,         sizeof(LPVOID)*2,TYPE_GC_BYREF, 0, 0,0)            
 DEFINEELEMENTTYPEINFO(ELEMENT_TYPE_VALUEARRAY,     -1,             TYPE_GC_OTHER, 0, 0, 0)
@@ -168,9 +171,7 @@ DEFINEELEMENTTYPEINFO(ELEMENT_TYPE_FNPTR,          sizeof(LPVOID), TYPE_GC_NONE,
 DEFINEELEMENTTYPEINFO(ELEMENT_TYPE_OBJECT,         sizeof(LPVOID), TYPE_GC_REF, 0, 1,  0)
 DEFINEELEMENTTYPEINFO(ELEMENT_TYPE_SZARRAY,        sizeof(LPVOID), TYPE_GC_REF,  0, 1,  0)
 
-// generic array have been removed. Fill the gap
-//DEFINEELEMENTTYPEINFO(ELEMENT_TYPE_GENERICARRAY,   sizeof(LPVOID), TYPE_GC_REF,  0, 1,  0) 
-DEFINEELEMENTTYPEINFO(ELEMENT_TYPE_SZARRAY+1,      0,              TYPE_GC_NONE, 0, 0,  0)       
+DEFINEELEMENTTYPEINFO(ELEMENT_TYPE_MVAR,            -1,            TYPE_GC_OTHER, 0, 1,  0) 
 
 DEFINEELEMENTTYPEINFO(ELEMENT_TYPE_CMOD_REQD,      -1,             TYPE_GC_NONE,  0, 1,  0)
 
@@ -228,6 +229,7 @@ VOID SigPointer::SkipExactlyOne()
                 _ASSERTE(!"Illegal or unimplement type in COM+ sig.");
                 break;
             case ELEMENT_TYPE_VAR:
+            case ELEMENT_TYPE_MVAR:
                 GetData();      // Skip variable number
                 break;
             case ELEMENT_TYPE_OBJECT:
@@ -283,6 +285,15 @@ VOID SigPointer::SkipExactlyOne()
 
             case ELEMENT_TYPE_SENTINEL:
                 break;
+
+            case ELEMENT_TYPE_WITH:
+              SkipExactlyOne();          // Skip generic type
+              UINT32 argCnt = GetData(); // Get number of parameters
+              while (argCnt--)
+              {
+                SkipExactlyOne();        // Skip the parameters
+              }
+              break;
         }
     }
 }
@@ -291,11 +302,12 @@ VOID SigPointer::SkipExactlyOne()
 VOID SigPointer::SkipSignature()
 {
     // Skip calling convention;
-#ifdef _DEBUG
-    ULONG uCallConv =
-#endif
-    GetData();
+    ULONG uCallConv = GetData();
     _ASSERTE((uCallConv & IMAGE_CEE_CS_CALLCONV_MASK) != IMAGE_CEE_CS_CALLCONV_FIELD);
+
+    // Skip type parameter count
+    if (uCallConv & IMAGE_CEE_CS_CALLCONV_GENERIC)
+      GetData();
 
     // Get arg count;
     ULONG cArgs = GetData();
@@ -331,8 +343,8 @@ VOID SigPointer::GetSDArrayElementProps(SigPointer *pElemType, ULONG *pElemCount
 // Constructor.
 //------------------------------------------------------------------
 
-MetaSig::MetaSig(PCCOR_SIGNATURE szMetaSig, Module* pModule, 
-                 BOOL fConvertSigAsVarArg, MetaSigKind kind)
+MetaSig::MetaSig(PCCOR_SIGNATURE szMetaSig, Module* pModule, TypeHandle *classInst, TypeHandle *methodInst,
+                 BOOL fConvertSigAsVarArg, MetaSigKind kind, BOOL fParamTypeArg)
 {
 #ifdef _DEBUG
     FillMemory(this, sizeof(*this), 0xcc);
@@ -353,6 +365,11 @@ MetaSig::MetaSig(PCCOR_SIGNATURE szMetaSig, Module* pModule,
         case sigMember:
         {
             m_CallConv = (BYTE)psig.GetCallingConvInfo(); // Store calling convention
+
+            // Store type parameter count
+            if (m_CallConv & IMAGE_CEE_CS_CALLCONV_GENERIC)
+              psig.GetData();
+
             m_nArgs     = psig.GetData();  // Store number of arguments.
             m_pRetType  = psig;
             psig.Skip();
@@ -366,7 +383,10 @@ MetaSig::MetaSig(PCCOR_SIGNATURE szMetaSig, Module* pModule,
             break;
         }
     }
-    
+
+    m_classInst = classInst;
+    m_methodInst = methodInst;
+
     m_pStart    = psig;
     // used to treat some sigs as special case vararg
     // used by calli to unmanaged target
@@ -381,11 +401,43 @@ MetaSig::MetaSig(PCCOR_SIGNATURE szMetaSig, Module* pModule,
     m_fCacheInitted = 0;
     // Reset the iterator fields
     Reset();
+
+    if (fParamTypeArg)
+      m_CallConv = m_CallConv | CORINFO_CALLCONV_PARAMTYPE;
 }
 
-MetaSig::MetaSig(MethodDesc *pMD)
-{
-    *this = MetaSig(pMD->GetSig(),pMD->GetModule(), FALSE, sigMember);
+//@GENERICS: 
+// Helper constructor that constructs a method signature MetaSig from a MethodDesc
+// IMPORTANT: if classInst/methodInst is omitted then the instantiation info for the method
+// will be representative only as MethodDescs can be shared
+//
+// Also, if used on a shared instantiated method descriptor or instance method in a shared generic struct 
+// then the calling convention is fixed up to include the extra dictionary argument
+MetaSig::MetaSig(MethodDesc *pMD, TypeHandle *classInst, TypeHandle *methodInst) {
+    if (classInst == NULL && pMD->GetMethodTable()->IsArray())
+        classInst = pMD->GetMethodTable()->GetClassOrArrayInstantiation();
+    *this = MetaSig(pMD->GetSig(),
+                    pMD->GetModule(),
+                    classInst ? classInst : pMD->GetClassInstantiation(),
+                    methodInst ? methodInst : pMD->GetMethodInstantiation(),
+                    FALSE,
+                    sigMember,
+                    pMD->HasInstParam());
+}
+
+//@GENERICS: 
+// Helper constructor that constructs a field signature MetaSig from a FieldDesc
+// IMPORTANT: the classInst is omitted then the instantiation info for the field
+// will be representative only as FieldDescs can be shared
+//
+MetaSig::MetaSig(FieldDesc *pFD, TypeHandle *classInst) {
+    PCCOR_SIGNATURE pSig;
+    DWORD           cSig;
+
+    pFD->GetSig(&pSig, &cSig);
+
+    *this = MetaSig(pSig,pFD->GetModule(),classInst ? classInst : pFD->GetMethodTableOfEnclosingClass()->GetInstantiation(), NULL,
+      FALSE, sigField, FALSE);
 }
 
 
@@ -424,6 +476,27 @@ CorElementType MetaSig::PeekArg()
     else
     {
         CorElementType mt = m_pWalk.PeekElemType();
+
+        // Instantiate for variables and replace WITH by CLASS or VALUETYPE
+        switch (mt)
+        {
+          case ELEMENT_TYPE_VAR :
+          case ELEMENT_TYPE_MVAR :
+          {
+            TypeHandle typeHnd = m_pWalk.GetTypeHandle(m_pModule, NULL, FALSE, FALSE, FALSE, m_classInst, m_methodInst);
+            return typeHnd.GetSigCorElementType();
+          }
+
+          case ELEMENT_TYPE_WITH :
+          {
+            SigPointer sp = m_pWalk;
+            sp.GetElemType();
+            return sp.GetElemType();
+          }
+
+          default:
+            break;
+        }
         return mt;
     }
 }
@@ -444,6 +517,30 @@ CorElementType MetaSig::NextArg()
     {
         m_iCurArg++;
         CorElementType mt = m_pWalk.PeekElemType();
+
+        // Instantiate for variables and replace WITH by CLASS or VALUETYPE
+        switch (mt)
+        {
+          case ELEMENT_TYPE_VAR :
+          case ELEMENT_TYPE_MVAR :
+          {
+            TypeHandle typeHnd = m_pWalk.GetTypeHandle(m_pModule, NULL, FALSE, FALSE, FALSE, m_classInst, m_methodInst);
+            mt = typeHnd.GetSigCorElementType();
+            break;
+          }
+
+          case ELEMENT_TYPE_WITH :
+          {
+            SigPointer sp = m_pWalk;
+            sp.GetElemType();
+            mt = sp.GetElemType();
+            break;
+          }
+
+          default:
+            break;
+        }
+
         m_pWalk.Skip();
         return mt;
     }
@@ -480,7 +577,8 @@ CorElementType MetaSig::PrevArg()
 //------------------------------------------------------------------------
 /*static*/ UINT MetaSig::NumFixedArgs(Module* pModule, PCCOR_SIGNATURE pSig)
 {
-    MetaSig msig(pSig, pModule);
+  // Instantiations won't be used simply in counting arguments
+    MetaSig msig(pSig, pModule, NULL, NULL);
 
     return msig.NumFixedArgs();
 }
@@ -543,65 +641,16 @@ BOOL IsTypeRefOrDef(LPCSTR szClassName, Module *pModule, mdToken token)
     return true;
 }
 
-/************************************************************************/
-/* compare two method signatures, when 'sig2' may have ELEMENT_TYPE_VAR elements in it. 
-   note that we may load classes more often with this routine that with CompareMethodSig */
 
-BOOL MetaSig::CompareMethodSigs(PCCOR_SIGNATURE sig1, DWORD cSig1, Module* mod1, 
-                                PCCOR_SIGNATURE sig2, DWORD cSig2, Module* mod2, TypeHandle* varTypes)
-{
-    if (varTypes == 0)
-        return MetaSig::CompareMethodSigs(sig1, cSig1, mod1, sig2, cSig2, mod2);
-
-    SigPointer ptr1(sig1);
-    SigPointer ptr2(sig2);
-
-    unsigned callConv1 = ptr1.GetCallingConvInfo();
-    unsigned callConv2 = ptr2.GetCallingConvInfo();
-        
-    if ((callConv1 & (IMAGE_CEE_CS_CALLCONV_HASTHIS | IMAGE_CEE_CS_CALLCONV_MASK)) != 
-        (callConv2 & (IMAGE_CEE_CS_CALLCONV_HASTHIS | IMAGE_CEE_CS_CALLCONV_MASK)))
-        return FALSE;
-
-        // The + 1 is to check the return type as well as the arguments
-    unsigned numArgs1 = ptr1.GetData() + 1;
-    unsigned numArgs2 = ptr2.GetData() + 1;
-
-    if (numArgs1 != numArgs2 && (callConv1 & IMAGE_CEE_CS_CALLCONV_MASK) != IMAGE_CEE_CS_CALLCONV_VARARG)
-        return FALSE;
-
-    while (numArgs1 > 0 && numArgs2 > 0) {
-        CorElementType type1 = ptr1.PeekElemType();
-        CorElementType type2 = ptr2.PeekElemType();
-        if (CorTypeInfo::IsPrimitiveType(type1) && CorTypeInfo::IsPrimitiveType(type2)) {
-            if (type1 != type2)
-                return FALSE; 
-        }
-        else {
-            TypeHandle typeHnd1 = ptr1.GetTypeHandle(mod1);
-            TypeHandle typeHnd2 = ptr2.GetTypeHandle(mod2, NULL, FALSE, FALSE, varTypes);
-            if (typeHnd1 != typeHnd2)
-                return FALSE;
-        }
-        
-        ptr2.SkipExactlyOne();
-        ptr1.SkipExactlyOne();
-        --numArgs1; --numArgs2;
-    }
-
-    if (numArgs1 == numArgs2)
-        return TRUE;
-
-    if (numArgs1 > 0)
-        return (ptr1.GetData() == ELEMENT_TYPE_SENTINEL);
-    else 
-        return (ptr2.GetData() == ELEMENT_TYPE_SENTINEL);
-}
-
-TypeHandle SigPointer::GetTypeHandle(Module* pModule,OBJECTREF *pThrowable, 
+TypeHandle SigPointer::GetTypeHandle(Module* pModule,
+                                     OBJECTREF *pThrowable, 
                                      BOOL dontRestoreTypes,
                                      BOOL dontLoadTypes,
-                                     TypeHandle* varTypes) const
+                                     BOOL approxTypes,
+                                     TypeHandle *classInst, 
+                                     TypeHandle *methodInst, 
+                                     Pending *pending,
+				     Substitution *pSubst) const
 {
     if (pThrowable == THROW_ON_ERROR ) {
         THROWSCOMPLUSEXCEPTION();   
@@ -633,16 +682,85 @@ TypeHandle SigPointer::GetTypeHandle(Module* pModule,OBJECTREF *pThrowable,
         case ELEMENT_TYPE_TYPEDBYREF:
             return ElementTypeToTypeHandle(typ);
 
-        case ELEMENT_TYPE_VAR:
-            if (varTypes != 0) {
-                unsigned typeVar = psig.GetData();
-                return(varTypes[typeVar]);
+        case ELEMENT_TYPE_VAR:          {
+            DWORD index = psig.GetData(); 
+            if (pSubst && pSubst->inst)
+            {
+                SigPointer inst = SigPointer(pSubst->inst);
+                for (DWORD i = 0; i < index; i++) inst.SkipExactlyOne();
+                return inst.GetTypeHandle(pSubst->pModule, pThrowable, dontRestoreTypes, dontLoadTypes, approxTypes,
+                                          classInst, methodInst, pending, pSubst->rest);
             }
+            else if (classInst != NULL)
+            {
+              _ASSERTE(!classInst[index].IsNull());
+              return classInst[index];
+            }
+	    // @review GENERICS: this happens with 
+	    // (a) arrays, (b) loading of uninstantiated generic types that do loads of field types etc
+            LOG((LF_ALWAYS, LL_INFO1000, "GENERICS: Warning: GetTypeHandle on VAR without instantiation\n"));
             return TypeHandle(g_pObjectClass);
+          }
+
+        case ELEMENT_TYPE_MVAR:
+          {
+            if (!g_pConfig->IsGenericsEnabled())
+              return TypeHandle();
+            DWORD index = psig.GetData();
+            _ASSERTE(methodInst != NULL);
+            _ASSERTE(!methodInst[index].IsNull());
+            return methodInst[index]; 
+          }
+
+        case ELEMENT_TYPE_WITH:
+          {
+            if (!g_pConfig->IsGenericsEnabled())
+              break;
+            if (approxTypes && psig.PeekElemType() == ELEMENT_TYPE_CLASS)
+	          return g_pObjectClass;
+
+            TypeHandle genericType = psig.GetTypeHandle(pModule, pThrowable, dontRestoreTypes, dontLoadTypes, approxTypes,
+							classInst, methodInst, pending, pSubst);
+            if (genericType.IsNull()) 
+              return genericType;
+            psig.SkipExactlyOne();
+
+            // The number of type parameters follows
+            DWORD ntypars = psig.GetData();
+            TypeHandle *thisinst = (TypeHandle*) _alloca(ntypars * sizeof(TypeHandle));
+
+            // Finally we gather up the type parameters themselves
+            for (unsigned i = 0; i < ntypars; i++)
+            {
+              thisinst[i] = psig.GetTypeHandle(pModule, pThrowable, dontRestoreTypes, dontLoadTypes, approxTypes,
+                                               classInst, methodInst, pending, pSubst);
+              if (thisinst[i].IsNull()) 
+                return thisinst[i];
+              psig.SkipExactlyOne();
+            }
+
+            // Now check if it's in the pending list
+            Pending *here = pending;
+            NameHandle name(genericType, thisinst);
+            while (here != NULL)
+            {
+              //@review GENERICS: is it really the case that we are always looking for a TypeDef or instantiated type?
+              if (*here->m_pHandle == name)
+                return here->m_Type;
+              here = here->m_pNext;
+            }
+
+            // Now make the instantiated type
+            // The class loader will check the arity and for already-instantiated types
+            return ClassLoader::LoadGenericInstantiation(genericType, thisinst, ntypars, pThrowable, pending);
+          }
+
 
         case ELEMENT_TYPE_CLASS:
         case ELEMENT_TYPE_VALUETYPE: 
         {
+            if (approxTypes && typ==ELEMENT_TYPE_CLASS)
+			  return ElementTypeToTypeHandle(ELEMENT_TYPE_OBJECT);
             mdTypeRef typeref = psig.GetToken();
 
             _ASSERTE(TypeFromToken(typeref) == mdtTypeRef ||
@@ -653,13 +771,18 @@ TypeHandle SigPointer::GetTypeHandle(Module* pModule,OBJECTREF *pThrowable,
             if (dontLoadTypes)
                 name.SetTokenNotToLoad(tdAllTypes);
             name.SetRestore(!dontRestoreTypes);
-           return(pModule->GetClassLoader()->LoadTypeHandle(&name, pThrowable, TRUE));
+           return(pModule->GetClassLoader()->LoadTypeHandle(&name, pThrowable, classInst, methodInst, pending));
         }
 
         case ELEMENT_TYPE_ARRAY:
         case ELEMENT_TYPE_SZARRAY:
         {
-            TypeHandle elemType = psig.GetTypeHandle(pModule, pThrowable, dontRestoreTypes, dontLoadTypes, varTypes);
+            if (approxTypes)
+	       return ElementTypeToTypeHandle(ELEMENT_TYPE_OBJECT);
+
+            TypeHandle elemType = psig.GetTypeHandle(pModule, pThrowable, dontRestoreTypes, dontLoadTypes, approxTypes,
+						     classInst, methodInst, pending, pSubst);
+
             if (elemType.IsNull())
             {
                 TypeHandle typeHandle;
@@ -675,12 +798,14 @@ TypeHandle SigPointer::GetTypeHandle(Module* pModule,OBJECTREF *pThrowable,
 
         case ELEMENT_TYPE_PINNED:
             // Return what follows
-            return(psig.GetTypeHandle(pModule, pThrowable, dontRestoreTypes, dontLoadTypes, varTypes));
+	  return(psig.GetTypeHandle(pModule, pThrowable, dontRestoreTypes, dontLoadTypes, approxTypes,
+				    classInst, methodInst, pending, pSubst));
 
         case ELEMENT_TYPE_BYREF:
         case ELEMENT_TYPE_PTR:
         {
-            TypeHandle baseType = psig.GetTypeHandle(pModule, pThrowable, dontRestoreTypes,dontLoadTypes, varTypes);
+	    TypeHandle baseType = psig.GetTypeHandle(pModule, pThrowable, dontRestoreTypes, dontLoadTypes, approxTypes, 
+						     classInst, methodInst, pending, pSubst);
             if (baseType.IsNull())
             {
                 TypeHandle typeHandle;
@@ -706,7 +831,7 @@ TypeHandle SigPointer::GetTypeHandle(Module* pModule,OBJECTREF *pThrowable,
             // A sub-signature describing the function follows. Expand this into
             // a version using type handles, so we normalize the signature
             // format over all modules.
-            pExpSig = ExpandSig::GetSig(psig.m_ptr, pModule);
+            pExpSig = ExpandSig::GetSig(psig.m_ptr, pModule, classInst, methodInst);
             if (!pExpSig)
             {
                 return TypeHandle();
@@ -742,28 +867,121 @@ TypeHandle SigPointer::GetTypeHandle(Module* pModule,OBJECTREF *pThrowable,
     return TypeHandle();
 }
 
-unsigned SigPointer::GetNameForType(Module* pModule, LPUTF8 buff, unsigned buffLen) const 
+
+// Does this type contain class or method type parameters whose instantiation cannot
+// be determined at JIT-compile time from the instantiations in the method context? 
+// Return a combination of hasClassVar and hasMethodVar flags.
+// See header file for more info.
+VarKind SigPointer::IsPolyType(MethodDesc* pContextMD) const
+{
+    SigPointer psig = *this;
+    CorElementType typ = psig.GetElemType();
+    switch(typ) {
+        case ELEMENT_TYPE_VAR:
+	{
+          DWORD index = psig.GetData();
+          TypeHandle* classInst = pContextMD->GetClassInstantiation();
+          _ASSERTE(classInst != NULL);
+          _ASSERTE(!classInst[index].IsNull());
+          if (classInst[index].IsSharableRep())
+            return hasClassVar;
+          else
+            return hasNoVars;
+	}
+
+        case ELEMENT_TYPE_MVAR:
+	{
+          DWORD index = psig.GetData();
+          TypeHandle* methodInst = pContextMD->GetMethodInstantiation();
+          _ASSERTE(methodInst != NULL);
+          _ASSERTE(!methodInst[index].IsNull());
+          if (methodInst[index].IsSharableRep())
+            return hasMethodVar;
+          else
+            return hasNoVars;
+	}
+
+        case ELEMENT_TYPE_R:
+        case ELEMENT_TYPE_U:
+        case ELEMENT_TYPE_I:
+        case ELEMENT_TYPE_STRING:
+        case ELEMENT_TYPE_OBJECT:
+        case ELEMENT_TYPE_I1:      
+        case ELEMENT_TYPE_U1:      
+        case ELEMENT_TYPE_BOOLEAN:   
+        case ELEMENT_TYPE_I2:
+        case ELEMENT_TYPE_U2:
+        case ELEMENT_TYPE_CHAR:
+        case ELEMENT_TYPE_I4:
+        case ELEMENT_TYPE_U4:
+        case ELEMENT_TYPE_I8:
+        case ELEMENT_TYPE_U8:
+        case ELEMENT_TYPE_R4:
+        case ELEMENT_TYPE_R8:
+        case ELEMENT_TYPE_VOID:
+        case ELEMENT_TYPE_CLASS:
+        case ELEMENT_TYPE_VALUETYPE: 
+        case ELEMENT_TYPE_TYPEDBYREF:
+            return hasNoVars;
+
+        case ELEMENT_TYPE_WITH:
+          {
+            // In future the type constructor might be a type variable!
+            VarKind k = psig.IsPolyType(pContextMD);
+            psig.SkipExactlyOne();
+
+            unsigned ntypars = psig.GetData();
+            for (unsigned i = 0; i < ntypars; i++)
+            {
+              k = (VarKind) (psig.IsPolyType(pContextMD) | k);
+              psig.SkipExactlyOne();
+            }
+            return k;
+          }
+
+        case ELEMENT_TYPE_ARRAY:
+        case ELEMENT_TYPE_VALUEARRAY:
+        case ELEMENT_TYPE_SZARRAY:
+        case ELEMENT_TYPE_PINNED:
+        case ELEMENT_TYPE_BYREF:
+        case ELEMENT_TYPE_PTR:
+        {
+            return psig.IsPolyType(pContextMD);
+        }
+
+        case ELEMENT_TYPE_FNPTR:
+            _ASSERTE(!"NYI");
+            return hasNoVars;
+
+        default:
+            _ASSERTE(!"Bad type");
+    }
+    return hasNoVars;
+}
+
+unsigned SigPointer::GetNameForType(Module* pModule, LPUTF8 buff, unsigned buffLen, TypeHandle *classInst, TypeHandle *methodInst) const 
 {
 
-    TypeHandle typeHnd = GetTypeHandle(pModule);
+    TypeHandle typeHnd = GetTypeHandle(pModule, NULL, TRUE, FALSE, FALSE, classInst, methodInst);
     if (typeHnd.IsNull())
         return(0);
     return(typeHnd.GetName(buff, buffLen));
 }
 
-BOOL SigPointer::IsStringType(Module* pModule) const
+BOOL SigPointer::IsStringType(Module* pModule, TypeHandle *classInst, TypeHandle *methodInst) const
 {
     _ASSERTE(pModule);
 
     IMDInternalImport *pInternalImport = pModule->GetMDImport();
     SigPointer psig = *this;
     UINT32 typ = psig.GetElemType();
-    if (typ == ELEMENT_TYPE_STRING)
+    switch (typ)
     {
+      case ELEMENT_TYPE_STRING :
         return TRUE;
-    }
-    if (typ == ELEMENT_TYPE_CLASS)
-    {
+ 
+      case ELEMENT_TYPE_CLASS : 
+      {
         LPCUTF8 pclsname;
         LPCUTF8 pszNamespace;
         mdToken token = psig.GetToken();
@@ -783,6 +1001,18 @@ BOOL SigPointer::IsStringType(Module* pModule) const
             return FALSE;
         
         return !strcmp(pszNamespace, g_SystemNS);
+      }
+      
+      case ELEMENT_TYPE_VAR :
+        _ASSERTE(classInst != NULL);
+        break;
+
+      case ELEMENT_TYPE_MVAR :
+        _ASSERTE(methodInst != NULL);
+        break;
+
+      default:
+        break;
     }
     return FALSE;
 }
@@ -792,7 +1022,7 @@ BOOL SigPointer::IsStringType(Module* pModule) const
 //------------------------------------------------------------------------
 // Tests if the element class name is szClassName. 
 //------------------------------------------------------------------------
-BOOL SigPointer::IsClass(Module* pModule, LPCUTF8 szClassName) const
+BOOL SigPointer::IsClass(Module* pModule, LPCUTF8 szClassName, TypeHandle *classInst, TypeHandle *methodInst) const
 {
     _ASSERTE(pModule);
     _ASSERTE(szClassName);
@@ -801,9 +1031,23 @@ BOOL SigPointer::IsClass(Module* pModule, LPCUTF8 szClassName) const
     UINT32 typ = psig.GetElemType();
 
     _ASSERTE((typ == ELEMENT_TYPE_CLASS)  || (typ == ELEMENT_TYPE_VALUETYPE) || 
-             (typ == ELEMENT_TYPE_OBJECT) || (typ == ELEMENT_TYPE_STRING));
+             (typ == ELEMENT_TYPE_OBJECT) || (typ == ELEMENT_TYPE_STRING) || 
+	     (typ == ELEMENT_TYPE_WITH) || (typ == ELEMENT_TYPE_VAR) || (typ == ELEMENT_TYPE_MVAR));
 
-    if ((typ == ELEMENT_TYPE_CLASS) || (typ == ELEMENT_TYPE_VALUETYPE))
+
+    if (typ == ELEMENT_TYPE_VAR)
+    {
+      _ASSERTE(classInst != NULL);
+      TypeHandle ty = classInst[psig.GetData()];
+      return IsTypeRefOrDef(szClassName, ty.GetModule(), ty.GetClass()->GetCl());
+    }
+    else if (typ == ELEMENT_TYPE_MVAR)
+    {
+      _ASSERTE(methodInst != NULL);
+      TypeHandle ty = methodInst[psig.GetData()];
+      return IsTypeRefOrDef(szClassName, ty.GetModule(), ty.GetClass()->GetCl());
+    }
+    else if ((typ == ELEMENT_TYPE_CLASS) || (typ == ELEMENT_TYPE_VALUETYPE))
     {
         mdTypeRef typeref = psig.GetToken();
         return IsTypeRefOrDef(szClassName, pModule, typeref);
@@ -844,17 +1088,21 @@ BOOL SigPointer::HasCustomModifier(Module *pModule, LPCSTR szModName, CorElement
     return FALSE;
 }
         
-CorElementType SigPointer::Normalize(Module* pModule) const
+CorElementType SigPointer::Normalize(Module* pModule, TypeHandle *classInst, TypeHandle *methodInst) const
 {
     CorElementType type = PeekElemType();
-    return Normalize(pModule, type);
+    return Normalize(pModule, type, classInst, methodInst);
 }
 
-CorElementType SigPointer::Normalize(Module* pModule, CorElementType type) const
+CorElementType SigPointer::Normalize(Module* pModule, CorElementType type, TypeHandle *classInst, TypeHandle *methodInst) const
 {
-    if (type == ELEMENT_TYPE_VALUETYPE) 
+  switch (type)
+  {
+    case ELEMENT_TYPE_VALUETYPE :
+    case ELEMENT_TYPE_VAR :
+    case ELEMENT_TYPE_MVAR :
     {
-        TypeHandle typeHnd = GetTypeHandle(pModule);
+        TypeHandle typeHnd = GetTypeHandle(pModule, NULL, FALSE, FALSE, FALSE, classInst, methodInst);
 
         // If we cannot resolve to the type, we cannot determine that a value type is
         // actually an enum is actually an int32 (or whatever).  Except for wierd race
@@ -865,8 +1113,21 @@ CorElementType SigPointer::Normalize(Module* pModule, CorElementType type) const
         //
         if (!typeHnd.IsNull())
             return(typeHnd.GetNormCorElementType());
+        break;
     }
-    return(type);
+
+   case ELEMENT_TYPE_WITH :
+      {
+        SigPointer sp = *this;
+        sp.GetElemType();
+        return sp.PeekElemType();
+      }
+
+   default:
+       break;
+  }
+
+  return(type);
 }
 
 CorElementType MetaSig::PeekArgNormalized() 
@@ -877,7 +1138,7 @@ CorElementType MetaSig::PeekArgNormalized()
     }
     else
     {
-        CorElementType mt = m_pWalk.Normalize(m_pModule);
+        CorElementType mt = m_pWalk.Normalize(m_pModule, m_classInst, m_methodInst);
         return mt;
     }
 }
@@ -887,13 +1148,13 @@ CorElementType MetaSig::PeekArgNormalized()
 // Returns size of that element in bytes. This is the minimum size that a
 // field of this type would occupy inside an object. 
 //------------------------------------------------------------------------
-UINT SigPointer::SizeOf(Module* pModule) const
+UINT SigPointer::SizeOf(Module* pModule, TypeHandle *classInst, TypeHandle *methodInst) const
 {
     CorElementType etype = PeekElemType();
-    return SizeOf(pModule, etype);
+    return SizeOf(pModule, etype, classInst, methodInst);
 }
 
-UINT SigPointer::SizeOf(Module* pModule, CorElementType etype) const
+UINT SigPointer::SizeOf(Module* pModule, CorElementType etype, TypeHandle *classInst, TypeHandle *methodInst) const
 {
 
 #ifdef _DEBUG
@@ -909,25 +1170,89 @@ UINT SigPointer::SizeOf(Module* pModule, CorElementType etype) const
         return cbsize;
     }
 
-    if (etype == ELEMENT_TYPE_VALUETYPE)
+    TypeHandle th = TypeHandle();
+
+    switch (etype)
     {
-        TypeHandle th = GetTypeHandle(pModule, NULL, TRUE);
+      // Parameterized (non-value) classes are always pointer-sized
+      case ELEMENT_TYPE_WITH :
+      {
+        SigPointer sp = *this;
+        sp.GetElemType();
+        if (sp.PeekElemType() == ELEMENT_TYPE_CLASS) 
+          return sizeof(LPVOID);
+        // fall through to value type case
+      }
+
+      case ELEMENT_TYPE_VALUETYPE :
+      {
+        th = GetTypeHandle(pModule, NULL, TRUE, FALSE, FALSE, classInst, methodInst);
         EEClass* pClass = th.AsClass();
         _ASSERTE(pClass);
-        return pClass->GetNumInstanceFieldBytes();
-    }
-    else if (etype == ELEMENT_TYPE_VALUEARRAY)
-    {   
+        return pClass->GetAlignedNumInstanceFieldBytes();
+      }
+
+      case ELEMENT_TYPE_VALUEARRAY :
+      {
         SigPointer elemType;    
         ULONG count;    
         GetSDArrayElementProps(&elemType, &count);  
-        UINT ret = elemType.SizeOf(pModule) * count;   
+        UINT ret = elemType.SizeOf(pModule, classInst, methodInst) * count;   
         ret = (ret + 3) & ~3;       // round up to dword alignment  
         return(ret);    
-    }   
-    _ASSERTE(0);
-    return 0;
+      }
+
+      // For class and method variables we just look up the instantiation; if not present assume reference inst
+      case ELEMENT_TYPE_VAR :       
+      {
+        if (classInst == NULL) 
+        {
+          LOG((LF_ALWAYS, LL_INFO1000, "GENERICS: Warning: SizeOf on VAR without instantiation\n"));
+          return sizeof(LPVOID);
+        }
+
+        SigPointer sp = *this;
+        sp.GetElemType();
+        ULONG index = sp.GetData();
+        th = (TypeHandle) (classInst[index]);
+        break;
+      }
+
+      case ELEMENT_TYPE_MVAR :
+      {
+        if (methodInst == NULL) 
+        {
+          LOG((LF_ALWAYS, LL_INFO1000, "GENERICS: Warning: SizeOf on MVAR without instantiation\n"));
+          return sizeof(LPVOID);
+        }
+
+        SigPointer sp = *this;
+        sp.GetElemType();
+        ULONG index = sp.GetData();
+        th = (TypeHandle) (methodInst[index]);
+        _ASSERTE(!th.IsNull());
+        break;
+      }
+
+      default :  
+        _ASSERTE(!"Bad element type in SizeOf");
+    }
+
+    // If we get to here we've got a type handle in our hands
+    _ASSERTE(!th.IsNull());
+    etype = th.GetSigCorElementType();
+    cbsize = gElementTypeInfo[etype].m_cbSize;
+    if (cbsize != -1)
+    {
+        return cbsize;
+    }
+    _ASSERTE(etype == ELEMENT_TYPE_VALUETYPE);
+
+    EEClass* pClass = th.AsClass();
+    _ASSERTE(pClass);
+    return pClass->GetAlignedNumInstanceFieldBytes();    
 }
+
 
 //------------------------------------------------------------------
 // Determines if the current argument is System.String.
@@ -936,7 +1261,7 @@ UINT SigPointer::SizeOf(Module* pModule, CorElementType etype) const
 
 BOOL MetaSig::IsStringType() const
 {
-    return m_pLastType.IsStringType(m_pModule);
+    return m_pLastType.IsStringType(m_pModule, m_classInst, m_methodInst);
 }
 
 
@@ -946,7 +1271,7 @@ BOOL MetaSig::IsStringType() const
 //------------------------------------------------------------------
 BOOL MetaSig::IsClass(LPCUTF8 szClassName) const
 {
-    return m_pLastType.IsClass(m_pModule, szClassName);
+    return m_pLastType.IsClass(m_pModule, szClassName, m_classInst, m_methodInst);
 }
 
 
@@ -958,7 +1283,7 @@ BOOL MetaSig::IsClass(LPCUTF8 szClassName) const
 //  The arg type must be an ELEMENT_TYPE_BYREF
 //  ref to array needs additional arg
 //------------------------------------------------------------------
-CorElementType MetaSig::GetByRefType(EEClass** pClass, OBJECTREF *pThrowable) const
+CorElementType MetaSig::GetByRefType(TypeHandle *pTy, OBJECTREF *pThrowable) const
 {
         SigPointer sigptr(m_pLastType);
 
@@ -969,8 +1294,7 @@ CorElementType MetaSig::GetByRefType(EEClass** pClass, OBJECTREF *pThrowable) co
         {
             _ASSERTE(typ != ELEMENT_TYPE_TYPEDBYREF);
             TypeHandle th = sigptr.GetTypeHandle(m_pModule,pThrowable);
-            //*pClass = th.AsClass();
-            *pClass = th.GetMethodTable()->GetClass();
+            *pTy = th;
             if (pThrowableAvailable(pThrowable) && *pThrowable != NULL)
                 return ELEMENT_TYPE_END;
         }
@@ -984,7 +1308,7 @@ CorElementType MetaSig::GetByRefType(EEClass** pClass, OBJECTREF *pThrowable) co
 
 BOOL MetaSig::IsStringReturnType() const
 {
-    return m_pRetType.IsStringType(m_pModule);
+    return m_pRetType.IsStringType(m_pModule, m_classInst, m_methodInst);
 }
 
 
@@ -1097,6 +1421,7 @@ BOOL CompareTypeTokens(mdToken tk1, mdToken tk2, Module *pModule1, Module *pModu
 
 //
 // Compare the next elements in two sigs.
+// @GENERICS: instantiation of the type variables in the second signature
 //
 BOOL MetaSig::CompareElementType(
     PCCOR_SIGNATURE &pSig1,
@@ -1104,10 +1429,14 @@ BOOL MetaSig::CompareElementType(
     PCCOR_SIGNATURE pEndSig1, // end of sig1
     PCCOR_SIGNATURE pEndSig2, // end of sig2
     Module*         pModule1,
-    Module*         pModule2
+    Module*         pModule2,
+    Substitution*   pSubst1,
+    Substitution*   pSubst2,
+    SigPointer *pMethodInst1,
+    SigPointer *pMethodInst2
 )
 {
-    CorElementType Type;
+    CorElementType Type1;
     CorElementType Type2;
 
 
@@ -1118,12 +1447,60 @@ BOOL MetaSig::CompareElementType(
     if (pSig1 >= pEndSig1 || pSig2 >= pEndSig2)
         return FALSE; // end of sig encountered prematurely
 
-    Type = CorSigUncompressElementType(pSig1);
+    if (*pSig2 == ELEMENT_TYPE_VAR && pSubst2 != NULL && pSubst2->inst != NULL)
+      {
+        SigPointer inst = SigPointer(pSubst2->inst);
+        pSig2++;
+        DWORD index = CorSigUncompressData(pSig2);
+        for (DWORD i = 0; i < index; i++) inst.SkipExactlyOne();
+        PCCOR_SIGNATURE pSig3 = inst.GetPtr();
+        inst.SkipExactlyOne();
+        PCCOR_SIGNATURE pEndSig3 = inst.GetPtr();
+        return CompareElementType(pSig1, pSig3, pEndSig1, pEndSig3, pModule1, pSubst2->pModule, pSubst1, pSubst2->rest, pMethodInst1, NULL);
+      }
+
+    if (*pSig1 == ELEMENT_TYPE_VAR && pSubst1 != NULL && pSubst1->inst != NULL)
+      {
+        SigPointer inst = SigPointer(pSubst1->inst);
+        pSig1++;
+        DWORD index = CorSigUncompressData(pSig1);
+        for (DWORD i = 0; i < index; i++) inst.SkipExactlyOne();
+        PCCOR_SIGNATURE pSig3 = inst.GetPtr();
+        inst.SkipExactlyOne();
+        PCCOR_SIGNATURE pEndSig3 = inst.GetPtr();
+        return CompareElementType(pSig3, pSig2, pEndSig3, pEndSig2, pSubst1->pModule, pModule2, pSubst1->rest, pSubst2, NULL, pMethodInst2);
+      }
+
+    if (*pSig1 == ELEMENT_TYPE_MVAR && pMethodInst1 != NULL)
+      {
+        SigPointer inst = *pMethodInst1;
+        pSig1++;
+        DWORD index = CorSigUncompressData(pSig1);
+        for (DWORD i = 0; i < index; i++) inst.SkipExactlyOne();
+        PCCOR_SIGNATURE pSig3 = inst.GetPtr();
+        inst.SkipExactlyOne();
+        PCCOR_SIGNATURE pEndSig3 = inst.GetPtr();
+        return(CompareElementType(pSig3, pSig2, pEndSig3, pEndSig2, pModule1, pModule2, NULL, pSubst2, NULL, pMethodInst2));
+      }
+
+    if (*pSig2 == ELEMENT_TYPE_MVAR && pMethodInst2 != NULL)
+      {
+        SigPointer inst = *pMethodInst2;
+        pSig2++;
+        DWORD index = CorSigUncompressData(pSig2);
+        for (DWORD i = 0; i < index; i++) inst.SkipExactlyOne();
+        PCCOR_SIGNATURE pSig3 = inst.GetPtr();
+        inst.SkipExactlyOne();
+        PCCOR_SIGNATURE pEndSig3 = inst.GetPtr();
+        return(CompareElementType(pSig1, pSig3, pEndSig1, pEndSig3, pModule1, pModule2, pSubst1, NULL, pMethodInst1, NULL));
+      }
+
+    Type1 = CorSigUncompressElementType(pSig1);
     Type2 = CorSigUncompressElementType(pSig2);
 
-    if (Type != Type2)
+    if (Type1 != Type2)
     {
-        if (Type == ELEMENT_TYPE_INTERNAL || Type2 == ELEMENT_TYPE_INTERNAL)
+        if (Type1 == ELEMENT_TYPE_INTERNAL || Type2 == ELEMENT_TYPE_INTERNAL)
         {
             TypeHandle      hInternal;
             PCCOR_SIGNATURE pOtherSig;
@@ -1132,7 +1509,7 @@ BOOL MetaSig::CompareElementType(
 
             // One type is already loaded, collect all the necessary information
             // to identify the other type.
-            if (Type == ELEMENT_TYPE_INTERNAL)
+            if (Type1 == ELEMENT_TYPE_INTERNAL)
             {
                 CorSigUncompressPointer(pSig1, (void**)&hInternal);
                 eOtherType = Type2;
@@ -1142,7 +1519,7 @@ BOOL MetaSig::CompareElementType(
             else
             {
                 CorSigUncompressPointer(pSig2, (void**)&hInternal);
-                eOtherType = Type;
+                eOtherType = Type1;
                 pOtherSig = pSig1;
                 pOtherModule = pModule1;
             }
@@ -1186,7 +1563,7 @@ BOOL MetaSig::CompareElementType(
             return FALSE; // types must be the same
     }
 
-    switch (Type)
+    switch (Type1)
     {
         default:
         {
@@ -1218,6 +1595,7 @@ BOOL MetaSig::CompareElementType(
 
 
         case ELEMENT_TYPE_VAR: 
+        case ELEMENT_TYPE_MVAR:
         {
             unsigned varNum1 = CorSigUncompressData(pSig1);
             unsigned varNum2 = CorSigUncompressData(pSig2);
@@ -1245,7 +1623,7 @@ BOOL MetaSig::CompareElementType(
         case ELEMENT_TYPE_PTR:
         case ELEMENT_TYPE_BYREF:
         {
-            if (!CompareElementType(pSig1, pSig2, pEndSig1, pEndSig2, pModule1, pModule2))
+            if (!CompareElementType(pSig1, pSig2, pEndSig1, pEndSig2, pModule1, pModule2, pSubst1, pSubst2, pMethodInst1, pMethodInst2))
                 return(FALSE);
             return(TRUE);
         }
@@ -1271,10 +1649,27 @@ BOOL MetaSig::CompareElementType(
 
             if (argCnt1 != argCnt2)
                 return(FALSE);
-            if (!CompareElementType(pSig1, pSig2, pEndSig1, pEndSig2, pModule1, pModule2))
+            if (!CompareElementType(pSig1, pSig2, pEndSig1, pEndSig2, pModule1, pModule2, pSubst1, pSubst2, pMethodInst1, pMethodInst2))
                 return(FALSE);
             while(argCnt1 > 0) {
-                if (!CompareElementType(pSig1, pSig2, pEndSig1, pEndSig2, pModule1, pModule2))
+                if (!CompareElementType(pSig1, pSig2, pEndSig1, pEndSig2, pModule1, pModule2, pSubst1, pSubst2, pMethodInst1, pMethodInst2))
+                    return(FALSE);
+                --argCnt1;
+            }
+            break;
+        }
+        case ELEMENT_TYPE_WITH:
+        {
+          // Type constructors
+            if (!CompareElementType(pSig1, pSig2, pEndSig1, pEndSig2, pModule1, pModule2, pSubst1, pSubst2, pMethodInst1, pMethodInst2))
+                return(FALSE);
+            DWORD argCnt1 = CorSigUncompressData(pSig1);    // Get Arg Counts
+            DWORD argCnt2 = CorSigUncompressData(pSig2);
+
+            if (argCnt1 != argCnt2)
+                return(FALSE);
+            while(argCnt1 > 0) {
+                if (!CompareElementType(pSig1, pSig2, pEndSig1, pEndSig2, pModule1, pModule2, pSubst1, pSubst2, pMethodInst1, pMethodInst2))
                     return(FALSE);
                 --argCnt1;
             }
@@ -1287,7 +1682,7 @@ BOOL MetaSig::CompareElementType(
             DWORD rank1,rank2,dimension_sizes1,dimension_sizes2,dimension_lowerb1,dimension_lowerb2,i;
 
             // element type
-            if (CompareElementType(pSig1, pSig2, pEndSig1, pEndSig2, pModule1, pModule2) == FALSE)
+            if (CompareElementType(pSig1, pSig2, pEndSig1, pEndSig2, pModule1, pModule2, pSubst1, pSubst2, pMethodInst1, pMethodInst2) == FALSE)
                 return FALSE;
 
             rank1 = CorSigUncompressData(pSig1);
@@ -1363,14 +1758,17 @@ BOOL MetaSig::CompareElementType(
 
 //
 // Compare two method sigs and return whether they are the same
+// @GENERICS: instantiation of the type variables in the second signature
 //
 BOOL MetaSig::CompareMethodSigs(
     PCCOR_SIGNATURE pSignature1,
     DWORD       cSig1,
     Module*     pModule1,
+    Substitution *pSubst1,
     PCCOR_SIGNATURE pSignature2,
     DWORD       cSig2,
-    Module*     pModule2
+    Module*     pModule2,
+    Substitution *pSubst2
 )
 {
     PCCOR_SIGNATURE pSig1 = pSignature1;
@@ -1380,16 +1778,32 @@ BOOL MetaSig::CompareMethodSigs(
     DWORD           ArgCount1;
     DWORD           ArgCount2;
     DWORD           i;
+ 
+    // If scopes are the same, and sigs are same, can return.
+    // If the sigs aren't the same, but same scope, can't return yet, in
+    // case there are two AssemblyRefs pointing to the same assembly or such.
+    if ((pModule1 == pModule2) && (cSig1 == cSig2) && pSubst1 != NULL && pSubst2 != NULL &&
+        (!memcmp(pSig1, pSig2, cSig1)))
+        return(TRUE);
 
-
-    if (*pSig1 != *pSig2)
-        return FALSE;               // calling convention or hasThis mismatch
+    if ((*pSig1 & ~CORINFO_CALLCONV_PARAMTYPE) != (*pSig2 & ~CORINFO_CALLCONV_PARAMTYPE))
+        return(FALSE);               // calling convention or hasThis mismatch
 
     __int8 callConv = *pSig1;
 
     pSig1++;
     pSig2++;
 
+    if (callConv & IMAGE_CEE_CS_CALLCONV_GENERIC)
+    {
+      DWORD TyArgCount1 = CorSigUncompressData(pSig1);
+      DWORD TyArgCount2 = CorSigUncompressData(pSig2);
+  
+      if (TyArgCount1 != TyArgCount2)
+        return FALSE;
+    }
+
+    // <REVIEW>GENERICS: should cSig include the arity for generic methods? Is it actually ever used?</REVIEW>
     pEndSig1 = pSig1 + cSig1;
     pEndSig2 = pSig2 + cSig2;
 
@@ -1435,7 +1849,7 @@ BOOL MetaSig::CompareMethodSigs(
             _ASSERTE(*pSig2 != ELEMENT_TYPE_SENTINEL);
 
             // We are in bounds on both sides.  Compare the element.
-            if (CompareElementType(pSig1, pSig2, pEndSig1, pEndSig2, pModule1, pModule2) == FALSE)
+            if (CompareElementType(pSig1, pSig2, pEndSig1, pEndSig2, pModule1, pModule2, pSubst1, pSubst2) == FALSE)
                 return FALSE;
         }
 
@@ -1449,7 +1863,7 @@ BOOL MetaSig::CompareMethodSigs(
     // do return type as well
     for (i = 0; i <= ArgCount1; i++)
     {
-        if (CompareElementType(pSig1, pSig2, pEndSig1, pEndSig2, pModule1, pModule2) == FALSE)
+        if (CompareElementType(pSig1, pSig2, pEndSig1, pEndSig2, pModule1, pModule2, pSubst1, pSubst2) == FALSE)
             return FALSE;
     }
 
@@ -1478,7 +1892,7 @@ BOOL MetaSig::CompareFieldSigs(
     pEndSig1 = pSig1 + cSig1;
     pEndSig2 = pSig2 + cSig2;
 
-    return CompareElementType(++pSig1, ++pSig2, pEndSig1, pEndSig2, pModule1, pModule2);
+    return CompareElementType(++pSig1, ++pSig2, pEndSig1, pEndSig2, pModule1, pModule2, NULL, NULL);
 }
 
 
@@ -1488,7 +1902,7 @@ BOOL MetaSig::CompareFieldSigs(
 //------------------------------------------------------------------
 BOOL FieldSig::IsStringType() const
 {
-    return m_pStart.IsStringType(m_pModule);
+    return m_pStart.IsStringType(m_pModule, NULL, NULL);
 }
 
 
@@ -1938,6 +2352,7 @@ BOOL IsArgumentInRegister(int   *pNumRegistersUsed,
     if (callconv == IMAGE_CEE_CS_CALLCONV_VARARG && !fThis)
         return FALSE;
 
+    _ASSERTE(typ != ELEMENT_TYPE_VAR && typ != ELEMENT_TYPE_WITH && typ != ELEMENT_TYPE_MVAR);
     if ( (*pNumRegistersUsed) < NUM_ARGUMENT_REGISTERS ) {
         if (gElementTypeInfo[typ].m_enregister) {
             int registerIndex = (*pNumRegistersUsed)++;
@@ -1955,7 +2370,6 @@ BOOL IsArgumentInRegister(int   *pNumRegistersUsed,
 #endif
 }
 
-
 //------------------------------------------------------------------
 // Perform type-specific GC promotion on the value (based upon the
 // last type retrieved by NextArg()).
@@ -1965,6 +2379,7 @@ VOID MetaSig::GcScanRoots(LPVOID pValue, promote_func *fn, ScanContext* sc)
     Object **pArgPtr = (Object**)pValue;
 
     int  etype = m_pLastType.PeekElemType();
+ TryAgain:
     _ASSERTE(etype >= 0 && etype < ELEMENT_TYPE_MAX);
     switch (gElementTypeInfo[etype].m_gc)
     {
@@ -2027,8 +2442,15 @@ VOID MetaSig::GcScanRoots(LPVOID pValue, promote_func *fn, ScanContext* sc)
             // for value classes describes the state of the instance in its boxed
             // state.  Here we are dealing with an unboxed instance, so we must adjust
             // the object size and series offsets appropriately.
+            _ASSERTE(etype == ELEMENT_TYPE_VALUETYPE || etype == ELEMENT_TYPE_MVAR || etype == ELEMENT_TYPE_VAR || etype == ELEMENT_TYPE_WITH);
             {
                 TypeHandle th = GetTypeHandle(NULL, TRUE);
+                if (etype != ELEMENT_TYPE_VALUETYPE)  
+                  {
+                    etype = th.GetNormCorElementType();
+                    if (etype != ELEMENT_TYPE_VALUETYPE) goto TryAgain;
+                  }
+
                 MethodTable *pMT = th.AsMethodTable();
 
                 if (pMT->ContainsPointers())
@@ -2082,10 +2504,11 @@ VOID MetaSig::GcScanRoots(LPVOID pValue, promote_func *fn, ScanContext* sc)
 // Includes indication of "this" pointer since that's not reflected
 // in the sig.
 //------------------------------------------------------------------------
-/*static*/ UINT MetaSig::SizeOfVirtualFixedArgStack(Module* pModule, PCCOR_SIGNATURE szMetaSig, BOOL fIsStatic)
+/*static*/ UINT MetaSig::SizeOfVirtualFixedArgStack(Module* pModule, PCCOR_SIGNATURE szMetaSig, BOOL fIsStatic, TypeHandle *classInst, 
+  TypeHandle *methodInst)
 {
     UINT cb = 0;
-    MetaSig msig(szMetaSig, pModule);
+    MetaSig msig(szMetaSig, pModule, classInst, methodInst);
 
     if (!fIsStatic)
         cb += StackElemSize(sizeof(OBJECTREF));
@@ -2093,7 +2516,7 @@ VOID MetaSig::GcScanRoots(LPVOID pValue, promote_func *fn, ScanContext* sc)
         cb += StackElemSize(sizeof(OBJECTREF));
 
     while (ELEMENT_TYPE_END != msig.NextArg()) {
-        cb += StackElemSize(msig.GetArgProps().SizeOf(pModule));
+        cb += StackElemSize(msig.GetArgProps().SizeOf(pModule, classInst, methodInst));
     }
     return cb;
 
@@ -2130,11 +2553,12 @@ VOID MetaSig::GcScanRoots(LPVOID pValue, promote_func *fn, ScanContext* sc)
 // Includes indication of "this" pointer since that's not reflected
 // in the sig.
 //------------------------------------------------------------------------
-/*static*/ UINT MetaSig::SizeOfActualFixedArgStack(Module *pModule, PCCOR_SIGNATURE szMetaSig, BOOL fIsStatic)
+/*static*/ UINT MetaSig::SizeOfActualFixedArgStack(Module *pModule, PCCOR_SIGNATURE szMetaSig, BOOL fIsStatic, TypeHandle *classInst,
+  TypeHandle *methodInst, BOOL fParamTypeArg, int* paramTypeReg)
 {
     UINT cb = 0;
 
-    MetaSig msig(szMetaSig, pModule);
+    MetaSig msig(szMetaSig, pModule, classInst, methodInst, FALSE, sigMember, fParamTypeArg);
     int numregsused = 0;
     BOOL fIsVarArg = msig.IsVarArg();
     BYTE callconv  = msig.GetCallingConvention();
@@ -2168,8 +2592,16 @@ VOID MetaSig::GcScanRoots(LPVOID pValue, promote_func *fn, ScanContext* sc)
 
         // Parameterized type passed as last parameter, but not mentioned in the sig
     if (msig.GetCallingConventionInfo() & CORINFO_CALLCONV_PARAMTYPE)
+    {
         if (!IsArgumentInRegister(&numregsused, ELEMENT_TYPE_I, sizeof(void*), FALSE, callconv, NULL))
+	{
+  	    if (paramTypeReg)
+	      *paramTypeReg = -1;
             cb += sizeof(void*);
+	}
+	else if (paramTypeReg)
+	  *paramTypeReg = numregsused-1;
+    }
 
     return cb;
 }
@@ -2225,10 +2657,10 @@ void MetaSig::ForceSigWalk(BOOL fIsStatic)
     
     for (DWORD i=0;i<m_nArgs;i++) { 
         CorElementType corType = p.PeekElemType();
-        UINT cbSize = p.SizeOf(m_pModule, corType);   
+        UINT cbSize = p.SizeOf(m_pModule, corType, m_classInst, m_methodInst);   
         tmp_nVirtualStack += StackElemSize(cbSize);   
 
-        CorElementType type = p.Normalize(m_pModule, corType); 
+        CorElementType type = p.Normalize(m_pModule, corType, m_classInst, m_methodInst); 
 
         if (m_nArgs <= MAX_CACHED_SIG_SIZE)
         {
@@ -2344,18 +2776,11 @@ ULONG MetaSig::GetSignatureForTypeHandle(IMetaDataAssemblyEmit *pAssemblyEmitSco
         p += GetSignatureForTypeHandle(pAssemblyEmitScope, pEmitScope, 
                                        desc->GetElementTypeHandle(), p, bufferMax);
             
-        switch (arrayType)
+        if (arrayType == ELEMENT_TYPE_ARRAY)
         {
-        case ELEMENT_TYPE_SZARRAY:
-            break;
-                                    
-        case ELEMENT_TYPE_ARRAY:
             p += CorSigCompressDataSafe(desc->GetRank(), p, bufferMax);
             p += CorSigCompressDataSafe(0, p, bufferMax);
             p += CorSigCompressDataSafe(0, p, bufferMax);
-            break;
-        default:
-            break;
         }
     }
     else if (handle.IsTypeDesc())
@@ -2438,6 +2863,9 @@ ULONG MetaSig::GetSignatureForTypeHandle(IMetaDataAssemblyEmit *pAssemblyEmitSco
 		}
 		else
         {
+	        if (pMT->HasInstantiation())
+              p += CorSigCompressElementTypeSafe(ELEMENT_TYPE_WITH, p, bufferMax);
+
             // Beware of enums!  Can't use GetNormCorElementType() here.
 
             p += CorSigCompressElementTypeSafe(pMT->IsValueClass() 
@@ -2460,6 +2888,18 @@ ULONG MetaSig::GetSignatureForTypeHandle(IMetaDataAssemblyEmit *pAssemblyEmitSco
             }
 
             p += CorSigCompressTokenSafe(token, p, bufferMax);
+
+	    if (pMT->HasInstantiation())
+	    {
+	      p += CorSigCompressDataSafe(pMT->GetNumGenericArgs(), p, bufferMax);
+	      TypeHandle *inst = pMT->GetInstantiation();
+	      for (DWORD i = 0; i < pMT->GetNumGenericArgs(); i++)
+	      {
+                    p += GetSignatureForTypeHandle(pAssemblyEmitScope,
+                                                   pEmitScope, inst[i],
+                                                   p, bufferMax);
+	      }
+	    }
         }
     }
 
@@ -2595,6 +3035,7 @@ ULONG SigPointer::GetImportSignature(IMetaDataImport *pInputScope,
             return (ULONG)(p - buffer);
         }
 
+    case ELEMENT_TYPE_MVAR:
     case ELEMENT_TYPE_VAR:
         {
             ULONG size = CorSigUncompressData(m_ptr);
@@ -2658,6 +3099,13 @@ ULONG SigPointer::GetImportFunctionSignature(IMetaDataImport *pInputScope,
     int conv = CorSigUncompressCallingConv(m_ptr);
     p += CorSigCompressDataSafe(conv, p, bufferMax);
 
+    // Type parameter count
+    if (conv & IMAGE_CEE_CS_CALLCONV_GENERIC)
+    {
+      int tyArgCount = CorSigUncompressData(m_ptr);
+      p += CorSigCompressDataSafe(tyArgCount, p, bufferMax);
+    }
+
     // Arg count
     int argCount = CorSigUncompressData(m_ptr);
     p += CorSigCompressDataSafe(argCount, p, bufferMax);
@@ -2684,7 +3132,8 @@ ULONG SigPointer::GetImportFunctionSignature(IMetaDataImport *pInputScope,
 //----------------------------------------------------------
 /*static*/ CorPinvokeMap MetaSig::GetUnmanagedCallingConvention(Module *pModule, PCCOR_SIGNATURE pSig, ULONG cSig)
 {
-    MetaSig msig(pSig, pModule);
+    // Instantiations aren't relevant here
+    MetaSig msig(pSig, pModule, NULL, NULL);
     PCCOR_SIGNATURE pWalk = msig.m_pRetType.GetPtr();
     _ASSERTE(pWalk <= pSig + cSig);
     while (pWalk < pSig + cSig)

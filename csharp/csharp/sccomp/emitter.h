@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -57,6 +62,7 @@ public:
 
     void EmitAggregateDef(PAGGSYM sym);
     void EmitAggregateSpecialFields(PAGGSYM sym);
+    void EmitAggregateBases(PAGGSYM sym);
     void EmitMembVarDef(PMEMBVARSYM sym);
     void EmitPropertyDef(PPROPSYM sym);
     void EmitEventDef(PEVENTSYM sym);
@@ -97,9 +103,12 @@ public:
     void DeleteRelatedFieldTokens(INFILESYM *inputfile, mdToken token);
     void DeleteRelatedAssemblyTokens(INFILESYM *inputfile, mdToken token);
 
+    mdToken GetMethodRefAtConstructedType(PINSTAGGMETHSYM sym, mdToken tkClassParent, mdToken tkMethodParent);
     mdToken GetMethodRef(PMETHSYM sym);
+    mdToken GetMethodInstantiation(SYM *instmeth, mdToken parent, unsigned short cMethArgs, PTYPESYM *ppMethArgs, mdToken *slot, mdToken tkClassParent, mdToken tkMethodParent);
     mdToken GetMembVarRef(PMEMBVARSYM sym);
-    mdToken GetTypeRef(PTYPESYM sym, bool noDefAllowed = false);
+    mdToken GetMembVarRefAtConstructedType(PINSTAGGMEMBVARSYM sym);
+    mdToken GetTypeRef(PTYPESYM sym, bool noDefAllowed = false, mdToken tkClassParent = mdTokenNil, mdToken tkMethodParent = mdTokenNil);
     mdToken GetArrayMethodRef(PARRAYSYM sym, ARRAYMETHOD methodId);
     mdToken GetSignatureRef(int cTypes, PTYPESYM * arrTypes);
     mdString GetStringRef(const STRCONST * string);
@@ -132,6 +141,8 @@ protected:
     PCOR_SIGNATURE EmitSignatureUInt(PCOR_SIGNATURE curSig, ULONG b);
     PCOR_SIGNATURE EmitSignatureToken(PCOR_SIGNATURE curSig, mdToken token);
     PCOR_SIGNATURE EmitSignatureType(PCOR_SIGNATURE sig, PTYPESYM type);
+    PCOR_SIGNATURE EmitSignatureForMethInst(PCOR_SIGNATURE sig, unsigned short cMethArgs, PTYPESYM *ppMethArgs);
+    mdToken GetTypeSpec(PTYPESYM sym, bool noDefAllowed, mdToken tkClassParent, mdToken tkMethodParent);
     PCOR_SIGNATURE GrowSignature(PCOR_SIGNATURE curSig);
     PCOR_SIGNATURE EnsureSignatureSize(ULONG cb);
     PCOR_SIGNATURE EndSignature(PCOR_SIGNATURE curSig, int * cbSig);
@@ -141,6 +152,8 @@ protected:
     bool VariantFromConstVal(TYPESYM * type, CONSTVAL * cv, VARIANT * v);
     mdToken GetScopeForTypeRef(SYM *sym);
     void EmitDebugNamespace(NSSYM * ns);
+    mdToken GetMethodRefGivenParent(PMETHSYM sym, mdToken parent);
+    mdToken GetMembVarRefGivenParent(PMEMBVARSYM sym, mdToken parent);
 
     void RecordEmitToken(mdToken * tokref);
     void EraseEmitTokens();

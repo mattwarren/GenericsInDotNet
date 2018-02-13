@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -47,6 +52,8 @@ const TOKENID CLSDREC::accessTokens[] = {
 //
 CLSDREC::CLSDREC() 
 {
+        constraints = NULL;
+        end_of_constraints = &constraints;
 }
 
 
@@ -311,6 +318,15 @@ void CLSDREC::checkUnsafe(BASENODE * tree, PINFILESYM inputfile, TYPESYM * type)
 // never displays an error message
 bool CLSDREC::checkAccess(SYM * target, PARENTSYM * place, SYM ** badAccess, SYM * qualifier)
 {
+    // GENERICS: access is not done w.r.t instantiations.
+	ASSERT(!(place && place->kind == SK_INSTAGGSYM)); 
+	
+    PARENTSYM * origPlace = place;    
+    // Need to walk up place to find a class or namespace...
+    while (place && !place->isAggParent() && place->kind != SK_NSSYM) {
+        place = place->parent;
+    }
+    
 
 TRYAGAIN:
     switch (target->access) {
@@ -321,7 +337,7 @@ TRYAGAIN:
         //
         // check if place is this class, or a nested class
         //
-        if (place->kind == SK_AGGSYM)
+        if (place && place->isAggParent())
         {
             AGGSYM * targetClass = target->parent->asAGGSYM();
             do
@@ -332,7 +348,7 @@ TRYAGAIN:
                 }
 
                 place = place->parent;
-            } while (place->kind == SK_AGGSYM);
+            } while (place->isAggParent());
         }
         break;
 
@@ -342,11 +358,11 @@ TRYAGAIN:
         // ensure we add the inputfile ref to the assembly we're emiting
         //
         target->getInputFile()->hasBeenRefed = true;
-        place->getInputFile()->hasBeenRefed = true;
-        if (target->getAssemblyIndex() == place->getAssemblyIndex()) {
+        origPlace->getInputFile()->hasBeenRefed = true;
+        if (target->getAssemblyIndex() == origPlace->getAssemblyIndex()) {
             return true;
         }
-        
+     
         if (target->access == ACC_INTERNAL)
             break;
         // else == ACC_INTERNALPROTECTED:
@@ -357,7 +373,7 @@ TRYAGAIN:
         // check if place is nested class of target
         // or place is nested class of a more derived class of target
         //
-        if (place->kind == SK_AGGSYM)
+        if (place && place->isAggParent())
         {
             bool isStatic;
 
@@ -392,7 +408,7 @@ TRYAGAIN:
                         if (cls == targetClass) {
                             goto CHECK_BASES;
                         }
-                        cls = cls->baseClass;
+                        cls = cls->baseClass->underlyingAggregate();
                     } while (cls);
 
                     if (targetClass->parent->kind != SK_AGGSYM)
@@ -415,11 +431,11 @@ CHECK_BASES:
                     if (cls == targetClass) {
                         return true;
                     }
-                    cls = cls->baseClass;
+                    cls = cls->baseClass->underlyingAggregate();
                 } while (cls);
 
                 place = place->parent;
-            } while (place->kind == SK_AGGSYM);
+            } while (place->isAggParent());
         }
         break;
 
@@ -428,8 +444,8 @@ CHECK_BASES:
         if (target->isPrepared)
             break;
         // target must be an imported type
-        resolveInheritanceRec(target->asAGGSYM());
-        ASSERT (target->asAGGSYM()->hasResolvedBaseClasses);
+        resolveInheritanceRec(target->asTYPESYM()->underlyingAggregate());
+        ASSERT (target->asTYPESYM()->underlyingAggregate()->hasResolvedBaseClasses);
         goto TRYAGAIN;
 
     default:
@@ -442,20 +458,28 @@ CHECK_BASES:
     return false;
 }
 
-bool CLSDREC::checkForBadMember(NAME *name, BASENODE *parseTree, AGGSYM *cls)
+// Normally in all of the following "created" is NULL.  However, in some cases we have to create
+// a member before we can reasonably carry out the following checks.  For example, when we
+// have a generic static method, we have to create the symbol for the method BEFORE we
+// parse the argument types, because the argument types might refer to the type parameters.
+//
+// THus, we sometimes pass in a "created" value to indicate that we might find a symbol matching the given types
+// but that it's not a problem if it == created.
+
+bool CLSDREC::checkForBadMember(NAME *name, BASENODE *parseTree, AGGSYM *cls, SYM* created)
 {
     //
     // check for name same as that of parent aggregate
     //
-    if (name == cls->name && !cls->isEnum) {
+	if (name == cls->name && !cls->isEnum) {
         errorNameRefSymbol(name, parseTree, cls, cls, ERR_MemberNameSameAsType);
         return false;
     }
     
-    return checkForDuplicateSymbol(name, parseTree, cls);
+    return checkForDuplicateSymbol(name, parseTree, cls, created);
 }
 
-bool CLSDREC::checkForBadMember(NAME *name, SYMKIND symkind, PTYPESYM *params, BASENODE *parseTree, AGGSYM *cls)
+bool CLSDREC::checkForBadMember(NAME *name, SYMKIND symkind, PTYPESYM *params, BASENODE *parseTree, AGGSYM *cls, SYM* created)
 {
     ASSERT(symkind == SK_PROPSYM || symkind == SK_METHSYM);
 
@@ -467,20 +491,20 @@ bool CLSDREC::checkForBadMember(NAME *name, SYMKIND symkind, PTYPESYM *params, B
         return false;
     }
     
-    return checkForDuplicateSymbol(name, symkind, params, parseTree, cls);
+    return checkForDuplicateSymbol(name, symkind, params, parseTree, cls, created);
 }
 
-bool CLSDREC::checkForBadMember(NAMENODE *nameNode, SYMKIND symkind, PTYPESYM *params, AGGSYM *cls)
+bool CLSDREC::checkForBadMember(NAMENODE *nameNode, SYMKIND symkind, PTYPESYM *params, AGGSYM *cls, SYM* created)
 {
     ASSERT(symkind == SK_PROPSYM || symkind == SK_METHSYM);
-    return checkForBadMember(nameNode->pName, symkind, params, nameNode, cls);
+    return checkForBadMember(nameNode->pName, symkind, params, nameNode, cls, created);
 }
 
-bool CLSDREC::checkForDuplicateSymbol(NAME *name, BASENODE *parseTree, AGGSYM *cls)
+bool CLSDREC::checkForDuplicateSymbol(NAME *name, BASENODE *parseTree, AGGSYM *cls, SYM* created)
 {
     if (name) {
         SYM* present = compiler()->symmgr.LookupGlobalSym(name, cls, MASK_ALL);
-        if (present) {
+        if (present && present != created) {
             errorNameRefStrSymbol(
                 name,
                 parseTree, 
@@ -495,7 +519,7 @@ bool CLSDREC::checkForDuplicateSymbol(NAME *name, BASENODE *parseTree, AGGSYM *c
     return true;
 }
 
-bool CLSDREC::checkForDuplicateSymbol(NAME *name, SYMKIND symkind, PTYPESYM *params, BASENODE *parseTree, AGGSYM *cls)
+bool CLSDREC::checkForDuplicateSymbol(NAME *name, SYMKIND symkind, PTYPESYM *params, BASENODE *parseTree, AGGSYM *cls, SYM* created)
 {
 
     ASSERT(symkind == SK_PROPSYM || symkind == SK_METHSYM);
@@ -511,7 +535,7 @@ bool CLSDREC::checkForDuplicateSymbol(NAME *name, SYMKIND symkind, PTYPESYM *par
                     }
                 }
             }
-            while (present) {
+            while (present && present != created) {
                 METHPROPSYM *mpSym;
                 if ((present->kind != symkind) || ((mpSym = present->asMETHPROPSYM())->params == params) ||
                     // check for varargs with matching signature prefix
@@ -573,10 +597,10 @@ bool CLSDREC::checkForDuplicateSymbol(NAME *name, SYMKIND symkind, PTYPESYM *par
     return true;
 }
 
-bool CLSDREC::checkForDuplicateSymbol(NAMENODE *nameNode, SYMKIND symkind, PTYPESYM *params, AGGSYM *cls)
+bool CLSDREC::checkForDuplicateSymbol(NAMENODE *nameNode, SYMKIND symkind, PTYPESYM *params, AGGSYM *cls, SYM* created)
 {
     ASSERT(symkind == SK_PROPSYM || symkind == SK_METHSYM);
-    return checkForDuplicateSymbol(nameNode->pName, symkind, params, nameNode, cls);
+    return checkForDuplicateSymbol(nameNode->pName, symkind, params, nameNode, cls, created);
 }
 
 // Add a aggregate symbol to the given parent.  Checks for collisions and 
@@ -598,7 +622,7 @@ AGGSYM * CLSDREC::addAggregate(BASENODE *aggregateNode, NAMENODE* nameNode, PARE
     //
     // check for name same as that of parent and duplicate name
     //
-    if (parent->kind == SK_AGGSYM) {
+    if (parent->isAggParent()) {
         if (!parent->getInputFile()->hasChanged) {
             // incremental rebuild, matching existing symbols to parse trees
             SYM* present = compiler()->symmgr.LookupGlobalSym(ident, parentScope, MASK_ALL);
@@ -704,7 +728,9 @@ SET_FLAGS:
     default:
         ASSERT(!"Unrecognized aggregate parse node");
     }
-    if (parent->kind == SK_AGGSYM) {
+    
+		
+    if (parent->isAggParent()) {
         // nested classes can have private access
         // classes in a namespace can only have public or assembly access
         //
@@ -724,8 +750,107 @@ SET_FLAGS:
         cls->isAbstract = true;
     }
 
+    if (aggregateNode->kind == NK_CLASS || aggregateNode->kind == NK_STRUCT || aggregateNode->kind == NK_INTERFACE|| aggregateNode->kind == NK_DELEGATE) {
+        // GENERICS: declare type parameters, but not bounds.  These come later.  The type
+        // params come first because they will be needed whenever instantiating
+        // generic types, e.g. when resolving inheritance.
+        BASENODE * typars = 
+            (aggregateNode->kind == NK_DELEGATE) ? cls->parseTree->asDELEGATE()->pTypeParams : cls->parseTree->asAGGREGATE()->pTypeParams; 
+        defineTypars(cls, typars, &cls->ppTypeFormals, &cls->cTypeFormals);
+    }
+
     return cls;
 }
+
+
+void CLSDREC::defineTypars(PARENTSYM *parent, BASENODE *typars, TYVARSYM ***ppFormals, unsigned short *cFormals)
+{
+    int cTypeFormals = 0;
+    NODELOOP(typars, NAME, typar)
+        cTypeFormals++;
+    ENDLOOP;
+    if (cTypeFormals) {
+        PTYVARSYM * ppTypeFormals = (TYVARSYM **) _alloca(cTypeFormals * sizeof(PTYVARSYM));
+        int typar_num = 0;
+        NODELOOP(typars, NAME, typar)
+            ASSERT(typar->kind == NK_TYPENAME);
+            ppTypeFormals[typar_num] = defineTypar(parent, typar, typar_num);
+            typar_num++;
+        ENDLOOP;
+        *ppFormals = (TYVARSYM **) compiler()->symmgr.AllocParams(cTypeFormals, (TYPESYM **) ppTypeFormals);
+        *cFormals = cTypeFormals;
+    } else {
+        *ppFormals = NULL;
+        *cFormals = 0;
+    }
+}
+
+TYVARSYM * CLSDREC::defineTypar(PARENTSYM *parent, NAMENODE *parseTree, int typar_num)
+{
+    TYVARSYM *tyvar = compiler()->symmgr.CreateTyVar(parseTree->pName, parent);
+    tyvar->access = ACC_PRIVATE;
+    tyvar->num = typar_num;
+    tyvar->parseTree = parseTree;
+    tyvar->bound = NULL;
+    tyvar->boundTokenImport = mdTokenNil;
+    
+    return tyvar;
+}
+
+void CLSDREC::defineMethodTypars(METHSYM *parent, BASENODE *typars, TYVARSYM ***ppFormals, unsigned short *cFormals)
+{
+    int cTypeFormals = 0;
+    NODELOOP(typars, TYPE, typar)
+        cTypeFormals++;
+    ENDLOOP;
+    if (cTypeFormals) {
+        PTYVARSYM * ppTypeFormals = (TYVARSYM **) _alloca(cTypeFormals * sizeof(PTYVARSYM));
+        int typar_num = 0;
+        NODELOOP(typars, TYPE, typar)
+            ASSERT(typar->kind == NK_TYPE && typar->TypeKind() == TK_NAMED && typar->pName->kind == NK_NAME);
+            
+            ppTypeFormals[typar_num] = defineTypar(parent, typar->pName->asNAME(), typar_num);
+            typar_num++;
+        ENDLOOP;
+        *ppFormals = (TYVARSYM **) compiler()->symmgr.AllocParams(cTypeFormals, (TYPESYM **) ppTypeFormals);
+        *cFormals = cTypeFormals;
+    } else {
+        *ppFormals = NULL;
+        *cFormals = 0;
+    }
+}
+
+
+void CLSDREC::defineBounds(BASENODE *constraints, unsigned short cFormals, TYVARSYM **ppFormals, PARENTSYM *context, AGGSYM *classBeingResolved)
+{
+
+    // now declare bounds
+    NODELOOP (constraints, CONSTRAINT, constraint)
+        // find type par index
+        unsigned int n;
+        for (n = 0; n < cFormals; n++) {
+            if (ppFormals[n]->name == constraint->pName->pName)
+                break;
+        }
+        if (n < cFormals) {
+            TYVARSYM *tyvar = ppFormals[n];
+            ASSERT(tyvar->parseTree);
+            if (constraint->flags & NF_CONSTRAINTNEWABLE) {
+            } else {
+                tyvar->bound = bindType(constraint->pType, context, BTF_NODECLARE | BTF_NODEPRECATED, classBeingResolved);
+            }
+        }
+    ENDLOOP;
+    
+    // set unbound ty pars to object    
+    for (unsigned int n = 0; n < cFormals; n++) {
+        TYVARSYM *tyvar = ppFormals[n];
+        if (!tyvar->bound) {
+            tyvar->bound = compiler()->symmgr.GetPredefType(PT_OBJECT, false);
+        }
+    }
+}
+
 
 NSDECLSYM * CLSDREC::addNamespaceDeclaration(NAMENODE* name, NAMESPACENODE *parseTree, NSDECLSYM *containingDeclaration)
 {
@@ -776,7 +901,8 @@ NSSYM * CLSDREC::addNamespace(NAMENODE * name, NSDECLSYM * parent)
 
 // declares a class or struct.  This means that this aggregate and any contained aggregates
 // have their symbols entered in the symbol table. 
-// the access modifier on the type is also checked
+// the access modifier on the type is also checked, and the type
+// variables get created (in addAggregate).
 void CLSDREC::declareAggregate(CLASSNODE * pClassTree, PARENTSYM * parent)
 {
     AGGSYM * cls = addAggregate(pClassTree, pClassTree->pName, parent);
@@ -945,24 +1071,22 @@ void CLSDREC::ensureUsingClausesAreResolved(NSDECLSYM *nsDeclaration, AGGSYM *cl
     }
 }
 
-bool CLSDREC::hasBaseChanged(AGGSYM *cls, AGGSYM *newBaseClass)
+bool CLSDREC::hasBaseChanged(AGGSYM *cls, TYPESYM *newBase)
 {
     if (cls->isInterface) return false;
 
     //
     // in incremental scenario check that the type is the same
     //
-    AGGSYM *oldBase;
-    DWORD flags;
-    compiler()->importer.GetBaseTokenAndFlags(cls, &oldBase, &flags);
-    if (newBaseClass->isInterface)
-    {
-        newBaseClass = compiler()->symmgr.GetPredefType(PT_OBJECT, false);
-    }
-
-    return (oldBase != newBaseClass);
+        TYPESYM *oldBase;
+        DWORD flags;
+        compiler()->importer.GetBaseTokenAndFlags(cls, &oldBase, &flags);
+        if (newBase->underlyingAggregate()->isInterface)
+        {
+            newBase = compiler()->symmgr.GetPredefType(PT_OBJECT, false);
+        }
+    return (oldBase != newBase);
 }
-
 
 bool CLSDREC::setBaseType(AGGSYM *cls, AGGSYM *baseType)
 {
@@ -1070,9 +1194,20 @@ bool CLSDREC::resolveInheritanceRec(AGGSYM *cls)
                 cls->underlyingType = NULL;
                 return false;
             }
-        } else if (cls->isDelegate) {
-            AGGSYM *baseType;
+        } else {
+                  // Note - we do not declare the types and other symbols 
+                  // involved in the constraint until
+                  // right at the very end when we are trying to satisfy the constraints.
+                  // That is, the type symbol gets fully created by the step below, but 
+                  // not all the aggregate types involved in the type symbol get
+                  // prepared/declared, because we won't need that information until 
+                  // we try to satisfy the constraints (e.g. then we might need to know
+                  // subtyping information etc.)
+		  if (cls->isDelegate) {
+            DELEGATENODE *delegateNode = cls->parseTree->asDELEGATE();
+            defineBounds(delegateNode->pConstraints, cls->cTypeFormals, cls->ppTypeFormals, cls, cls);
 
+            AGGSYM *baseType;
             //
             // all delegates in C# are multicast now
             //
@@ -1080,7 +1215,9 @@ bool CLSDREC::resolveInheritanceRec(AGGSYM *cls)
 
             if (!setBaseType(cls, baseType))
                 return false;
-        } else {
+		  } else {
+            defineBounds(cls->parseTree->asAGGREGATE()->pConstraints, cls->cTypeFormals, cls->ppTypeFormals, cls, cls);
+
             //
             // resolve base and implemented interfaces
             //
@@ -1099,8 +1236,12 @@ bool CLSDREC::resolveInheritanceRec(AGGSYM *cls)
             NODELOOP(bases, BASE, base)
                 ASSERT(base->kind == NK_TYPE);
 
-                AGGSYM * type = bindType(base->asTYPE(), cls->containingDeclaration(), BTF_NODECLARE | BTF_NODEPRECATED, cls)->asAGGSYM();
-                if (!type) {
+                    // GENERICS: changed context in which resolution of type occurs, because
+                    // the bounds may now refer to type variables in the current scope.  
+                    //
+                    //
+                TYPESYM * specificType = bindType(base->asTYPE(), cls, BTF_NODECLARE | BTF_NODEPRECATED,cls);
+                if (!specificType) {
                     // already reported error in bindTypeName
                     if (needBase && !setBaseType(cls, compiler()->symmgr.GetObject()))
                         return false;
@@ -1108,7 +1249,7 @@ bool CLSDREC::resolveInheritanceRec(AGGSYM *cls)
                     //
                     // in incremental scenario check that the base type is the same
                     //
-                    if (!cls->baseClass && compiler()->IsIncrementalRebuild() && hasBaseChanged(cls, type)) {
+                    if (!cls->baseClass && compiler()->IsIncrementalRebuild() && hasBaseChanged(cls, specificType)) {
                         cls->isResolvingBaseClasses = false;
                         return false;
                     }
@@ -1116,56 +1257,57 @@ bool CLSDREC::resolveInheritanceRec(AGGSYM *cls)
                     //
                     // need to resolve base aggregate first
                     //
-                    if (!resolveInheritanceRec(type)) {
+                    if (!resolveInheritanceRec(specificType->underlyingAggregate())) {
                         cls->isResolvingBaseClasses = false;
                         return false;
                     }
+                    AGGSYM * type = specificType->underlyingAggregate();
                     compiler()->MakeFileDependOnType(cls, type);
                     if (type->isInterface) {
                         if (needBase)
                             cls->baseClass = compiler()->symmgr.GetObject();
 
                         // found an interface, check that it wasn't listed twice
-                        if (cls->ifaceList->contains(type)) {
+                        if (cls->ifaceList->contains(specificType)) {
                             errorType(base->asTYPE(), cls, ERR_DuplicateInterfaceInBaseList);
                         } else {
                             if (type->isResolvingBaseClasses) {
                                 // found a cycle, report error and don't add interface to list
-                                errorSymbolAndRelatedSymbol(type, cls, ERR_CycleInInterfaceInheritance);
+                                errorSymbolAndRelatedSymbol(specificType, cls, ERR_CycleInInterfaceInheritance);
                             } else {
                                 // didn't find a duplicate
                                 // everything checks out, add to our list
-                                compiler()->symmgr.AddToGlobalSymList(type, &addToIfaceList);
+                                compiler()->symmgr.AddToGlobalSymList(specificType, &addToIfaceList);
 
                                 // Made sure base interface is at least as visible as derived interface (don't check
                                 // for derived CLASS, though.
                                 if (cls->isInterface) 
-                                    checkConstituentVisibility(cls, type, ERR_BadVisBaseInterface);
+                                    checkConstituentVisibility(cls, specificType, ERR_BadVisBaseInterface);
                             }
                         }
                     } else if (needBase) {
-                        ASSERT(type->kind != SK_ERRORSYM);
+                        ASSERT(specificType->kind != SK_ERRORSYM);
                         if (type->isPredefined && 
                             (type->iPredef == PT_ENUM || type->iPredef == PT_VALUE || type->iPredef == PT_DELEGATE  || type->iPredef == PT_MULTIDEL || type->iPredef == PT_ARRAY) && 
                             !cls->isPredefined) 
                         {
-                            errorSymbolAndRelatedSymbol(cls, type, ERR_DeriveFromEnumOrValueType);
+                            errorSymbolAndRelatedSymbol(cls, specificType, ERR_DeriveFromEnumOrValueType);
                         }
 
                         if (type->isResolvingBaseClasses) {
                             if (!setBaseType(cls, compiler()->symmgr.GetObject()))
                                 return false;
-                            errorSymbolAndRelatedSymbol(cls, type, ERR_CircularBase);
+                            errorSymbolAndRelatedSymbol(cls, specificType, ERR_CircularBase);
                         } else {
                             //
                             // found an explicit base
                             // ensure it is resolved
                             //
-                            cls->baseClass = type;
+                            cls->baseClass = specificType;
 
                             // make sure base class is at least as visible as derived class.
-                            checkConstituentVisibility(cls, type, ERR_BadVisBaseClass);
-                        }
+                            checkConstituentVisibility(cls, specificType, ERR_BadVisBaseClass);
+						}
                     } else {
                         // already reported error in bindTypeName
                         if (needBase && !setBaseType(cls, compiler()->symmgr.GetObject()))
@@ -1197,11 +1339,11 @@ bool CLSDREC::resolveInheritanceRec(AGGSYM *cls)
                 cls->ifaceList = NULL;
                 return false;
             }
-        }
+        }  // end not-delegate
+      }  // end not-enum
         cls->isResolvingBaseClasses = false;
         cls->hasResolvedBaseClasses = true;
-
-    } else {
+    } else { // no parse tree
         //
         // read base from metadata (unless it's a bogus token)
         //
@@ -1215,7 +1357,7 @@ bool CLSDREC::resolveInheritanceRec(AGGSYM *cls)
 
     // Set inherited bits.
     if (cls->baseClass) {
-        AGGSYM * baseClass = cls->baseClass;
+        AGGSYM * baseClass = cls->baseClass->underlyingAggregate();
         if (baseClass->isAttribute)
             cls->isAttribute = true;
         if (baseClass->isSecurityAttribute)
@@ -1254,10 +1396,12 @@ bool CLSDREC::resolveInheritance(AGGSYM *cls)
             }
             break;
 
+        case SK_INSTAGGSYM:
         case SK_ARRAYSYM:
         case SK_EXPANDEDPARAMSSYM:
         case SK_PARAMMODSYM:
         case SK_PTRSYM:
+        case SK_TYVARSYM:
             break;
 
         default:
@@ -1461,6 +1605,8 @@ void CLSDREC::prepareFields(MEMBVARSYM *field)
         checkSimpleHiding(field, field->parseTree->pParent->flags);
         
     }
+    if (field->isStatic && compiler()->symmgr.UsesClassTypeFormals(field->type)) 
+		errorSymbol(field, ERR_GenericStaticField);
 
     ASSERT(!field->isUnevaled);
 }
@@ -1682,9 +1828,6 @@ void CLSDREC::evaluateConstants(AGGSYM *cls)
             
             OBSOLETEATTRBIND::Compile(compiler(), child->asMEMBVARSYM());
             break;
-        case SK_AGGSYM:
-            // nothing
-            break;
         case SK_METHSYM:
             //
             // validate existance or non-existance of conditional methods here
@@ -1692,8 +1835,11 @@ void CLSDREC::evaluateConstants(AGGSYM *cls)
             CONDITIONALATTRBIND::Compile(compiler(), child->asMETHSYM());
             break;
         case SK_EXPANDEDPARAMSSYM:
+        case SK_AGGSYM:
+        case SK_INSTAGGSYM:
         case SK_PARAMMODSYM:
         case SK_ARRAYSYM:
+        case SK_TYVARSYM:
         case SK_PTRSYM:
             break;
         case SK_PROPSYM:
@@ -1730,10 +1876,11 @@ void CLSDREC::evaluateConstants(AGGSYM *cls)
                 //
                 // inherit usage from base class if not present
                 //
-                cls->attributeClass = cls->baseClass->attributeClass;
-                cls->isMultipleAttribute = cls->baseClass->isMultipleAttribute;
+                cls->attributeClass = cls->baseClass->underlyingAggregate()->attributeClass;
+                cls->isMultipleAttribute = cls->baseClass->underlyingAggregate()->isMultipleAttribute;
 
-                if (cls->baseClass->iPredef == PT_ATTRIBUTE) {
+                // UNDONE: peterhal remove this after 130540 gets fixed
+                if (cls->baseClass->underlyingAggregate()->iPredef == PT_ATTRIBUTE) {
                     cls->attributeClass = catAll;
                 }
             }
@@ -1742,6 +1889,7 @@ void CLSDREC::evaluateConstants(AGGSYM *cls)
         OBSOLETEATTRBIND::Compile(compiler(), cls);
     }
 }
+
 
 
 // prepares a method for compilation.  the parsetree is obtained from the
@@ -1755,6 +1903,7 @@ void CLSDREC::prepareMethod(METHSYM * method)
     }
 
     reportDeprecatedMethProp(method->parseTree, method);
+
 
     //
     // conversions are special
@@ -1826,7 +1975,8 @@ void CLSDREC::prepareMethod(METHSYM * method)
                     // we have an override method
                     //
                     SYM *hiddenSymbol;
-                    hiddenSymbol = findHiddenSymbol(method->name, SK_METHSYM, method->params, cls->baseClass, cls);
+                    TYPESYM *methodInType = NULL;
+                    hiddenSymbol = findHiddenSymbol(method->name, SK_METHSYM, method->params, cls->baseClass, cls, &methodInType);
                     if (hiddenSymbol) {
 
                         if (hiddenSymbol->kind != SK_METHSYM) {
@@ -1836,7 +1986,8 @@ void CLSDREC::prepareMethod(METHSYM * method)
                             checkHiddenSymbol(method, hiddenSymbol);
                         } else {
                             METHSYM *hiddenMethod = hiddenSymbol->asMETHSYM();
-                            ASSERT (hiddenMethod->params == method->params);
+                            ASSERT (compiler()->symmgr.SubstParamsUsingType(hiddenMethod->cParams, hiddenMethod->params, methodInType)
+                                 == method->params);
 
                             // if this an override of Finalize on object, then give a warning...
                             if (hiddenMethod->name == compiler()->namemgr->GetPredefName(PN_DTOR) && method->cParams == 0) {
@@ -1874,7 +2025,7 @@ void CLSDREC::prepareMethod(METHSYM * method)
                                 compiler()->SubmitError (pError);
                             }
 
-                            if (hiddenMethod->retType != method->retType) {
+                            if (compiler()->symmgr.SubstTypeUsingType(hiddenMethod->retType, methodInType) != method->retType) {
                                 errorSymbolAndRelatedSymbol(method, hiddenMethod, ERR_CantChangeReturnTypeOnOverride);
                             }
 
@@ -1942,9 +2093,16 @@ void CLSDREC::prepareMethod(METHSYM * method)
                                 method->retType,
                                 method->params,
                                 method, 
-                                cls
+                                cls,
+                                &(method->explicitImplMethodInType)
                                 )->asMETHSYM();
 
+            if (method->explicitImpl && (method->explicitImpl->asMETHSYM()->isPropertyAccessor || method->explicitImpl->asMETHSYM()->isEventAccessor)) {
+                METHSYM * impl = method->explicitImpl->asMETHSYM();
+                method->explicitImpl = NULL;
+                errorSymbolAndRelatedSymbol(method, impl, ERR_ExplicitMethodImplAccessor);
+            }
+            
             if (cls->isStruct) {
                 cls->hasExplicitImpl = true;
             }
@@ -1961,6 +2119,7 @@ void CLSDREC::prepareMethod(METHSYM * method)
             }
         }
     }
+
 }
 
 // checks if the runtime will override the method we want to override
@@ -1983,14 +2142,24 @@ void CLSDREC::checkForMethodImplOnOverride(METHSYM *method, METHSYM *overridenMe
 }
 
 // list of locally defined and inherited conversion operators.
-PSYMLIST CLSDREC::getConversionList(AGGSYM *cls)
+PSYMLIST CLSDREC::getConversionList(AGGSYM *cls, PSYMLIST *conversionOperatorsMethodInTypes)
 {
-    if (cls->hasConversion && !cls->conversionOperators) {
+    return getConversionListAux(compiler()->symmgr.GetThisType(cls), conversionOperatorsMethodInTypes);
+}
 
+// Use an auxillary routine
+// to generate the list with respect to an instantiated type in order to track the effects
+// of polymorphic inheritance on how the conversions appear...
+PSYMLIST CLSDREC::getConversionListAux(TYPESYM *where, PSYMLIST *conversionOperatorsMethodInTypes)
+{
+    AGGSYM *cls = where->underlyingAggregate();
+    if (cls->hasConversion && !cls->conversionOperators) {
+    
         //
         // add all locally defined conversions first
         //
         SYMLIST **addToList = &cls->conversionOperators;
+        SYMLIST **addToWhereList = &cls->conversionOperatorsMethodInTypes;
         FOREACHCHILD(cls, sym)
             if ((sym->kind == SK_METHSYM) && sym->asMETHSYM()->isConversionOperator()) {
     			/**                                                                    
@@ -2002,6 +2171,7 @@ PSYMLIST CLSDREC::getConversionList(AGGSYM *cls)
                 /**/FUNDTYPE ftDest = msym->retType->fundType();
                 /**/if (ftDest == FT_NONE || ftDest > FT_R8 || ftSrc == FT_NONE || ftSrc > FT_R8) {
                     compiler()->symmgr.AddToGlobalSymList(sym, &addToList);
+                    compiler()->symmgr.AddToGlobalSymList(where, &addToWhereList);
                 /**/}
             }
         ENDFOREACHCHILD
@@ -2009,12 +2179,14 @@ PSYMLIST CLSDREC::getConversionList(AGGSYM *cls)
         if (cls->baseClass) {
 
             //
-            // append base class conversions to our list
+            // append base class conversions to our list, recording the polymorphic inheritance
+            // along the way.
             //
-            *addToList = getConversionList(cls->baseClass);
+            *addToList = getConversionListAux(compiler()->symmgr.SubstTypeUsingType(cls->baseClass, where), addToWhereList);
         }
     }
 
+    *conversionOperatorsMethodInTypes = cls->conversionOperatorsMethodInTypes;
     return cls->conversionOperators;
 }
 
@@ -2040,41 +2212,35 @@ void CLSDREC::prepareConversion(METHSYM * conversion)
     // we check this here so that the check for hidden members below
     // doesn't report odd errors.
     //
-    AGGSYM * classToSearch;
-    if (alternateType->kind == SK_AGGSYM) {
-
+    if (alternateType->isAggType()) {
+        AGGSYM *alternateAgg = alternateType->underlyingAggregate();
         //
         // can't convert to/from an interface
         //
-        if (alternateType->asAGGSYM()->isInterface) {
+        if (alternateAgg->isInterface) {
             errorSymbol(conversion, ERR_ConversionWithInterface);
-        } else if ((cls->isClass || cls->isStruct) && alternateType->asAGGSYM()->isClass) {
+        } else if ((cls->isClass || cls->isStruct) && alternateAgg->isClass) {
 
             //
             // check that we aren't converting to/from a base class
             //
-            classToSearch = cls->baseClass;
-            while (classToSearch) {
-                if (classToSearch == alternateType) {
+            
+            BASE_CLASS_TYPES_LOOP(cls->baseClass, baseType)
+                if (baseType == alternateType) {
                     errorSymbol(conversion, ERR_ConversionWithBase);
                     return;
                 }
-
-                classToSearch = classToSearch->baseClass;
-            }
+            END_BASE_CLASS_TYPES_LOOP(compiler()->symmgr)
 
             //
             // check that we aren't converting to/from a derived class
             //
-            classToSearch = alternateType->asAGGSYM()->baseClass;
-            while (classToSearch) {
-                if (classToSearch == cls) {
+            BASE_CLASS_TYPES_LOOP(alternateType, baseType)
+                if (baseType != alternateType && baseType == cls) {
                     errorSymbol(conversion, ERR_ConversionWithDerived);
                     return;
                 }
-
-                classToSearch = classToSearch->baseClass;
-            }
+            END_BASE_CLASS_TYPES_LOOP(compiler()->symmgr)
         }
     }
 
@@ -2141,7 +2307,8 @@ void CLSDREC::prepareProperty(PROPSYM * property)
         if (!property->isOverride) {
             checkSimpleHiding( property, tree->flags, SK_PROPSYM, property->params);
         } else {
-            SYM *hiddenSymbol = findHiddenSymbol(property->name, SK_PROPSYM, property->params, cls->baseClass, cls);
+            TYPESYM *methodInType = NULL;
+            SYM *hiddenSymbol = findHiddenSymbol(property->name, SK_PROPSYM, property->params, cls->baseClass, cls, &methodInType);
             if (hiddenSymbol) {
                 if (hiddenSymbol->kind != SK_PROPSYM) {
                     // found a non-property we will hide
@@ -2196,7 +2363,7 @@ void CLSDREC::prepareProperty(PROPSYM * property)
                         //
                         // can't change type on override
                         //
-                        if (hiddenProperty->retType != property->retType) {
+                        if (compiler()->symmgr.SubstTypeUsingType(hiddenProperty->retType, methodInType) != property->retType) {
                             errorSymbolAndRelatedSymbol(property, hiddenProperty, ERR_CantChangeReturnTypeOnOverride);
                             // stop looking for accessors
                             needGet = needSet = false;
@@ -2389,7 +2556,8 @@ void CLSDREC::prepareProperty(PROPSYM * property)
                             property->retType,
                             property->params,
                             property,
-                            cls);
+                            cls,
+                            &(property->explicitImplMethodInType));
         if (property->explicitImpl && property->explicitImpl->kind == SK_PROPSYM) {
             PROPSYM *explicitImpl = property->explicitImpl->asPROPSYM();
             if (property->methGet) {
@@ -2413,6 +2581,7 @@ void CLSDREC::prepareProperty(PROPSYM * property)
                     errorSymbolAndRelatedSymbol(property->methGet, explicitImpl, ERR_ExplicitPropertyAddingAccessor);
                 } else {
                     property->methGet->explicitImpl = explicitImpl->asPROPSYM()->methGet;
+                    property->methGet->explicitImplMethodInType = property->explicitImplMethodInType;
                 }
             } else {
                 if (explicitImpl->kind == SK_PROPSYM && explicitImpl->asPROPSYM()->methGet) {
@@ -2439,6 +2608,7 @@ void CLSDREC::prepareProperty(PROPSYM * property)
                     errorSymbolAndRelatedSymbol(property->methSet, explicitImpl, ERR_ExplicitPropertyAddingAccessor);
                 } else {
                     property->methSet->explicitImpl = explicitImpl->asPROPSYM()->methSet;
+                    property->methSet->explicitImplMethodInType = property->explicitImplMethodInType;
                 }
             } else {
                 if (explicitImpl->kind == SK_PROPSYM && explicitImpl->asPROPSYM()->methSet) {
@@ -2475,7 +2645,7 @@ void CLSDREC::prepareEvent(EVENTSYM * event)
     reportDeprecatedType(event->parseTree, event, event->type);
 
     // Issue error if the event type is not a delegate.
-    if (event->type->kind != SK_AGGSYM || ! event->type->asAGGSYM()->isDelegate) {
+    if (!event->type->isDelegateType()) {
         errorSymbol(event, ERR_EventNotDelegate);
     }
 
@@ -2489,16 +2659,19 @@ void CLSDREC::prepareEvent(EVENTSYM * event)
                             event->type,
                             NULL,
                             event,
-                            event->parent->asAGGSYM())->asEVENTSYM();
+                            event->parent->asAGGSYM(),
+							&(event->explicitImplMethodInType))->asEVENTSYM();
 
         event->explicitImpl = explicitImpl;
 
         if (explicitImpl) {
             // Set up the accessors as explicit interfaces.
             event->methAdd->explicitImpl = explicitImpl->methAdd;
+            event->methAdd->explicitImplMethodInType = event->explicitImplMethodInType;
             event->methAdd->isMetadataVirtual = true;
             event->methRemove->explicitImpl = explicitImpl->methRemove;
             event->methRemove->isMetadataVirtual = true;
+            event->methRemove->explicitImplMethodInType = event->explicitImplMethodInType;
 
             // must have a body
             if (event->methAdd->parseTree->other & NFEX_METHOD_NOBODY) {
@@ -2517,7 +2690,7 @@ void CLSDREC::prepareEvent(EVENTSYM * event)
         else {
             // This is an event marked "override".
             SYM * hiddenSymbol;
-            hiddenSymbol = findHiddenSymbol(event->name, cls->baseClass, cls);
+            hiddenSymbol = findHiddenSymbol(event->name, cls->baseClass->underlyingAggregate(), cls);
             if (hiddenSymbol) {
                 if (hiddenSymbol->kind != SK_EVENTSYM) {
                     // Found a non-event. "override" is in error.
@@ -2747,6 +2920,12 @@ bool CLSDREC::defineFields(FIELDNODE * pFieldTree, AGGSYM * cls)
             allowableFlags |= NF_MOD_READONLY | NF_MOD_VOLATILE;
         }
 
+        if (flags & NF_MOD_ABSTRACT && !isEvent)
+        {
+            ASSERT(!(allowableFlags & NF_MOD_ABSTRACT));
+            errorSymbol(rval, ERR_AbstractField);
+            flags &= ~NF_MOD_ABSTRACT;
+        }
         checkFlags(rval,
             allowableFlags,
             flags,
@@ -2816,7 +2995,7 @@ bool CLSDREC::defineFields(FIELDNODE * pFieldTree, AGGSYM * cls)
     return needStaticCtor;
 }
 
-SYM *CLSDREC::checkExplicitImpl(BASENODE *name, PTYPESYM returnType, PTYPESYM *params, SYM *sym, AGGSYM *cls)
+SYM *CLSDREC::checkExplicitImpl(BASENODE *name, PTYPESYM returnType, PTYPESYM *params, SYM *sym, AGGSYM *cls, TYPESYM **pExplicitImplMethodInType)
 {
     BASENODE *ifaceName;
     NAME *memberName;
@@ -2834,17 +3013,22 @@ SYM *CLSDREC::checkExplicitImpl(BASENODE *name, PTYPESYM returnType, PTYPESYM *p
         memberName = compiler()->namemgr->GetPredefName(PN_INDEXERINTERNAL);
     } else {
         ifaceName = name->asDOT()->p1;
-        memberName = name->asDOT()->p2->asNAME()->pName;
+        memberName = name->asDOT()->p2->asANYNAME()->pName;
     }
 
-    AGGSYM *iface = bindTypeName(ifaceName, cls, BTF_NONE, NULL)->asAGGSYM();
+    // GENERICS: check for explicit interface implementation at an instantiated interface type....
+	AGGSYM *iface_agg = bindTypeName(ifaceName, cls, BTF_NONE, NULL)->asAGGSYM();
+    TYPESYM *iface = iface_agg;
 
-    unsigned mask = 1 << sym->kind;
+    if (pExplicitImplMethodInType) 
+        *pExplicitImplMethodInType = iface;
+
+    symbmask_t mask = ((symbmask_t) 1) << sym->kind;
     if (sym->kind == SK_PROPSYM && sym->asPROPSYM()->isEvent)
         mask = MASK_EVENTSYM;
 
-    if (iface) {
-        if (!iface->isInterface) {
+    if (iface && iface_agg) {
+        if (!iface_agg->isInterface) {
             errorNameRefSymbol(ifaceName, cls, iface, ERR_ExplicitInterfaceImplementationNotInterface);
             return NULL;
         } else {
@@ -2860,18 +3044,18 @@ SYM *CLSDREC::checkExplicitImpl(BASENODE *name, PTYPESYM returnType, PTYPESYM *p
             // find member on interface. May need to bring the interface
             // up to declared state first.
             //
-            prepareAggregate(iface);
+            prepareAggregate(iface_agg);
 
-            SYM *explicitImpl = compiler()->symmgr.LookupGlobalSym(memberName, iface, mask);
+            SYM *explicitImpl = compiler()->symmgr.LookupGlobalSym(memberName, iface_agg, mask);
             for (;;) {
                 if (!explicitImpl)
                     break;
                 if (explicitImpl->kind == SK_EVENTSYM) {
-                    if (explicitImpl->asEVENTSYM()->type == returnType)
+                    if (compiler()->symmgr.SubstTypeUsingType(explicitImpl->asEVENTSYM()->type, iface) == returnType)
                         break;
                 }
                 else {
-                    if (explicitImpl->asMETHPROPSYM()->params == params && explicitImpl->asMETHPROPSYM()->retType == returnType)
+					if (compiler()->symmgr.SubstSigUsingTypeEqualsSig(explicitImpl->asMETHPROPSYM(), iface, params, returnType))
                         break;
                 }
 
@@ -2890,7 +3074,7 @@ SYM *CLSDREC::checkExplicitImpl(BASENODE *name, PTYPESYM returnType, PTYPESYM *p
                 //
                 // check for duplicate explicit implementation
                 //
-                SYM *duplicateImpl = findExplicitInterfaceImplementation(cls, explicitImpl);
+                SYM *duplicateImpl = findExplicitInterfaceImplementation(cls, explicitImpl, iface);
                 if (duplicateImpl) {
                     if (ifaceName->pParent->kind == NK_DOT) {
                         errorNameRefStrSymbol(ifaceName->pParent, cls, compiler()->ErrSym(cls), duplicateImpl, ERR_MemberAlreadyExists);
@@ -2900,6 +3084,11 @@ SYM *CLSDREC::checkExplicitImpl(BASENODE *name, PTYPESYM returnType, PTYPESYM *p
                     return NULL;
                 }
 
+                if (explicitImpl->isBogus) {
+                    errorSymbolAndRelatedSymbol(sym, explicitImpl, ERR_BogusExplicitImpl);
+                    return NULL;
+                }
+                
                 return explicitImpl;
             }
         }
@@ -2927,6 +3116,7 @@ void CLSDREC::checkParamsArgument(BASENODE * tree, AGGSYM * cls, unsigned cParam
 METHSYM *CLSDREC::defineMethod(METHODNODE *pMethodTree, AGGSYM * cls)
 {
     NAME * name;
+    NAMENODE * methodNameTree = NULL;
     BASENODE * nameTree = pMethodTree->pName;
 
     bool isStaticCtor = false;
@@ -2951,10 +3141,12 @@ METHSYM *CLSDREC::defineMethod(METHODNODE *pMethodTree, AGGSYM * cls)
         }
 
         name = compiler()->namemgr->GetPredefName(PN_DTOR);
-    } else if (nameTree->kind == NK_NAME) {
-        name = nameTree->asNAME()->pName;
+    } else if (nameTree->IsAnyName()) {
+        name = nameTree->asANYNAME()->pName;
+        methodNameTree = nameTree->asANYNAME();
     } else {
         ASSERT(nameTree->kind == NK_DOT);
+        methodNameTree = nameTree->asDOT()->p2->asANYNAME();
 
         if (!cls->isClass && !cls->isStruct) {
             errorNameRef(nameTree, cls, ERR_ExplicitInterfaceImplementationInNonClassOrStruct);
@@ -2965,6 +3157,17 @@ METHSYM *CLSDREC::defineMethod(METHODNODE *pMethodTree, AGGSYM * cls)
         // when we have the complete list of interfaces
         name = NULL;
     }
+
+
+    METHSYM * rval = compiler()->symmgr.CreateMethod(name, cls);
+    rval->parseTree = pMethodTree;
+    rval->retType = NULL; // set below
+    rval->params = NULL;// set below
+    rval->cParams = 0; // set below
+
+    // GENERICS: declare type parameters - these may be used in the types below.
+    defineMethodTypars(rval, (methodNameTree && methodNameTree->kind == NK_GENERICNAME) ? methodNameTree->asGENERICNAME()->pParams : NULL, &rval->ppTypeFormals, &rval->cTypeFormals);
+    defineBounds(pMethodTree->pConstraints, rval->cTypeFormals, rval->ppTypeFormals, rval, NULL);
 
     TYPESYM * retType;
 
@@ -2989,7 +3192,7 @@ METHSYM *CLSDREC::defineMethod(METHODNODE *pMethodTree, AGGSYM * cls)
             paramTypes = newArray;
         }
         // bind the type, and wrap it if the variable is byref
-        retType = bindType(param->pType, cls, BTF_NODECLARE | BTF_NODEPRECATED, NULL);
+        retType = bindType(param->pType, rval, BTF_NODECLARE | BTF_NODEPRECATED, NULL);
         if (!retType) return NULL;
         if (param->flags & (NF_PARMMOD_REF | NF_PARMMOD_OUT)) {
             retType = compiler()->symmgr.GetParamModifier(retType, param->flags & NF_PARMMOD_OUT ? true : false);
@@ -3014,7 +3217,7 @@ METHSYM *CLSDREC::defineMethod(METHODNODE *pMethodTree, AGGSYM * cls)
 
     // bind the return type, or assume void for constructors...
     if (pMethodTree->pType) {
-        retType = bindType(pMethodTree->pType, cls, BTF_NODECLARE | BTF_NODEPRECATED, NULL);
+        retType = bindType(pMethodTree->pType, rval, BTF_NODECLARE | BTF_NODEPRECATED, NULL);
         if (!retType) return NULL;
         if (retType->isSpecialByRefType() && !cls->isSpecialByRefType()) { // Allow return type for themselves
             errorStrFile(pMethodTree, cls->getInputFile(), ERR_MethodReturnCantBeRefAny, compiler()->ErrSym(retType));
@@ -3033,7 +3236,7 @@ METHSYM *CLSDREC::defineMethod(METHODNODE *pMethodTree, AGGSYM * cls)
 
         // for non-explicit interface implementations
         // find another method with the same signature
-        if (!checkForBadMember(name, SK_METHSYM, params, pMethodTree, cls)) {
+        if (!checkForBadMember(name, SK_METHSYM, params, pMethodTree, cls, rval)) {
             return NULL;
         }
 
@@ -3042,10 +3245,6 @@ METHSYM *CLSDREC::defineMethod(METHODNODE *pMethodTree, AGGSYM * cls)
         // method is an explicit interface implementation
         //
     }
-
-    METHSYM * rval = compiler()->symmgr.CreateMethod(name, cls);
-
-    rval->parseTree = pMethodTree;
 
     rval->retType = retType;
     rval->params = params;
@@ -3193,7 +3392,8 @@ void CLSDREC::findEntryPoint(AGGSYM* cls)
        if (method->isStatic &&
             !method->isPropertyAccessor) {
             if ((method->retType == compiler()->symmgr.GetVoid() || method->retType->isPredefType(PT_INT)) &&
-                 (method->cParams == 0 ||
+                 method->cTypeFormals == 0 && // GENERIC: main method may not be generic
+				 (method->cParams == 0 ||
                    (method->cParams == 1 && method->params[0]->kind == SK_ARRAYSYM &&
                     method->params[0]->asARRAYSYM()->elementType()->isPredefType(PT_STRING))))
             {
@@ -3287,9 +3487,9 @@ void CLSDREC::defineProperty(PROPERTYNODE *propertyNode, AGGSYM *cls)
                         if (nameNode->kind == NK_NAME)
                             predefAttr = compiler()->symmgr.GetPredefAttr(nameNode->asNAME()->pName);
                         if (predefAttr == NULL) {
-                            SYM * type = bindTypeName(nameNode, cls, BTF_ATTRIBUTE | BTF_NOERRORS | BTF_NODECLARE, NULL);
-                            if (type && type->kind == SK_AGGSYM) {
-                                PREDEFATTR pa = type->asAGGSYM()->getPredefAttr();
+                            TYPESYM * type = bindTypeName(nameNode, cls, BTF_ATTRIBUTE | BTF_NOERRORS | BTF_NODECLARE, NULL)->asTYPESYM();
+                            if (type && type->isAggType()) {
+                                PREDEFATTR pa = type->getPredefAttr();
                                 if (pa != PA_COUNT) 
                                     predefAttr = compiler()->symmgr.GetPredefAttr(pa);
                             }
@@ -3585,15 +3785,18 @@ void CLSDREC::definePropertyAccessors(PROPSYM *property)
         //
         // find a base member which implements all the properties we need
         //
-        AGGSYM *classToSearch = cls->baseClass;
+		TYPESYM *typeToSearch = cls->baseClass;
+        TYPESYM *methodInType = NULL;
         SYM * overridenSym;
-        while (classToSearch &&
-               (overridenSym = findHiddenSymbol(property->name, SK_PROPSYM, property->params, classToSearch, cls)) &&
+        while (typeToSearch &&
+               (overridenSym = findHiddenSymbol(property->name, SK_PROPSYM, property->params, typeToSearch, cls, &methodInType)) &&
                (overridenSym->kind == SK_PROPSYM)) {
-
+             
+      
             overridenMember = overridenSym->asPROPSYM();
 
-            if (overridenMember->isBogus || (overridenMember->retType != property->retType) ||
+                        
+            if (overridenMember->isBogus || (compiler()->symmgr.SubstTypeUsingType(overridenMember->retType, methodInType) != property->retType) ||
                 (overridenMember->access != property->access))
             {
                 overridenMember = NULL;
@@ -3612,7 +3815,7 @@ void CLSDREC::definePropertyAccessors(PROPSYM *property)
                 break;
             }
 
-            classToSearch = overridenMember->getClass()->baseClass;
+            typeToSearch = compiler()->symmgr.SubstTypeUsingType(methodInType->underlyingAggregate()->baseClass, typeToSearch);
             overridenMember = NULL;
         }
     } else {
@@ -3805,7 +4008,7 @@ EVENTSYM * CLSDREC::defineEvent(SYM * implementingSym, BASENODE * pTree)
     isStatic = isField ? implementingSym->asMEMBVARSYM()->isStatic : implementingSym->asPROPSYM()->isStatic;
 
     // Create the event symbol.
-    cls = implementingSym->parent->asAGGSYM();
+	cls = implementingSym->parent->asAGGSYM();
     event = compiler()->symmgr.CreateEvent(implementingSym->name, cls);
     event->implementation = implementingSym;
     event->isStatic = isStatic;
@@ -3971,7 +4174,86 @@ bool CLSDREC::defineOperator(METHODNODE * operatorNode, AGGSYM * cls)
         return false;
     }
 
+    bool isConversion = false;
+    bool isImplicit = false;
+    switch (operatorNode->iOp) {
+    case OP_IMPLICIT:
+        isImplicit = true;
+        isConversion = true;
+        break;
+    case OP_EXPLICIT:
+        isConversion = true;
+        break;
+    case OP_TRUE:
+    case OP_FALSE:
+    case OP_EQ:
+    case OP_NEQ:
+    case OP_GT:
+    case OP_LT:
+    case OP_GE:
+    case OP_LE:
+        mustMatch = true;
+	    break;
+    default:
+        break;
+    }
+
     //
+    // get name.
+    //
+    PNAME name;
+    PNAME otherName = NULL;
+    if (isConversion) {
+        //
+        // For operators we check for conflicts with implicit vs. explicit as well
+        // create both implicit and explicit names here because they can conflict
+        // with each other.
+        //
+        PNAME implicitName = compiler()->namemgr->GetPredefName(PN_OPIMPLICITMN);
+        PNAME explicitName = compiler()->namemgr->GetPredefName(PN_OPEXPLICITMN);
+        if (isImplicit) {
+            name = implicitName;
+            otherName = explicitName;
+        } else {
+            name = explicitName;
+            otherName = implicitName;
+        }
+
+    } else {
+        //
+        // get the name for the operator
+        //
+        PREDEFNAME predefName = operatorNames[operatorNode->iOp];
+        ASSERT(predefName > 0 && predefName < PN_COUNT);
+        name = compiler()->namemgr->GetPredefName(predefName);
+    }
+
+    // GENERICS: We create the METHSYM first so that it can
+	// hold the type parameters and act as the root scope for
+	// resolving type parameters when binding the types below.
+	METHSYM *operatorSym = compiler()->symmgr.CreateMethod(name, cls);
+    operatorSym->parseTree = operatorNode;
+    operatorSym->retType = NULL; // set below
+    operatorSym->params = NULL; // set below
+    operatorSym->cParams = 0; // set below
+
+    // GENERICS: Operators implicitly inherit the class type
+	// parameters.  Fetch the typars from the parent class to use as the typars of
+	// the operator declaration.  This effectively duplicates the
+	// typars for each operator.
+    BASENODE * typars = cls->getParseTree()->asAGGREGATE()->pTypeParams; 
+    defineTypars(operatorSym, typars, &operatorSym->ppTypeFormals, &operatorSym->cTypeFormals);
+    defineBounds(cls->getParseTree()->asAGGREGATE()->pConstraints, operatorSym->cTypeFormals, operatorSym->ppTypeFormals, operatorSym, NULL);
+
+	// GENERICS: Determine how the class type must look in the operator
+	// declarations.  For non-generic classes this will just be "cls"
+	// For generic classes we must substitute here - the method
+	// type variables form different types than the class type variables.
+	// GetThisType returns "this" w.r.t. the class type variables, so we
+	// must replace these.
+    TYPESYM *thisty = compiler()->symmgr.SubstType(compiler()->symmgr.GetThisType(cls), operatorSym->cTypeFormals, (TYPESYM **) operatorSym->ppTypeFormals);
+    
+	//
     // get parameter types. Note that the parser guarantees that
     // we will have exactly one or two parameters and the right
     // number for the operator.
@@ -3980,7 +4262,7 @@ bool CLSDREC::defineOperator(METHODNODE * operatorNode, AGGSYM * cls)
     PTYPESYM parameterTypes[2];
     NODELOOP(operatorNode->pParms, PARAMETER, parameterNode)
         ASSERT(numberOfParameters < 2);
-        parameterTypes[numberOfParameters] = bindType(parameterNode->pType, cls, BTF_NODECLARE | BTF_NODEPRECATED, NULL);
+        parameterTypes[numberOfParameters] = bindType(parameterNode->pType, operatorSym, BTF_NODECLARE | BTF_NODEPRECATED, NULL);
         if (!parameterTypes[numberOfParameters]) {
             return false;
         }
@@ -3990,7 +4272,7 @@ bool CLSDREC::defineOperator(METHODNODE * operatorNode, AGGSYM * cls)
     //
     // get return type
     //
-    TYPESYM *returnType = bindType(operatorNode->pType, cls, BTF_NODECLARE | BTF_NODEPRECATED, NULL);
+    TYPESYM *returnType = bindType(operatorNode->pType, operatorSym, BTF_NODECLARE | BTF_NODEPRECATED, NULL);
     if (!returnType) {
         return mustMatch;
     }
@@ -3999,27 +4281,22 @@ bool CLSDREC::defineOperator(METHODNODE * operatorNode, AGGSYM * cls)
     // check argument restrictions. Note that the parser has
     // already checked the number of arguments is correct.
     //
-    bool isConversion = false;
-    bool isImplicit = false;
     switch (operatorNode->iOp) {
 
     // conversions
     case OP_IMPLICIT:
-        isImplicit = true;
-        // fallthrough
-
     case OP_EXPLICIT:
         //
         // check for the identity conversion here
         //
-        if (returnType == cls && parameterTypes[0] == cls) {
+        if (returnType == thisty && parameterTypes[0] == thisty) {
             errorFile(operatorNode, cls->getInputFile(), ERR_IdentityConversion);
             return false;
         }
         //
         // either the source or the destination must be the containing type
         //
-        else if (returnType != cls && parameterTypes[0] != cls) {
+        else if (returnType != thisty && parameterTypes[0] != thisty) {
             errorFile(operatorNode, cls->getInputFile(), ERR_ConversionNotInvolvingContainedType);
             return false;
         }
@@ -4044,7 +4321,7 @@ bool CLSDREC::defineOperator(METHODNODE * operatorNode, AGGSYM * cls)
         //
         // the destination must be the containing type
         //
-        if (parameterTypes[0] != cls || returnType != cls) {
+        if (parameterTypes[0] != thisty || returnType != thisty) {
             errorFile(operatorNode, cls->getInputFile(), ERR_BadIncDecSignature);
             return false;
         }
@@ -4060,7 +4337,7 @@ CHECKSOURCE:
         //
         // the source must be the containing type
         //
-        if (parameterTypes[0] != cls) {
+        if (parameterTypes[0] != thisty) {
             errorFile(operatorNode, cls->getInputFile(), ERR_BadUnaryOperatorSignature);
             return false;
         }
@@ -4073,7 +4350,6 @@ CHECKSOURCE:
     case OP_LT:
     case OP_GE:
     case OP_LE:
-        mustMatch = true;
 
     case OP_ADD:
     case OP_SUB:
@@ -4090,7 +4366,7 @@ CHECKSOURCE:
         //
         // at least one of the parameter types must be the containing type
         //
-        if (parameterTypes[0] != cls && parameterTypes[1] != cls) {
+        if (parameterTypes[0] != thisty && parameterTypes[1] != thisty) {
             errorFile(operatorNode, cls->getInputFile(), ERR_BadBinaryOperatorSignature);
             return false;
         }
@@ -4119,24 +4395,12 @@ CHECKSOURCE:
     //
     // check for duplicate and get name.
     //
-    PNAME name;
     if (isConversion) {
         //
         // For operators we check for conflicts with implicit vs. explicit as well
         // create both implicit and explicit names here because they can conflict
         // with each other.
         //
-        PNAME implicitName = compiler()->namemgr->GetPredefName(PN_OPIMPLICITMN);
-        PNAME explicitName = compiler()->namemgr->GetPredefName(PN_OPEXPLICITMN);
-        PNAME otherName;
-        if (isImplicit) {
-            name = implicitName;
-            otherName = explicitName;
-        } else {
-            name = explicitName;
-            otherName = implicitName;
-        }
-
         //
         // check for name same as that of parent aggregate
         //
@@ -4165,13 +4429,6 @@ CHECKSOURCE:
             return false;
         }
     } else {
-        //
-        // get the name for the operator
-        //
-        PREDEFNAME predefName = operatorNames[operatorNode->iOp];
-        ASSERT(predefName > 0 && predefName < PN_COUNT);
-        name = compiler()->namemgr->GetPredefName(predefName);
-
         if (!checkForBadMember(name, SK_METHSYM, params, operatorNode, cls)) {
             return false;
         }
@@ -4180,8 +4437,6 @@ CHECKSOURCE:
     //
     // create the operator
     //
-    METHSYM *operatorSym = compiler()->symmgr.CreateMethod(name, cls);
-    operatorSym->parseTree = operatorNode;
     operatorSym->retType = returnType;
     operatorSym->params = params;
     operatorSym->cParams = numberOfParameters;
@@ -4224,8 +4479,8 @@ SYM * CLSDREC::bindTypeName(BASENODE *name, PARENTSYM * symContext, int flags, A
 {
     SYM * rval;
 
-    if (name->kind == NK_NAME) {
-        rval = bindSingleTypeName(name->asNAME(), symContext, flags, classBeingResolved);
+    if (name->IsAnyName()) {
+        rval = bindSingleTypeName(name->asANYNAME(), symContext, flags, classBeingResolved);
     } else {
         rval = bindDottedTypeName(name->asDOT(), symContext, flags, classBeingResolved);
     }
@@ -4250,20 +4505,24 @@ void CLSDREC::resolveStructLayout(AGGSYM *cls)
     cls->isResolvingLayout = true;
 
     //
-    // resolve the layout for all of our non-static fields
+    // resolve the layout for all of our non-static fields.
     FOREACHCHILD(cls, elem)
-        if (elem->kind == SK_MEMBVARSYM && !elem->asMEMBVARSYM()->isStatic &&
-            elem->asMEMBVARSYM()->type->kind == SK_AGGSYM) {
-            AGGSYM *fieldType = elem->asMEMBVARSYM()->type->asAGGSYM();
-            if (fieldType->isStruct) {
-                if (fieldType->isResolvingLayout) {
-                    // found a cycle
-                    errorSymbolAndRelatedSymbol(elem, fieldType, ERR_StructLayoutCycle);
-                    goto Error;
-                } else if (!fieldType->isLayoutResolved) {
-                    resolveStructLayout(fieldType);
-                }
-            }
+        if (elem->kind == SK_MEMBVARSYM && !elem->asMEMBVARSYM()->isStatic) {
+			AGGSYM *fieldType = NULL;
+			if (elem->asMEMBVARSYM()->type->kind == SK_AGGSYM) {
+				fieldType = elem->asMEMBVARSYM()->type->asAGGSYM();
+			} else if (elem->asMEMBVARSYM()->type->kind == SK_INSTAGGSYM) {
+				fieldType = elem->asMEMBVARSYM()->type->asINSTAGGSYM()->rootType();
+			}
+			if (fieldType && fieldType->isStruct) {
+				if (fieldType->isResolvingLayout) {
+					// found a cycle
+					errorSymbolAndRelatedSymbol(elem, fieldType, ERR_StructLayoutCycle);
+					goto Error;
+				} else if (!fieldType->isLayoutResolved) {
+					resolveStructLayout(fieldType);
+				}
+			}
         }
     ENDFOREACHCHILD
 
@@ -4325,19 +4584,25 @@ void CLSDREC::prepareInterfaceMember(METHPROPSYM * member)
 }
 
 //
-// builds the recursive closure of an interface list
+// Builds the recursive closure of an interface list.  For example, 
+//    interface A<T> { }
+//    interface B<T> : A<A<T>> { }
+//    interface C : B<String>, A<String>, B<A<String>> { }
 //
-void CLSDREC::addUniqueInterfaces(SYMLIST *list, SYMLIST *** addToList, SYMLIST *source)
+//  C implements B<String>, A<A<String>>, A<String>, B<A<String>>, A<A<A<String>>>
+// The substitution step is used as always when accessing information about a base class or
+// interface which may be specialized to a particular type.
+void CLSDREC::addUniqueInterfaces(SYMLIST *list, SYMLIST *** addToList, SYMLIST *source, TYPESYM *inheritAt)
 {
     FOREACHSYMLIST(source, sym)
-        addUniqueInterfaces(list, addToList, sym->asAGGSYM());
+        addUniqueInterfaces(list, addToList, compiler()->symmgr.SubstTypeUsingType(sym->asTYPESYM(),inheritAt));
     ENDFOREACHSYMLIST
 }
 
 //
 // builds the recursive closure of an interface list
 //
-void CLSDREC::addUniqueInterfaces(SYMLIST *list, SYMLIST ***addToList, AGGSYM *sym)
+void CLSDREC::addUniqueInterfaces(SYMLIST *list, SYMLIST ***addToList, TYPESYM *sym)
 {
     if (!list->contains(sym)) {
         compiler()->symmgr.AddToGlobalSymList(sym, addToList);
@@ -4345,9 +4610,9 @@ void CLSDREC::addUniqueInterfaces(SYMLIST *list, SYMLIST ***addToList, AGGSYM *s
 }
 
 //
-// combines a list of interfaces, and checks for conflicting
-// members between interfaces in the list, and all their inherited
-// interfaces.
+// builds the full list of supported interfaces for a type.
+// Also checks for conflicting members between interfaces in the list, and all their 
+// inherited interfaces.
 //
 // It is important that we form the lists in a given order.  Basically, an interface may not be
 // preceeded by any interfaces that it descends from.  So, we always add to the front of the list.
@@ -4369,12 +4634,12 @@ void CLSDREC::combineInterfaceLists(AGGSYM *aggregate)
 
     FOREACHSYMLIST(reversedIfaceList, next)
         if (!aggregate->allIfaceList->contains(next)) {
-            AGGSYM *ifaceToAdd = next->asAGGSYM();
+            TYPESYM *ifaceToAdd = next->asTYPESYM();
 
             //
             // ensure inherited interface has already merged its interfaces
             //
-            ASSERT(ifaceToAdd->hasResolvedBaseClasses);
+            ASSERT(ifaceToAdd->underlyingAggregate()->hasResolvedBaseClasses);
 
             //
             // add the inherited interface and its inherited interfaces
@@ -4383,7 +4648,7 @@ void CLSDREC::combineInterfaceLists(AGGSYM *aggregate)
             addToAllIfaceList = addToAllIfaceListFront;
 
             addUniqueInterfaces(aggregate->allIfaceList, &addToAllIfaceList, ifaceToAdd);
-            addUniqueInterfaces(aggregate->allIfaceList, &addToAllIfaceList, ifaceToAdd->allIfaceList);
+            addUniqueInterfaces(aggregate->allIfaceList, &addToAllIfaceList, ifaceToAdd->underlyingAggregate()->allIfaceList, ifaceToAdd);
         }
     ENDFOREACHSYMLIST
 }
@@ -4427,7 +4692,9 @@ void CLSDREC::prepareInterface(AGGSYM *cls)
                 prepareInterfaceMember(child->asMETHPROPSYM());
                 break;
 
+            case SK_TYVARSYM: 
             case SK_PTRSYM:
+            case SK_INSTAGGSYM:
             case SK_ARRAYSYM:
             case SK_EXPANDEDPARAMSSYM:
             case SK_PARAMMODSYM:
@@ -4438,7 +4705,7 @@ void CLSDREC::prepareInterface(AGGSYM *cls)
                 compiler()->symmgr.DeclareType(child->asEVENTSYM()->type);
                 reportDeprecatedType(child->asEVENTSYM()->parseTree, child->asEVENTSYM(), child->asEVENTSYM()->type);
                 // Issue error if the event type is not a delegate.
-                if (child->asEVENTSYM()->type->kind != SK_AGGSYM || ! child->asEVENTSYM()->type->asAGGSYM()->isDelegate) {
+                if (!child->asEVENTSYM()->type->isDelegateType()) {
                     errorSymbol(child->asEVENTSYM(), ERR_EventNotDelegate);
                 }
                 break;
@@ -4482,11 +4749,11 @@ void CLSDREC::reportHiding(SYM *sym, SYM *hiddenSymbol, unsigned flags)
                 hiddenSymbol,
                 (hiddenSymbol->isVirtualSym() &&
                  (sym->kind == hiddenSymbol->kind) &&
-                 !sym->parent->asAGGSYM()->isInterface) ?
+                 !sym->parent->asTYPESYM()->underlyingAggregate()->isInterface) ?
                     WRN_NewOrOverrideExpected :
                     WRN_NewRequired);
         }
-        if (!sym->parent->asAGGSYM()->isInterface) {
+        if (!sym->parent->asTYPESYM()->underlyingAggregate()->isInterface) {
             checkHiddenSymbol(sym, hiddenSymbol);
         }
     }
@@ -4512,13 +4779,11 @@ void CLSDREC::checkSimpleHiding(SYM *sym, unsigned flags, SYMKIND symkind, PTYPE
 
 void CLSDREC::checkIfaceHiding(SYM *sym, unsigned flags, SYMKIND symkind, PTYPESYM *params)
 {
-    // for all inherited interfaces
     AGGSYM *cls = sym->parent->asAGGSYM();
     if (sym->isUserCallable()) {
         BOOL foundHiddenSymbol = false;
         FOREACHSYMLIST(cls->allIfaceList, interfaceToSearch)
-
-            SYM *hiddenSymbol = findHiddenSymbol(sym->name, symkind, params, interfaceToSearch->asAGGSYM(), cls);
+            SYM *hiddenSymbol = findHiddenSymbol(sym->name, symkind, params, interfaceToSearch->asTYPESYM(), cls);
             if (hiddenSymbol) {
                 // found a method or property we will hide
                 reportHiding(sym, hiddenSymbol, flags);
@@ -4558,7 +4823,6 @@ void CLSDREC::checkCLSnaming(AGGSYM *cls)
     WCHAR buffer[MAX_IDENT_SIZE];
     PERRORSYM CLSroot;
     PLOCVARSYM temp;
-    PAGGSYM base;
 
     // Create a local symbol table root for this stuff
     CLSroot = (PERRORSYM)compiler()->symmgr.CreateLocalSym( SK_ERRORSYM,
@@ -4570,9 +4834,10 @@ void CLSDREC::checkCLSnaming(AGGSYM *cls)
     
     // add all externally visible members of interfaces
     FOREACHSYMLIST(cls->allIfaceList, base)
-        ASSERT(base->asAGGSYM());
-       
-        FOREACHCHILD(base->asAGGSYM(), member)
+        ASSERT(base->asTYPESYM()->underlyingAggregate());
+        PAGGSYM baseAgg = base->asTYPESYM()->underlyingAggregate();
+
+        FOREACHCHILD(baseAgg, member)
             if (member->hasExternalAccess()) {
                 // Add a lower-case symbol to our list (we don't care about collisions here)
                 ToLowerCase( member->name->text, buffer, (size_t) -1);
@@ -4582,13 +4847,14 @@ void CLSDREC::checkCLSnaming(AGGSYM *cls)
             }
         ENDFOREACHCHILD
     ENDFOREACHSYMLIST
+
     // add all the externally visible members of base classes
-    for (base = cls->baseClass; base; base = base->baseClass) {
-        ASSERT(base->asAGGSYM());
-        if (!base->asAGGSYM()->isCLS_Type())
+    BASE_CLASSES_LOOP(cls->baseClass->underlyingAggregate(), base)
+        ASSERT(base);
+        if (!base->isCLS_Type())
             errorSymbolAndRelatedSymbol( cls, base, ERR_CLS_BadBase);
        
-        FOREACHCHILD(base->asAGGSYM(), member)
+        FOREACHCHILD(base, member)
             if (member->hasExternalAccess()) {
                 // Add a lower-case symbol to our list (we don't care about collisions here)
                 ToLowerCase( member->name->text, buffer, (size_t) -1);
@@ -4597,7 +4863,7 @@ void CLSDREC::checkCLSnaming(AGGSYM *cls)
                 temp->type = (PTYPESYM)member;
             }
         ENDFOREACHCHILD
-    }
+    END_BASE_CLASSES_LOOP
 
     // Also check the underlying type of Enums
     if (cls->isEnum && !cls->underlyingType->isCLS_Type()) {
@@ -4607,6 +4873,8 @@ void CLSDREC::checkCLSnaming(AGGSYM *cls)
 
     FOREACHCHILD(cls, member)
         if (member->kind == SK_ARRAYSYM || 
+	        member->kind == SK_TYVARSYM || 
+	        member->kind == SK_INSTAGGSYM ||
             member->kind == SK_PTRSYM || 
             member->kind == SK_PARAMMODSYM || 
             member->kind == SK_PINNEDSYM ||
@@ -4751,6 +5019,14 @@ void CLSDREC::checkCLSnaming(NSSYM *ns)
 
 // prepares a class for compilation by preparing all of its elements...
 // This should also verify that a class actually implements its interfaces...
+// This also calls defineAggregate() for the class, resolves its inheritance,
+// creates its nested types & prepares them - basically
+// everything is brought up to fully-declared state except the code.
+// Its type variables will already have been created.  We do not have to
+// force the declaration of the types involved in the
+// constraints for the type variables until
+// we actually try to satisfy the constraints, which comes right at the end
+// of the whole compilation.
 void CLSDREC::prepareAggregate(AGGSYM * cls)
 {
     ASSERT(!cls->getInputFile()->isSource || ((cls->parseTree  && cls->getInputFile()->hasChanged) || (!cls->parseTree  && !cls->getInputFile()->hasChanged)));
@@ -4759,37 +5035,53 @@ void CLSDREC::prepareAggregate(AGGSYM * cls)
         ASSERT(!cls->isPreparing);
         cls->isPreparing = true;
 
+        if (cls->isClass) {
+			TYPESYM * base = cls->baseClass;
+            while (!cls->hasConversion && base) {
+                cls->hasConversion |= base->underlyingAggregate()->hasConversion;
+                base = base->underlyingAggregate()->baseClass;
+            }
+        }
+
         // ASSERT(!compiler()->IsIncrementalRebuild() || compiler()->HaveTypesBeenDefined());
+        // Nb. This also calls resolveInheritance, and defines all members, including
+        // nested types.
         compiler()->EnsureTypeIsDefined(cls);
         ASSERT(!(cls->isEnum && (cls->isStruct || cls->isClass || cls->isDelegate)));
 
         SETLOCATIONSYM(cls);
 
         //
-        // do base class & interfaces first
+        // Prepare base class & interfaces first.  This is to make sure we
+        // all the inherited and to-be-implemented members have been prepared
+        // before we come to doing this class.  
         //
         if (cls->baseClass) {
-            prepareAggregate(cls->baseClass);
+            prepareAggregate(cls->baseClass->underlyingAggregate());
             if (cls->parseTree) {
-                reportDeprecatedType(cls->parseTree, cls, cls->baseClass);
+                reportDeprecatedType(cls->parseTree, cls, cls->baseClass->underlyingAggregate());
             }
         }
         FOREACHSYMLIST(cls->ifaceList, iface)
-            prepareAggregate(iface->asAGGSYM());
+			prepareAggregate(iface->asTYPESYM()->underlyingAggregate());
             if (cls->parseTree) {
-                reportDeprecatedType(cls->parseTree, cls, iface->asAGGSYM());
+                reportDeprecatedType(cls->parseTree, cls, iface->asTYPESYM()->underlyingAggregate());
             }
         ENDFOREACHSYMLIST;
 
         if (cls->isClass) {
-            AGGSYM * base = cls->baseClass;
-            while (!cls->hasConversion && base) {
+            BASE_CLASSES_LOOP(cls, base)
+                if (base->hasConversion) break;
                 cls->hasConversion |= base->hasConversion;
-                base = base->baseClass;
-            }
+            END_BASE_CLASSES_LOOP
         }
 
         if (cls->parseTree) {
+    		// Prepare bounds of type variables
+		    for (unsigned short tv = 0; tv < cls->cTypeFormals; tv++) {
+			    reportDeprecatedType(cls->parseTree, cls, cls->ppTypeFormals[tv]->bound);
+			}
+
             //
             // are we a nested class
             //
@@ -4843,11 +5135,11 @@ void CLSDREC::prepareAggregate(AGGSYM * cls)
 // finds an explicit interface implementation on a class or struct
 // cls          is the type to look in
 // explicitImpl is the interface member to look for
-SYM *CLSDREC::findExplicitInterfaceImplementation(AGGSYM *cls, SYM *explicitImpl)
+SYM *CLSDREC::findExplicitInterfaceImplementation(AGGSYM *cls, SYM *explicitImpl, TYPESYM *explicitImplMethodInType)
 {
     if (explicitImpl->kind == SK_EVENTSYM) {
         EVENTSYM *foundImplementation = compiler()->symmgr.LookupGlobalSym(NULL, cls, MASK_EVENTSYM)->asEVENTSYM();
-        while (foundImplementation && foundImplementation->explicitImpl != explicitImpl) {
+        while (foundImplementation && (foundImplementation->explicitImpl != explicitImpl || foundImplementation->explicitImplMethodInType != explicitImplMethodInType)) {
             foundImplementation = compiler()->symmgr.LookupNextSym(foundImplementation, foundImplementation->parent, MASK_EVENTSYM)->asEVENTSYM();
         }
 
@@ -4855,10 +5147,10 @@ SYM *CLSDREC::findExplicitInterfaceImplementation(AGGSYM *cls, SYM *explicitImpl
     }
     else {
         METHPROPSYM *foundImplementation = compiler()->symmgr.LookupGlobalSym(NULL, cls, MASK_METHSYM | MASK_PROPSYM)->asMETHPROPSYM();
-        while (foundImplementation && foundImplementation->explicitImpl != explicitImpl) {
+        while (foundImplementation && (foundImplementation->explicitImpl != explicitImpl || foundImplementation->explicitImplMethodInType != explicitImplMethodInType)) {
             foundImplementation = compiler()->symmgr.LookupNextSym(foundImplementation, foundImplementation->parent, MASK_METHSYM | MASK_PROPSYM)->asMETHPROPSYM();
-        }
 
+		}
         return foundImplementation;
     }
 }
@@ -4872,7 +5164,7 @@ void CLSDREC::setOverrideBits(AGGSYM * cls)
     if (!cls->baseClass)
         return;
 
-    ASSERT( cls->baseClass->isPrepared);
+    ASSERT( cls->baseClass->underlyingAggregate()->isPrepared);
 
     FOREACHCHILD(cls, sym)
         if (sym->kind == SK_METHSYM && sym->asMETHSYM()->isOverride) {
@@ -4887,10 +5179,12 @@ void CLSDREC::setOverrideBits(AGGSYM * cls)
             //      - list of inherited abstract methods
             //
             SYM *hiddenSymbol;
-            hiddenSymbol = findHiddenSymbol(method->name, SK_METHSYM, method->params, cls->baseClass, cls);
+            TYPESYM *methodInType;
+            hiddenSymbol = findHiddenSymbol(method->name, SK_METHSYM, method->params, cls->baseClass, cls, &methodInType);
             if (hiddenSymbol && hiddenSymbol->kind == SK_METHSYM) {
                 METHSYM *hiddenMethod = hiddenSymbol->asMETHSYM();
-                if (hiddenMethod->retType == method->retType && hiddenMethod->access == method->access &&
+                if (compiler()->symmgr.SubstTypeUsingType(hiddenMethod->retType,methodInType) == method->retType && 
+                    hiddenMethod->access == method->access &&
                     hiddenMethod->isMetadataVirtual) {
                     method->isOverride = true;
                 }
@@ -4932,20 +5226,24 @@ void CLSDREC::setOverrideBits(AGGSYM * cls)
 void CLSDREC::buildAbstractMethodsList(AGGSYM * cls)
 {
     ASSERT(!cls->abstractMethods);
+    ASSERT(!cls->abstractMethodMethodInTypes);
 
     //
     // for abstract classes, build list of abstract methods
     //
+
     if (cls->isAbstract && !cls->isInterface) {
 
         ASSERT(cls->isClass);
 
         PSYMLIST *addToList = &cls->abstractMethods;
+        PSYMLIST *addToMethodInTypeList = &cls->abstractMethodMethodInTypes;
 
         // add all new abstract methods
         FOREACHCHILD(cls, child)
             if (child->kind == SK_METHSYM && child->asMETHSYM()->isAbstract) {
                 compiler()->symmgr.AddToGlobalSymList(child, &addToList);
+                compiler()->symmgr.AddToGlobalSymList(cls, &addToMethodInTypeList);
             }
         ENDFOREACHCHILD
 
@@ -4954,8 +5252,8 @@ void CLSDREC::buildAbstractMethodsList(AGGSYM * cls)
         // NOTE: this deals with property accessors as well
         //
         if (cls->baseClass) {
-            FOREACHSYMLIST(cls->baseClass->abstractMethods, method)
-                METHSYM *localMethod = findSameSignature(method->asMETHSYM(), cls);
+            FOREACHSYMLIST2(cls->baseClass->underlyingAggregate()->abstractMethods, cls->baseClass->underlyingAggregate()->abstractMethodMethodInTypes, method, methodInType)
+                METHSYM *localMethod = findSameSignature(cls->baseClass, method->asMETHSYM(), cls);
                 if (!localMethod || !localMethod->isOverride ||
                     //
                     // here we are checking for an inherited abstract method
@@ -4964,8 +5262,9 @@ void CLSDREC::buildAbstractMethodsList(AGGSYM * cls)
                     // 
                     !checkAccess(method, cls, NULL, cls)) {
                     compiler()->symmgr.AddToGlobalSymList(method, &addToList);
+                    compiler()->symmgr.AddToGlobalSymList(compiler()->symmgr.SubstTypeUsingType(methodInType->asTYPESYM(), cls->baseClass), &addToMethodInTypeList);
                 }
-            ENDFOREACHSYMLIST
+            ENDFOREACHSYMLIST2
         }
     }
 }
@@ -4989,8 +5288,8 @@ void CLSDREC::prepareClassOrStruct(AGGSYM * cls)
     //
     // check that our base class isn't sealed
     //
-    if (cls->baseClass && cls->baseClass->isSealed) {
-        errorSymbolAndRelatedSymbol(cls, cls->baseClass, ERR_CantDeriveFromSealedClass);
+    if (cls->baseClass && cls->baseClass->underlyingAggregate()->isSealed) {
+        errorSymbolAndRelatedSymbol(cls, cls->baseClass->underlyingAggregate(), ERR_CantDeriveFromSealedClass);
     }
 
     //
@@ -5017,10 +5316,14 @@ void CLSDREC::prepareClassOrStruct(AGGSYM * cls)
             // need to do this after fully preparing members
     		//
             break;
+            break;
+        case SK_TYVARSYM:
+            break;
         case SK_METHSYM:
             prepareMethod(child->asMETHSYM());
             break;
         case SK_EXPANDEDPARAMSSYM:
+        case SK_INSTAGGSYM:
         case SK_PARAMMODSYM:
         case SK_ARRAYSYM:
         case SK_PTRSYM:
@@ -5063,8 +5366,8 @@ void CLSDREC::prepareClassOrStruct(AGGSYM * cls)
     // check that all inherited abstract methods are implemented for non-abstract classes
     //
     if (!cls->isAbstract && cls->baseClass) {
-        FOREACHSYMLIST(cls->baseClass->abstractMethods, method)
-            METHSYM *implementedMethod = findSameSignature(method->asMETHSYM(), cls);
+        FOREACHSYMLIST2(cls->baseClass->underlyingAggregate()->abstractMethods, cls->baseClass->underlyingAggregate()->abstractMethodMethodInTypes, method, methodInType)
+            METHSYM *implementedMethod = findSameSignature(cls->baseClass, method->asMETHSYM(), cls);
             if (!implementedMethod || !implementedMethod->isOverride ||
                 //
                 // here we are checking for an inherited abstract method
@@ -5080,8 +5383,9 @@ void CLSDREC::prepareClassOrStruct(AGGSYM * cls)
     //
     // check that all interface methods are implemented
     //
-    FOREACHSYMLIST(cls->allIfaceList, iface)
-        FOREACHCHILD(iface->asAGGSYM(), member)
+    FOREACHSYMLIST(cls->allIfaceList, iface_sym)
+        TYPESYM *iface = iface_sym->asTYPESYM();
+		FOREACHCHILD(iface->underlyingAggregate(), member)
 
             switch (member->kind) {
             case SK_METHSYM:
@@ -5094,14 +5398,15 @@ void CLSDREC::prepareClassOrStruct(AGGSYM * cls)
                     continue;
                 }
                 BOOL foundBaseImplementation = false;
-                AGGSYM *classToSearchIn = cls;
+                TYPESYM *typeToSearchIn = cls;
                 METHPROPSYM *foundImplementation;
                 METHPROPSYM *closeImplementation = NULL;
                 do {
+                    AGGSYM *classToSearchIn = typeToSearchIn->underlyingAggregate();
                     //
                     // check for explicit interface implementation
                     //
-                    foundImplementation = findExplicitInterfaceImplementation(classToSearchIn, member->asMETHSYM())->asMETHSYM();
+                    foundImplementation = findExplicitInterfaceImplementation(classToSearchIn, member->asMETHSYM(), iface)->asMETHSYM();
                     if (foundImplementation) {
                         break;
                     }
@@ -5117,14 +5422,19 @@ void CLSDREC::prepareClassOrStruct(AGGSYM * cls)
                     //
                     // check for implicit interface implementation
                     //
-                    foundImplementation = findSameSignature(member->asMETHSYM(), classToSearchIn);
+                    foundImplementation = findSameSignature(iface, member->asMETHSYM(), typeToSearchIn);
                     if (foundImplementation) {
                         if (!foundImplementation->isStatic && 
                             (foundImplementation->access == ACC_PUBLIC) &&
-                            (foundImplementation->retType == member->asMETHSYM()->retType)) {
+                            (compiler()->symmgr.SubstTypeUsingType(foundImplementation->retType,typeToSearchIn) == compiler()->symmgr.SubstTypeUsingType(member->asMETHSYM()->retType, iface))) {
                             // found a match
+                            if (foundImplementation->asMETHSYM()->isPropertyAccessor || foundImplementation->asMETHSYM()->isEventAccessor) {
+                                errorSymbolSymbolSymbol(foundImplementation, member, cls, ERR_AccessorImplementingMethod);
+                                foundImplementation = 0;
+                                break;
+                            }
 
-                            foundImplementation = needExplicitImpl(member->asMETHSYM(), foundImplementation->asMETHSYM(), cls);
+                            foundImplementation = needExplicitImpl(member->asMETHSYM(), iface, foundImplementation->asMETHSYM(), cls);
                             break;
                         } else {
                             //
@@ -5138,8 +5448,8 @@ void CLSDREC::prepareClassOrStruct(AGGSYM * cls)
                         }
                     }
             
-                    classToSearchIn = classToSearchIn->baseClass;
-                } while (classToSearchIn);
+                    typeToSearchIn = compiler()->symmgr.SubstTypeUsingType(classToSearchIn->baseClass, typeToSearchIn);
+                } while (typeToSearchIn);
 
                 if (!foundImplementation && !foundBaseImplementation) {
                     //
@@ -5171,14 +5481,15 @@ void CLSDREC::prepareClassOrStruct(AGGSYM * cls)
                     break;
                 }
                 BOOL foundBaseImplementation = false;
-                AGGSYM *classToSearchIn = cls;
+                TYPESYM *typeToSearchIn = cls;
                 PROPSYM *foundImplementation;
                 PROPSYM *closeImplementation = NULL;
                 do {
+                    AGGSYM *classToSearchIn = typeToSearchIn->underlyingAggregate();
                     //
                     // check for explicit interface implementation
                     //
-                    foundImplementation = findExplicitInterfaceImplementation(classToSearchIn, member->asPROPSYM())->asPROPSYM();
+                    foundImplementation = findExplicitInterfaceImplementation(classToSearchIn, member->asPROPSYM(), iface)->asPROPSYM();
                     if (foundImplementation) {
                         break;
                     }
@@ -5194,11 +5505,11 @@ void CLSDREC::prepareClassOrStruct(AGGSYM * cls)
                     //
                     // check for implicit interface implementation
                     //
-                    foundImplementation = findSameSignature(member->asPROPSYM(), classToSearchIn);
+                    foundImplementation = findSameSignature(iface, member->asPROPSYM(), typeToSearchIn);
                     if (foundImplementation) {
                         if (!foundImplementation->isStatic && 
                             (foundImplementation->access == ACC_PUBLIC) &&
-                            (foundImplementation->retType == member->asPROPSYM()->retType) &&
+                            (compiler()->symmgr.SubstTypeUsingType(foundImplementation->retType,typeToSearchIn) == compiler()->symmgr.SubstTypeUsingType(member->asPROPSYM()->retType, iface)) &&
                             (!foundImplementation->isOverride)) {
                             // found a match
                             break;
@@ -5214,8 +5525,8 @@ void CLSDREC::prepareClassOrStruct(AGGSYM * cls)
                         }
                     }
             
-                    classToSearchIn = classToSearchIn->baseClass;
-                } while (classToSearchIn);
+                    typeToSearchIn = compiler()->symmgr.SubstTypeUsingType(classToSearchIn->baseClass,typeToSearchIn);
+                } while (typeToSearchIn);
 
                 if (!foundImplementation && !foundBaseImplementation) {
                     //
@@ -5238,7 +5549,7 @@ void CLSDREC::prepareClassOrStruct(AGGSYM * cls)
 #ifdef DEBUG
                             METHSYM *methGet =
 #endif // DEBUG
-                            needExplicitImpl(member->asPROPSYM()->methGet, foundImplementation->methGet, cls);
+						    needExplicitImpl(member->asPROPSYM()->methGet, iface, foundImplementation->methGet, cls);
                             // if the implementing method can't be set to isMetadataVirtual
                             // then we should have added a compiler generated explcit impl in needExplicitImpl
                             ASSERT(methGet->isMetadataVirtual);
@@ -5249,7 +5560,7 @@ void CLSDREC::prepareClassOrStruct(AGGSYM * cls)
 #ifdef DEBUG
                             METHSYM *methSet =
 #endif // DEBUG
-                            needExplicitImpl(member->asPROPSYM()->methSet, foundImplementation->methSet, cls);
+                            needExplicitImpl(member->asPROPSYM()->methSet, iface, foundImplementation->methSet, cls);
                             // if the implementing method can't be set to isMetadataVirtual
                             // then we should have added a compiler generated explcit impl in needExplicitImpl
                             ASSERT(methSet->isMetadataVirtual);
@@ -5268,14 +5579,15 @@ void CLSDREC::prepareClassOrStruct(AGGSYM * cls)
                     break;
                 }
                 BOOL foundBaseImplementation = false;
-                AGGSYM *classToSearchIn = cls;
+                TYPESYM *typeToSearchIn = cls;
                 EVENTSYM *foundImplementation;
                 SYM *closeImplementation = NULL;
                 do {
+                    AGGSYM *classToSearchIn = typeToSearchIn->underlyingAggregate();
                     //
                     // check for explicit interface implementation
                     //
-                    foundImplementation = findExplicitInterfaceImplementation(classToSearchIn, member)->asEVENTSYM();
+                    foundImplementation = findExplicitInterfaceImplementation(classToSearchIn, member, iface)->asEVENTSYM();
                     if (foundImplementation) {
                         break;
                     }
@@ -5295,7 +5607,7 @@ void CLSDREC::prepareClassOrStruct(AGGSYM * cls)
                     if (foundImplementation) {
                         if (!foundImplementation->isStatic && 
                             (foundImplementation->access == ACC_PUBLIC) &&
-                            (foundImplementation->type == member->asEVENTSYM()->type)) {
+                            (compiler()->symmgr.SubstTypeUsingType(foundImplementation->type,typeToSearchIn) == compiler()->symmgr.SubstTypeUsingType(member->asEVENTSYM()->type, iface))) {
                             // found a match
                             break;
                         } else {
@@ -5310,8 +5622,8 @@ void CLSDREC::prepareClassOrStruct(AGGSYM * cls)
                         }
                     }
             
-                    classToSearchIn = classToSearchIn->baseClass;
-                } while (classToSearchIn && !foundImplementation);
+                    typeToSearchIn = compiler()->symmgr.SubstTypeUsingType(classToSearchIn->baseClass,typeToSearchIn);
+                } while (typeToSearchIn && !foundImplementation);
 
                 if (!foundImplementation && !foundBaseImplementation) {
                     //
@@ -5325,8 +5637,8 @@ void CLSDREC::prepareClassOrStruct(AGGSYM * cls)
                 }
                 else {
                     if (foundImplementation) {
-                        needExplicitImpl(member->asEVENTSYM()->methAdd, foundImplementation->asEVENTSYM()->methAdd, cls);
-                        needExplicitImpl(member->asEVENTSYM()->methRemove, foundImplementation->asEVENTSYM()->methRemove, cls);
+                        needExplicitImpl(member->asEVENTSYM()->methAdd, iface, foundImplementation->asEVENTSYM()->methAdd, cls);
+                        needExplicitImpl(member->asEVENTSYM()->methRemove, iface, foundImplementation->asEVENTSYM()->methRemove, cls);
                     }
                 }
                 break;
@@ -5335,6 +5647,8 @@ void CLSDREC::prepareClassOrStruct(AGGSYM * cls)
             case SK_EXPANDEDPARAMSSYM:
             case SK_PARAMMODSYM:
             case SK_PTRSYM:
+            case SK_TYVARSYM:  
+            case SK_INSTAGGSYM:  
                 break;
             default:
                 ASSERT(!"Unknown interface member");
@@ -5344,11 +5658,12 @@ void CLSDREC::prepareClassOrStruct(AGGSYM * cls)
 
 }
 
+
 //
 // checks if we need a compiler generated explicit method impl
 // returns the actual method implementing the interface method
 //
-METHSYM *CLSDREC::needExplicitImpl(METHSYM *ifaceMethod, METHSYM *implMethod, AGGSYM *cls)
+METHSYM *CLSDREC::needExplicitImpl(METHSYM *ifaceMethod, TYPESYM *ifaceMethodMethodInType, METHSYM *implMethod, AGGSYM *cls)
 {
     if (!implMethod->explicitImpl &&                            // user defined explicit impl
         (ifaceMethod->hasCmodOpt || implMethod->hasCmodOpt ||   // differing signatures
@@ -5367,6 +5682,7 @@ METHSYM *CLSDREC::needExplicitImpl(METHSYM *ifaceMethod, METHSYM *implMethod, AG
         impl->isOverride = false;
         impl->hasCmodOpt = ifaceMethod->hasCmodOpt;
         impl->explicitImpl = ifaceMethod;
+        impl->explicitImplMethodInType = ifaceMethodMethodInType;
         impl->implMethod = implMethod;
         impl->parseTree = cls->parseTree;
         impl->isAbstract = false;
@@ -5390,7 +5706,7 @@ void CLSDREC::prepareEnum(AGGSYM *cls)
 // define a class.  this means bind its base class and implemented interface
 // list as well as define the class elements.
 //
-// returns false if this type is involved in a cycle in the inheritance chain
+// gives an error if this type is involved in a cycle in the inheritance chain
 //
 // NOTE: this does not work for the predefined 'object' type.
 void CLSDREC::defineAggregate(AGGSYM *cls)
@@ -5403,7 +5719,7 @@ void CLSDREC::defineAggregate(AGGSYM *cls)
     if (cls->isDefined) {
         return;
     }
-    ASSERT(cls != compiler()->symmgr.GetObject());
+	if (cls == compiler()->symmgr.GetObject()) { cls->isDefined = true; return; } 
 
 #ifdef DEBUG
     compiler()->haveDefinedAnyType = true;
@@ -5420,7 +5736,7 @@ void CLSDREC::defineAggregate(AGGSYM *cls)
     // check for new protected in a sealed class
     //
     if ((cls->access == ACC_PROTECTED || cls->access == ACC_INTERNALPROTECTED) &&
-        cls->parent->kind == SK_AGGSYM &&
+        cls->parent->isAggParent() &&
         cls->parent->asAGGSYM()->isSealed) {
 
         errorSymbol(cls, cls->isStruct ? ERR_ProtectedInStruct : WRN_ProtectedInSealed);
@@ -5500,6 +5816,8 @@ void CLSDREC::defineAggregateMembers(AGGSYM *cls)
             defineAggregate(elem->asAGGSYM());
             break;
 
+        case SK_INSTAGGSYM: 
+        case SK_TYVARSYM: 
         case SK_ARRAYSYM:
         case SK_EXPANDEDPARAMSSYM:
         case SK_PARAMMODSYM:
@@ -5709,9 +6027,19 @@ void CLSDREC::checkMatchingOperator(PREDEFNAME pn, AGGSYM * cls)
                 match;
                 match = compiler()->symmgr.LookupNextSym(match, cls, MASK_METHSYM)->asMETHSYM()) {
 
+				// GENERICS:  The argument signatures of the static operator methods are
+				// always in terms of the type parameters to each method, which have been
+				// implicitly copied from the type parameters for the class
+				// when defining the operator.  In order to check equality between the
+				// types, we have to normalize them both by substituting through the
+				// class type parameters.  For non-generic code these substitutions
+				// will be all be no-ops.
                 if (match->isOperator) {
-                    if (match->retType == original->retType && match->params == original->params) {
-                        goto MATCHED;
+                    if (compiler()->symmgr.SubstType(match->retType, 0, NULL, cls->cTypeFormals, (TYPESYM **) cls->ppTypeFormals) == 
+						compiler()->symmgr.SubstType(original->retType, 0, NULL, cls->cTypeFormals, (TYPESYM **) cls->ppTypeFormals) &&
+						compiler()->symmgr.SubstParams(match->cParams, match->params, 0, NULL, cls->cTypeFormals, (TYPESYM **) cls->ppTypeFormals) == 
+						compiler()->symmgr.SubstParams(original->cParams, original->params, 0, NULL, cls->cTypeFormals, (TYPESYM **) cls->ppTypeFormals)) {
+						goto MATCHED;
                     }
                 }
             }
@@ -5825,14 +6153,16 @@ void CLSDREC::defineDelegateMembers(AGGSYM *cls)
         DELEGATENODE * delegateNode = cls->parseTree->asDELEGATE();
         bool unsafeContext = ((delegateNode->flags & NF_MOD_UNSAFE) != 0);
         if (!unsafeContext) {
-            SYM *context = cls->parent;
-            while (!unsafeContext && context && context->kind == SK_AGGSYM) {
+            PARENTSYM *context = cls->parent;
+            while (!unsafeContext && context && context->isAggParent()) {
                 unsafeContext = ((context->getParseTree()->flags & NF_MOD_UNSAFE) != 0);
                 context = context->parent; // The while loop condition makes sure this is still an AGGSYM
             }
         }
 
-        PTYPESYM returnType = bindType(delegateNode->pType, cls->containingDeclaration(), BTF_NODECLARE | BTF_NODEPRECATED, NULL);
+        // GENERICS: modified to allow the return type to include type parameters to the delegate class.
+		// GENERICS: error messages may not be quite right.
+        PTYPESYM returnType = bindType(delegateNode->pType, cls, BTF_NODECLARE | BTF_NODEPRECATED, NULL);
         if (!returnType) {
             return;
         }
@@ -5865,7 +6195,8 @@ void CLSDREC::defineDelegateMembers(AGGSYM *cls)
                 paramTypes = newArray;
             }
             // bind the type, and wrap it if the variable is byref
-            PTYPESYM paramType = bindType(param->pType, cls->containingDeclaration(), BTF_NODECLARE | BTF_NODEPRECATED, NULL);
+            // GENERICS: modified to allow the return type to include type parameters to the delegate class.
+            PTYPESYM paramType = bindType(param->pType, cls, BTF_NODECLARE | BTF_NODEPRECATED, NULL);
             if (!paramType) {
                 return;
             }
@@ -6190,21 +6521,21 @@ void CLSDREC::emitTypedefsAggregate(AGGSYM * cls)
     outputFile = cls->getInputFile()->getOutputFile();
 
     // Do the base class 
-    base = cls->baseClass;
+    base = cls->baseClass->underlyingAggregate();
     if (base && base->getInputFile()->getOutputFile() == outputFile)
         emitTypedefsAggregate(base);
 
     // Iterate the base interfaces.
     FOREACHSYMLIST(cls->ifaceList, baseIface)
 
-        base = baseIface->asAGGSYM();
+		base = baseIface->asTYPESYM()->underlyingAggregate();
         if (base->getInputFile()->getOutputFile() == outputFile)
             emitTypedefsAggregate(base);
 
     ENDFOREACHSYMLIST
 
     // we need to do outer classes before we do the nested classes
-    if (cls->parent->kind == SK_AGGSYM && !cls->parent->asAGGSYM()->isTypeDefEmitted) {
+	if (cls->parent->isAggParent() && !cls->parent->asAGGSYM()->isTypeDefEmitted) {
         emitTypedefsAggregate(cls->parent->asAGGSYM());
         ASSERT(cls->isTypeDefEmitted);
         return;
@@ -6221,6 +6552,7 @@ void CLSDREC::emitTypedefsAggregate(AGGSYM * cls)
             emitTypedefsAggregate(child->asAGGSYM());
         }
     ENDFOREACHCHILD
+    ASSERT(compiler()->options.m_fNOCODEGEN || cls->tokenEmit);
 }
 
 // Emit memberdefs for all aggregates in this namespace...  
@@ -6270,6 +6602,90 @@ void CLSDREC::reemitMemberdefsNamespace(NSDECLSYM *nsDeclaration)
         }
     ENDFOREACHCHILD
 }
+
+
+
+// Emit typerefs/defs/specs for the inheritance hierarchy.
+// Make sure we traverse in the same order as above, just in case.
+//
+// This is structured as a seperate phase because there are corner cases where
+// recursion between the base class and the current class is allowed, 
+// e.g. class C : IList<C> { ... }
+//
+void CLSDREC::emitBasesNamespace(NSDECLSYM *nsDeclaration)
+{
+    SETLOCATIONSYM(nsDeclaration);
+
+    //
+    // emit memberdefs for each aggregate type.
+    //
+    FOREACHCHILD(nsDeclaration, elem)
+        switch (elem->kind) {
+        case SK_NSDECLSYM:
+            emitBasesNamespace(elem->asNSDECLSYM());
+            break;
+        case SK_AGGSYM:
+            emitBasesAggregate (elem->asAGGSYM());
+            break;
+        case SK_GLOBALATTRSYM:
+            break;
+        default:
+            ASSERT(!"Unknown type");
+        }
+    ENDFOREACHCHILD
+}
+
+
+// Emit bases for this aggregates 
+void CLSDREC::emitBasesAggregate(AGGSYM * cls)
+{
+    OUTFILESYM * outputFile;
+    AGGSYM * base;
+
+    // If we've already hit this one (because it was a base of someone earlier),
+    // then nothing more to do.
+    if (cls->isBasesEmitted) return;
+
+    SETLOCATIONSYM(cls);
+
+    // the class should already have a token generated for it...
+    ASSERT(compiler()->options.m_fNOCODEGEN || cls->tokenEmit);
+
+    // Do base classes and base interfaces, if they are in the same output scope.
+    outputFile = cls->getInputFile()->getOutputFile();
+
+    // Do the base class 
+    base = cls->baseClass->underlyingAggregate();
+    if (base && base->getInputFile()->getOutputFile() == outputFile)
+        emitBasesAggregate(base);
+
+    // Iterate the base interfaces.
+    FOREACHSYMLIST(cls->ifaceList, baseIface)
+		base = baseIface->asTYPESYM()->underlyingAggregate();
+        if (base->getInputFile()->getOutputFile() == outputFile)
+            emitBasesAggregate(base);
+    ENDFOREACHSYMLIST
+
+    // we need to do outer classes before we do the nested classes
+	if (cls->parent->isAggParent() && !cls->parent->asAGGSYM()->isBasesEmitted) {
+        emitBasesAggregate(cls->parent->asAGGSYM());
+        ASSERT(cls->isBasesEmitted);
+        return;
+    }
+
+    // Do this aggregate.
+    if (!compiler()->options.m_fNOCODEGEN)
+        compiler()->emitter.EmitAggregateBases(cls);
+    cls->isBasesEmitted = true;
+
+    // Do child aggregates.
+    FOREACHCHILD(cls, child)
+        if (child->kind == SK_AGGSYM) {
+            emitBasesAggregate(child->asAGGSYM());
+        }
+    ENDFOREACHCHILD
+}
+
 
 void CLSDREC::EnumMembersInEmitOrder(AGGSYM *cls, VOID *info, MEMBER_OPERATION doMember)
 {
@@ -6327,8 +6743,12 @@ void CLSDREC::EnumMembersInEmitOrder(AGGSYM *cls, VOID *info, MEMBER_OPERATION d
                 (this->*doMember)(child, info);
             }
             break;
+
+
+	case SK_TYVARSYM: 
+	case SK_INSTAGGSYM: 
 	default:
-	    break;
+  	    break;
         }
     ENDFOREACHCHILD
 
@@ -6372,6 +6792,7 @@ void CLSDREC::emitMemberdefsAggregate(AGGSYM * cls)
     OUTFILESYM * outputFile;
     AGGSYM * base;
 
+
     // If we've already hit this one (because it was a base of someone earlier),
     // then nothing more to do.
     if (cls->isMemberDefsEmitted) {
@@ -6392,14 +6813,14 @@ void CLSDREC::emitMemberdefsAggregate(AGGSYM * cls)
     outputFile = cls->getInputFile()->getOutputFile();
 
     // Do the base class
-    base = cls->baseClass;
+    base = cls->baseClass->underlyingAggregate();
     if (base && base->getInputFile()->getOutputFile() == outputFile)
         emitMemberdefsAggregate(base);
 
     // Iterate the base interfaces.
     FOREACHSYMLIST(cls->ifaceList, baseIface)
 
-        base = baseIface->asAGGSYM();
+		base = baseIface->asTYPESYM()->underlyingAggregate();
         if (base->getInputFile()->getOutputFile() == outputFile)
             emitMemberdefsAggregate(base);
 
@@ -6409,7 +6830,7 @@ void CLSDREC::emitMemberdefsAggregate(AGGSYM * cls)
 
     // To do this in the same order as the Aggregate defs
     // we need to do outer classes before we do the nested classes
-    if (cls->parent->kind == SK_AGGSYM && !cls->parent->asAGGSYM()->isMemberDefsEmitted) {
+	if (cls->parent->isAggParent() && !cls->parent->asAGGSYM()->isMemberDefsEmitted) {
         emitMemberdefsAggregate(cls->parent->asAGGSYM());
         ASSERT(cls->isMemberDefsEmitted);
         return;
@@ -6462,7 +6883,7 @@ void CLSDREC::reemitMemberdefsAggregate(AGGSYM * cls)
     outputFile = cls->getInputFile()->getOutputFile();
 
     // Do the base class
-    base = cls->baseClass;
+    base = cls->baseClass->underlyingAggregate();
     if (base && base->getInputFile()->getOutputFile() == outputFile)
         reemitMemberdefsAggregate(base);
 
@@ -6479,7 +6900,7 @@ void CLSDREC::reemitMemberdefsAggregate(AGGSYM * cls)
 
     // To do this in the same order as the Aggregate defs
     // we need to do outer classes before we do the nested classes
-    if (cls->parent->kind == SK_AGGSYM && !cls->parent->asAGGSYM()->isMemberDefsEmitted) {
+    if (cls->parent->isAggParent() && !cls->parent->asAGGSYM()->isMemberDefsEmitted) {
         reemitMemberdefsAggregate(cls->parent->asAGGSYM());
         ASSERT(cls->isMemberDefsEmitted);
         return;
@@ -6615,21 +7036,21 @@ void CLSDREC::compileAggregate(AGGSYM * cls, bool UnsafeContext)
     AGGSYM * base;
 
     // Do the base class
-    base = cls->baseClass;
+	base = cls->baseClass->underlyingAggregate();
     if (base && base->getInputFile()->getOutputFile() == outputFile)
         compileAggregate(base, false);
 
     // Iterate the base interfaces.
     FOREACHSYMLIST(cls->ifaceList, baseIface)
 
-        base = baseIface->asAGGSYM();
+	    base = baseIface->asTYPESYM()->underlyingAggregate();
         if (base->getInputFile()->getOutputFile() == outputFile)
             compileAggregate(base, false);
 
     ENDFOREACHSYMLIST
 
     // Do outer classes before nested classes
-    if (cls->parent->kind == SK_AGGSYM && !cls->parent->asAGGSYM()->isCompiled) {
+    if (cls->parent->isAggParent() && !cls->parent->asAGGSYM()->isCompiled) {
         compileAggregate(cls->parent->asAGGSYM(), false);
         ASSERT(cls->isCompiled);
         return;
@@ -6655,6 +7076,7 @@ void CLSDREC::compileAggregate(AGGSYM * cls, bool UnsafeContext)
     //
     EnumMembersInEmitOrder(cls, &info, (MEMBER_OPERATION) &CLSDREC::CompileMember);
     ASSERT(!cls->isCompiled);
+
     cls->isCompiled = true;  // We've compiled all of our members.
 
     // Nested classes must be done after other members.
@@ -6984,10 +7406,10 @@ SYM * CLSDREC::bindDottedTypeName(BINOPNODE * name, PARENTSYM * symContext, int 
 
     // this is a partially qualified name, so bind the name on the left of all
     // the dots:
-    if (first->asNAME()->pName == compiler()->namemgr->GetPredefName(PN_EMPTY)) {
+    if (first->asANYNAME()->pName == compiler()->namemgr->GetPredefName(PN_EMPTY)) {
         current = compiler()->symmgr.GetRootNS();
     } else {
-        current = bindSingleTypeName(first->asNAME(), symContext, (flags | BTF_NSOK) & ~BTF_ATTRIBUTE, classBeingResolved);
+        current = bindSingleTypeName(first->asANYNAME(), symContext, (flags | BTF_NSOK) & ~BTF_ATTRIBUTE, classBeingResolved);
         // bSTN already reported the error, if any...
         if (!current) return NULL;
     }
@@ -6998,13 +7420,13 @@ SYM * CLSDREC::bindDottedTypeName(BINOPNODE * name, PARENTSYM * symContext, int 
     for (;;) {
         // loop until we bind all the names before the rightmost one...
         first = first->pParent;
-        ASSERT(first->kind == NK_DOT && first->asDOT()->p2->kind == NK_NAME);
+        ASSERT(first->kind == NK_DOT && first->asDOT()->p2->IsAnyName());
 
-        curName = first->asDOT()->p2->asNAME()->pName;
+        curName = first->asDOT()->p2->asANYNAME()->pName;
         PARENTSYM *toSearchIn = current->asPARENTSYM();
         do 
         {
-            if (toSearchIn->kind == SK_AGGSYM)
+            if (toSearchIn->isAggParent())
             {
                 if (!resolveInheritanceRec(toSearchIn->asAGGSYM())) {
                     if (toSearchIn->asAGGSYM()->isResolvingBaseClasses) {
@@ -7015,13 +7437,20 @@ SYM * CLSDREC::bindDottedTypeName(BINOPNODE * name, PARENTSYM * symContext, int 
             }
             // at this point we will take either a class, or a namespace...
             rval = lookupIfAccessOk(curName, toSearchIn, MASK_NSSYM | MASK_AGGSYM, symContext, !(flags & BTF_NODECLARE), &badAccess, &badKind);
-            if (!rval && (toSearchIn->kind == SK_AGGSYM)) {
+            if (!rval && (toSearchIn->isAggParent())) {
                 toSearchIn = toSearchIn->asAGGSYM()->baseClass;
             } else {
                 toSearchIn = NULL;
             }
         } while (!rval && toSearchIn);
-        if (first == last || !rval) break;
+        if (!rval) break;
+
+        if (first->asDOT()->p2->kind == NK_GENERICNAME) {
+    		return bindInstAggType(first->asDOT()->p2, first->asDOT()->p2->asGENERICNAME()->pParams, rval->asAGGSYM(), symContext, flags, classBeingResolved);
+    	}
+
+        if (first == last) break;
+
         current = rval;
         // is this the rightmost name?
     }
@@ -7043,16 +7472,20 @@ SYM * CLSDREC::bindDottedTypeName(BINOPNODE * name, PARENTSYM * symContext, int 
             do 
             {
                 rval = lookupIfAccessOk(attribIdent, current->asPARENTSYM(), MASK_NSSYM | MASK_AGGSYM, symContext, !(flags & BTF_NODECLARE), &badAccess, &badKind);
-                if (!rval && (toSearchIn->kind == SK_AGGSYM)) {
+                if (!rval && (toSearchIn->isAggParent())) {
                     toSearchIn = toSearchIn->asAGGSYM()->baseClass;
                 } else {
                     toSearchIn = NULL;
                 }
             } while (!rval && toSearchIn);
         }
+        if (first->asDOT()->p2->kind == NK_GENERICNAME) {
+  	        return bindInstAggType(first->asDOT()->p2, first->asDOT()->p2->asGENERICNAME()->pParams, rval->asAGGSYM(), symContext, flags, classBeingResolved);
+        }
     }
 
     if (rval) {
+      // found a namespace but not looking for one
         if (!(flags & BTF_NSOK) && rval->kind == SK_NSSYM) {
             if (! (flags & BTF_NOERRORS))
                 errorStrStrStrFile(name, symContext->getInputFile(), ERR_BadSKknown, compiler()->ErrSym(rval), compiler()->ErrSK(rval->kind), compiler()->ErrSK(SK_AGGSYM));
@@ -7163,7 +7596,7 @@ SYM * CLSDREC::findSymName(LPCWSTR fullyQualifiedName, size_t cchName)
 // searches for a name in a parent and checks access on it
 // never raises an error message
 // If declareIfNeeded is true, may declare parent if its an aggregate.
-SYM * CLSDREC::lookupIfAccessOk(NAME * name, PARENTSYM * parent, int mask, PARENTSYM * current, bool declareIfNeeded, SYM ** badAccess, SYM ** badKind)
+SYM * CLSDREC::lookupIfAccessOk(NAME * name, PARENTSYM * parent, symbmask_t mask, PARENTSYM * current, bool declareIfNeeded, SYM ** badAccess, SYM ** badKind)
 {
     SYM * rval = compiler()->symmgr.LookupGlobalSym(name, parent, mask);
     if (rval) {
@@ -7173,11 +7606,11 @@ SYM * CLSDREC::lookupIfAccessOk(NAME * name, PARENTSYM * parent, int mask, PAREN
             return NULL;
     }
     else { 
-        if (parent->kind == SK_AGGSYM && declareIfNeeded)
+        if (parent->isAggParent() && declareIfNeeded)
             compiler()->symmgr.DeclareType(parent);
 
         SYM * badSymKind = compiler()->symmgr.LookupGlobalSym(name, parent, MASK_ALL);
-        if (badSymKind)
+		if (badSymKind)
             *badKind = badSymKind;
         return NULL;
     }
@@ -7329,8 +7762,9 @@ bool CLSDREC::searchUsingClauses(
 }
 
 //
-// Searches a class for a name
-// searches this class, base classes, and nested classes
+// Searches a class for a type name
+// searches this class, base classes, and nested classes.  Type parameters are only 
+// seached for this class (actually this is done in the function that calls this one).
 //
 // returns false on error
 // returns true and sets returnValue if found
@@ -7340,7 +7774,7 @@ bool CLSDREC::searchUsingClauses(
 //
 // context is the symbolic context being searched from
 //
-bool CLSDREC::searchClass(
+bool CLSDREC::searchClassForTypeName(
     NAME *          name, 
     AGGSYM *        classToSearchIn,
     PARENTSYM *     context, 
@@ -7357,28 +7791,42 @@ bool CLSDREC::searchClass(
     // are nested in
     //
     do {
-        //
         // check this class and all base classes
         //
+        // Note that all nested types from super classes are available in sub classes.
+        // However, these types are _not_ available in the specification of the super classes
+        // themselves (e.g. with polymorphic inheritance) or in the bounds to a generic class.
+        // <REVIEW>GENERICS: Note: I guess we could make them available in both with a little work.  This
+        // would make sense as then the resoultion rules for types would be fully consistent for all
+        // aspects of a class.  The thing to do would be to base the resolution off the outer
+        // type constructors, e.g. class Foo<T : Baz> : Bar<Baz> { ... } makes all names in Bar available
+        // throughout Foo.  Thus Baz could resolve to something in Bar.  At the moment we rule
+        // this out by only looking through base classes after the hasResolvedBaseClasses flag
+        // gets set, which only happens after the base classes are _fully_ resolved as types, which
+        // includes the parameters to any instantiated base classes.</REVIEW>
+        //
         AGGSYM * cls = classToSearchIn;
+        if (cls->hasResolvedBaseClasses) {
         do {
             //
             // check this class
             //
-            ASSERT(cls->hasResolvedBaseClasses);
+            // GENERICS: old code - we don't use this because we use the class itself as the scope when 
+			// binding the base type, to cope with recursion in basetype parameters.
+            //ASSERT(cls->hasResolvedBaseClasses);
             *returnValue = lookupIfAccessOk(name, cls, MASK_AGGSYM | MASK_NSSYM, context, declareIfNeeded, badAccess, badKind);
             if (*returnValue) {
                 return true;
             }
 
             ASSERT(cls->baseClass || cls == compiler()->symmgr.GetObject() || cls->isInterface);
-            cls = cls->baseClass;
+            cls = cls->baseClass->underlyingAggregate();
         } while (cls);
-
+		}
         //
         // is our parent a class ...
         //
-        if (classToSearchIn->parent->kind == SK_AGGSYM) {
+        if (classToSearchIn->parent->isAggParent()) {
             //
             // we are a nested class, check our parent's class
             //
@@ -7392,26 +7840,38 @@ bool CLSDREC::searchClass(
 }
 
 /*
- * Searches a class for a method with the same name and signature.
- * Does not search base classes.
+ * Searches the class [typetoSearchIn] to see if it contains a method which is sufficient
+ * to implement [method].  Does not search base classes.  [method] is typically a method
+ * in some interface.  We may be implementing this interface at some particular type, e.g. IList<String>,
+ * and so the required signature is the instantiation (i.e. substitution) of [method] for that instance.
+ * Similarly, the implementation may be provided by some base class that exists via polymorphic
+ * inheritance, e.g. Foo : List<String>, and so we must instantiate the parameters for each
+ * potential implementation.  [typeToSearchIn] may thus be an instantiated type.
  */
-METHSYM *CLSDREC::findSameSignature(METHSYM *method, AGGSYM *classToSearchIn)
+METHSYM *CLSDREC::findSameSignature(TYPESYM *methodAtTyp, METHSYM *method, TYPESYM *typeToSearchIn)
 {
-    SYM *symbol = compiler()->symmgr.LookupGlobalSym(method->name, classToSearchIn, MASK_ALL);
-    while (symbol && (symbol->kind != SK_METHSYM || symbol->asMETHSYM()->params != method->params)) {
+    SYM *symbol = compiler()->symmgr.LookupGlobalSym(method->name, typeToSearchIn->behavioralType(), MASK_ALL);
+    TYPESYM **needed = compiler()->symmgr.SubstParamsUsingType(method->cParams,method->params, methodAtTyp);
+    while (symbol && (symbol->kind != SK_METHSYM || 
+                      symbol->asMETHSYM()->cParams != method->cParams ||
+                      compiler()->symmgr.SubstParamsUsingType(symbol->asMETHSYM()->cParams,symbol->asMETHSYM()->params,typeToSearchIn) != 
+                      needed)) {
         symbol = compiler()->symmgr.LookupNextSym(symbol, symbol->parent, MASK_ALL);
     }
     return symbol->asMETHSYM();
 }
 
 /*
- * Searches a class for a method with the same name and signature.
- * Does not search base classes.
+ * See findSameSignature for methods above.
  */
-PROPSYM *CLSDREC::findSameSignature(PROPSYM *prop, AGGSYM *classToSearchIn)
+PROPSYM *CLSDREC::findSameSignature(TYPESYM *propAtTyp, PROPSYM *prop, TYPESYM *typeToSearchIn)
 {
-    SYM *symbol = compiler()->symmgr.LookupGlobalSym(prop->name, classToSearchIn, MASK_ALL);
-    while (symbol && (symbol->kind != SK_PROPSYM || symbol->asPROPSYM()->params != prop->params)) {
+    SYM *symbol = compiler()->symmgr.LookupGlobalSym(prop->name, typeToSearchIn->behavioralType(), MASK_ALL);
+    TYPESYM **needed = compiler()->symmgr.SubstParamsUsingType(prop->cParams, prop->params, propAtTyp);
+    while (symbol && (symbol->kind != SK_PROPSYM || 
+                      symbol->asPROPSYM()->cParams != prop->cParams ||
+                      compiler()->symmgr.SubstParamsUsingType(symbol->asPROPSYM()->cParams, symbol->asPROPSYM()->params,typeToSearchIn) != 
+                      needed)) {
         symbol = compiler()->symmgr.LookupNextSym(symbol, symbol->parent, MASK_ALL);
     }
     return symbol->asPROPSYM();
@@ -7437,44 +7897,49 @@ PROPSYM *CLSDREC::findSameSignature(PROPSYM *prop, AGGSYM *classToSearchIn)
  * with the given name.
  *
  */
-SYM *CLSDREC::findNextAccessibleName(NAME *name, AGGSYM *classToSearchIn, PARENTSYM *context, SYM *current, bool bAllowAllProtected, bool ignoreSpecialMethods)
+SYM *CLSDREC::findNextAccessibleName(NAME *name, TYPESYM **pTypeToSearchIn, PARENTSYM *context, SYM *current, bool bAllowAllProtected, bool ignoreSpecialMethods)
 {
-    PAGGSYM qualifier = bAllowAllProtected ? NULL : classToSearchIn;
-    while ((current = findNextName(name, classToSearchIn, current)) && 
+    PAGGSYM qualifier = bAllowAllProtected ? NULL : (*pTypeToSearchIn)->underlyingAggregate();
+    while ((current = findNextName(name, pTypeToSearchIn, current)) && 
         (!checkAccess(current, context, NULL,qualifier) || (ignoreSpecialMethods && !current->isUserCallable()))) {
-        classToSearchIn = current->parent->asAGGSYM();
     }
 
     return current;
 }
 
 /*
- * Searches for a name in a class and its base classes
+ * Searches for a name in a class and its base classes (though _not_ its interfaces!)
  *
  * name - the name to search for
- * classToSearchIn - the classToSearchIn
+ * pTypeToSearchIn - points to the typeToSearchIn, and after the call will point to
+ *                   the type where the member was found, and also, coincidentally, the
+ *                   information needed to continue the search if you want to search for more members. 
+ *                   Normally evaluates to an AGGSYM but perhaps an
+ *                   instantiated class.  May be updated if the search moves to a new
+ *                   type, i.e. the base class.
  * current - if specified, then the search looks for members in the class
  *           with the same name after current in the symbol table
- *           if specified current->parent  must equal classToSearchIn
+ *           if specified current->parent  must equal *pTypeToSearchIn->underlyingAggregate()
  *
  * This method can be used to iterate over all base members
- * of a given name, by updating current with the previous return value
- * and classToSearchIn with current->parent
+ * of a given name, by updating current with the previous return value.
+ * pTypeToSearchIn will automatically be given the correct next value (i.e. the
+ * containing type for current).
  *
  * This method never reports any errors
  *
  * Returns NULL if there are no remaining members in a base class
- * with the given name.
+ * with the given name, in which case pTypeToSearchIn will also be set to NULL.
  *
  */
-SYM *CLSDREC::findNextName(NAME *name, AGGSYM *classToSearchIn, SYM *current)
+SYM *CLSDREC::findNextName(NAME *name, TYPESYM **pTypeToSearchIn, SYM *current)
 {
     //
     // check for next in same class
     //
     if (current) {
         do {
-            ASSERT(current->parent == classToSearchIn);
+            ASSERT(current->parent == (*pTypeToSearchIn)->behavioralType());
             current = compiler()->symmgr.LookupNextSym(current, current->parent, MASK_ALL);
             if (current) {
                 return current;
@@ -7485,37 +7950,34 @@ SYM *CLSDREC::findNextName(NAME *name, AGGSYM *classToSearchIn, SYM *current)
         // didn't find any more in this class
         // start with the base class
         //
-        classToSearchIn = classToSearchIn->baseClass;
+        *pTypeToSearchIn = compiler()->symmgr.SubstTypeUsingType((*pTypeToSearchIn)->underlyingAggregate()->baseClass, *pTypeToSearchIn);
     }
 
     //
     // check base class
     //
-    while (classToSearchIn) {
+    BASE_CLASS_TYPES_LOOP(*pTypeToSearchIn, base)
+		*pTypeToSearchIn = base;
         SYM * hiddenSymbol = NULL;
-        compiler()->EnsureTypeIsDefined(classToSearchIn);
-        hiddenSymbol = compiler()->symmgr.LookupGlobalSym(name, classToSearchIn, MASK_ALL);
+        compiler()->EnsureTypeIsDefined(base->underlyingAggregate());
+        hiddenSymbol = compiler()->symmgr.LookupGlobalSym(name, base->underlyingAggregate(), MASK_ALL);
         if (hiddenSymbol) {
             return hiddenSymbol;
         }
-
-        classToSearchIn = classToSearchIn->baseClass;
-    }
+    END_BASE_CLASS_TYPES_LOOP(compiler()->symmgr)
 
     return NULL;
 }
 
 //
-// find an inherited member which is hidden by name, kind and params
+// find an inherited member which is hidden by name
 //  name    - name to find hidden member
-//  symkind - kind of member. SK_COUNT for any member
-//  params  - signature to match, only valid for symkind SK_METHSYM || SK_PROPSYM
 //  classToSearchIn - class to start the search in
 //  context - context to search from for access checks
 //
-SYM *CLSDREC::findHiddenSymbol(NAME *name, AGGSYM *classToSearchIn, AGGSYM *context)
+SYM *CLSDREC::findHiddenSymbol(NAME *name, TYPESYM *typeToSearchIn, AGGSYM *context, TYPESYM **methodInType)
 {
-    return findHiddenSymbol(name, SK_COUNT, NULL, classToSearchIn, context);
+    return findHiddenSymbol(name, SK_COUNT, NULL, typeToSearchIn, context);
 }
 
 //
@@ -7523,24 +7985,26 @@ SYM *CLSDREC::findHiddenSymbol(NAME *name, AGGSYM *classToSearchIn, AGGSYM *cont
 //  name    - name to find hidden member
 //  symkind - kind of member. SK_COUNT for any member
 //  params  - signature to match, only valid for symkind SK_METHSYM || SK_PROPSYM
-//  classToSearchIn - class to start the search in
+//  typeToSearchIn - class to start the search in.  This may be an instantiated type, e.g. List<String>.
 //  context - context to search from for access checks
 //
-SYM *CLSDREC::findHiddenSymbol(NAME *name, SYMKIND symkind, PTYPESYM *params, AGGSYM *classToSearchIn, AGGSYM *context)
+SYM *CLSDREC::findHiddenSymbol(NAME *name, SYMKIND symkind, PTYPESYM *params, TYPESYM *typeToSearchIn, AGGSYM *context, TYPESYM **methodInType)
 {
+    TYPESYM *whereToSearchAndMethodInType = typeToSearchIn;
     SYM *hiddenSymbol;
     for (hiddenSymbol = NULL;
-         (hiddenSymbol = findNextAccessibleName(name, classToSearchIn, context, hiddenSymbol, true, false));
+         (hiddenSymbol = findNextAccessibleName(name, &whereToSearchAndMethodInType, context, hiddenSymbol, true, false));
          /* nothing */) {
 
         if ((hiddenSymbol->kind != symkind) || 
-            (hiddenSymbol->asMETHPROPSYM()->params == params)) {
+            (compiler()->symmgr.SubstParamsUsingType(hiddenSymbol->asMETHPROPSYM()->cParams, hiddenSymbol->asMETHPROPSYM()->params,whereToSearchAndMethodInType)
+                 == params)) {
             break;
         }
 
-        classToSearchIn = hiddenSymbol->parent->asAGGSYM();
     }
 
+    if (methodInType) { *methodInType = whereToSearchAndMethodInType; }
     return hiddenSymbol;
 }
 
@@ -7551,26 +8015,34 @@ SYM *CLSDREC::findHiddenSymbol(NAME *name, SYMKIND symkind, PTYPESYM *params, AG
 //  params  - signature to match, only valid for symkind SK_METHSYM || SK_PROPSYM
 //  classToSearchIn - class to start the search in
 //
-SYM *CLSDREC::findAnyAccessHiddenSymbol(NAME *name, SYMKIND symkind, PTYPESYM *params, AGGSYM *classToSearchIn)
+//  methodInType - tells us the type of the place where the matching symbol was found, e.g. if found in
+//                 base class List<String> then we return this type.  Undefined if the result is NULL.
+//
+SYM *CLSDREC::findAnyAccessHiddenSymbol(NAME *name, SYMKIND symkind, PTYPESYM *params, TYPESYM *typeToSearchIn, TYPESYM **methodInType)
 {
+    TYPESYM *whereToSearchAndMethodInType = typeToSearchIn;
     SYM *hiddenSymbol;
     for (hiddenSymbol = NULL;
-         (hiddenSymbol = findNextName(name, classToSearchIn, hiddenSymbol));
+         (hiddenSymbol = findNextName(name, &whereToSearchAndMethodInType, hiddenSymbol));
          /* nothing */) {
 
+         // Annotation: stop when either the kinds don't match OR the parameters do.
+         // It must therefore be illegal to have non-matching kinds for the same symbol name within
+         // the one flattened type.
         if ((hiddenSymbol->kind != symkind) || 
-            (hiddenSymbol->asMETHPROPSYM()->params == params)) {
+            (compiler()->symmgr.SubstParamsUsingType(hiddenSymbol->asMETHPROPSYM()->cParams, hiddenSymbol->asMETHPROPSYM()->params,whereToSearchAndMethodInType)
+                 == params)) {
             break;
         }
 
-        classToSearchIn = hiddenSymbol->parent->asAGGSYM();
     }
 
+    if (methodInType) { *methodInType = whereToSearchAndMethodInType; }
     return hiddenSymbol;
 }
 
 // bind a single (not dotted) type name, or namespace name (if NSok is true)
-// nmTree and current give the lexical and symbolic contexts...
+// name and symContext give the lexical and symbolic contexts...
 // If current is not specified, we start off with the namespace given by nsDecl
 SYM * CLSDREC::bindSingleTypeName(NAMENODE * name, PARENTSYM * symContext, int flags, AGGSYM *classBeingResolved)
 {
@@ -7581,6 +8053,7 @@ SYM * CLSDREC::bindSingleTypeName(NAMENODE * name, PARENTSYM * symContext, int f
     SYM * badKind = NULL;
     NSDECLSYM *nsDeclaration = NULL;
     NAME *attribIdent = NULL;
+    PARENTSYM *symToSearch = symContext;
 
     //
     // used for Attribute suffix check
@@ -7590,35 +8063,72 @@ TRYAGAIN:
     //
     // if we want to check classes, and we have a class to look in
     //        
-    if (!(flags & BTF_STARTATNS) && (symContext->kind != SK_NSDECLSYM)) {
+    if (!(flags & BTF_STARTATNS) && (symToSearch->isAggParent())) {
+        // Search the type variables in the local class...
+        
+        rval = compiler()->symmgr.LookupGlobalSym(ident, symToSearch->asAGGSYM(), MASK_TYVARSYM);
+        if (rval && (flags & BTF_NOTYVARS)) {
+           if (! (flags & BTF_NOERRORS))
+                errorNameRefSymbol(name, symToSearch, rval, ERR_TyvarNotInScope);
+                return NULL;         
+        }
+
         //
         // check this class and all classes that this class
-        // are nested in
+        // is nested in.  Don't look for type variables (GENERICS TODO: check this!)
         //
-        ASSERT(symContext->asAGGSYM()->hasResolvedBaseClasses);
-        if (!searchClass(ident, symContext->asAGGSYM(), symContext->asAGGSYM(), &rval, !(flags & BTF_NODECLARE), &badAccess, &badKind)) {
+        // ASSERT(symToSearch->asAGGSYM()->hasResolvedBaseClasses);
+        if (!rval && !searchClassForTypeName(ident, symToSearch->asAGGSYM(), symToSearch->asAGGSYM(), &rval, !(flags & BTF_NODECLARE), &badAccess, &badKind)) {
             //
             // got an error in searchClass(resolving base classes)
             // just bail ...
             //
             return NULL;
         }
+    } else if (!(flags & BTF_STARTATNS) && (symToSearch->kind == SK_METHSYM)) {
+        // Search the type variables in the method, and then the enclosing class...
+        // NO_TYVARS does _not_ govern the search for method type variables, as it's only used to
+        // stop static members seeing the class type variables.
+
+        rval = compiler()->symmgr.LookupGlobalSym(ident, symToSearch->asMETHSYM(), MASK_TYVARSYM);
+        if (!rval) {
+            symToSearch = symToSearch->containingDeclaration();
+            rval = compiler()->symmgr.LookupGlobalSym(ident, symToSearch->asAGGSYM(), MASK_TYVARSYM);
+            if (rval && (flags & BTF_NOTYVARS)) {
+                if (! (flags & BTF_NOERRORS))
+                    errorNameRefSymbol(name, symToSearch, rval, ERR_TyvarNotInScope);
+                return NULL;
+            }
+        //
+        // Check the class the method is contained in and all classes that this class
+        // is nested in.
+        //
+            if (!rval) {
+                if (!searchClassForTypeName(ident, symToSearch->asAGGSYM(), symContext->asAGGSYM(), &rval, !(flags & BTF_NODECLARE), &badAccess, &badKind)) {
+                //
+                // got an error in searchClass(resolving base classes)
+                // just bail ...
+                //
+                    return NULL;
+                }
+            }
+        }
     }
 
     //
-    // search namespace if we haven't found it in a class
+    // search namespace if we haven't found it in the containing declaration
     //
     if (!rval) {
         //
         // find the enclosing namespace declaration
         //
-        PARENTSYM *parent = symContext;
+        PARENTSYM *parent = symToSearch;
         while (parent->kind != SK_NSDECLSYM) {
             parent = parent->containingDeclaration();
         }
         nsDeclaration = parent->asNSDECLSYM();
 
-        if (!searchNamespace(ident, name, nsDeclaration, symContext, &rval, &badAccess, &badKind, !!(flags & BTF_USINGALIAS), classBeingResolved)) {
+        if (!searchNamespace(ident, name, nsDeclaration, symToSearch, &rval, &badAccess, &badKind, !!(flags & BTF_USINGALIAS), classBeingResolved)) {
             // ambiguity error
             return NULL;
         }
@@ -7653,25 +8163,26 @@ TRYAGAIN:
         //
         ident = name->pName;
 
-        if (!badAccess && (flags & BTF_ANYBADACCESS) && symContext->kind == SK_AGGSYM) {
+        if (!badAccess && (flags & BTF_ANYBADACCESS) && symToSearch->isAggParent()) {
             // didn't find any names at all
             // try and find inaccessible name of any SK
-            badAccess = findNextName(ident, symContext->asAGGSYM(), NULL);
+            TYPESYM *whereToSearchAndMethodInType = symToSearch->asAGGSYM();
+            badAccess = findNextName(ident, &whereToSearchAndMethodInType, NULL);
         }
         if (badAccess) {
             // found an inaccessible name or an uncallable name
             if (!badAccess->isUserCallable()) {
                 if (! (flags & BTF_NOERRORS))
-                    errorNameRefSymbol(name, symContext, badAccess, ERR_CantCallSpecialMethod);
+                    errorNameRefSymbol(name, symToSearch, badAccess, ERR_CantCallSpecialMethod);
             } else {
                 if (! (flags & BTF_NOERRORS))
-                    errorStrFile(name, symContext->getInputFile(), ERR_BadAccess, compiler()->ErrSym(badAccess));
+                    errorStrFile(name, symToSearch->getInputFile(), ERR_BadAccess, compiler()->ErrSym(badAccess));
             }
         } 
         else if (badKind) {
             // Found a symbol of the wrong kind.
             if (! (flags & BTF_NOERRORS))
-                errorStrStrStrFile(name, symContext->getInputFile(), ERR_BadSKknown, compiler()->ErrSym(badKind), compiler()->ErrSK(badKind->kind), compiler()->ErrSK(SK_AGGSYM));
+                errorStrStrStrFile(name, symToSearch->getInputFile(), ERR_BadSKknown, compiler()->ErrSym(badKind), compiler()->ErrSK(badKind->kind), compiler()->ErrSK(SK_AGGSYM));
         }
         else {
             // didn't find any names at all
@@ -7681,30 +8192,121 @@ TRYAGAIN:
                 errorContext = nsDeclaration->namespaceSymbol;
             } else {
                 // we were looking in the class, or if no class
-                // was provided symContext == the namespace anyways
-                errorContext = symContext->getScope();
+                // was provided symToSearch == the namespace anyways
+                errorContext = symToSearch->getScope();
             }
             if (! (flags & BTF_NOERRORS))
-                errorNameRefStr(name, symContext, compiler()->ErrSym(errorContext), ERR_SingleTypeNameNotFound);
+                errorNameRefStr(name, symToSearch, compiler()->ErrSym(errorContext), ERR_SingleTypeNameNotFound);
         }
-    } else if (!(flags & BTF_NSOK) && rval->kind != SK_AGGSYM) {
+    } else if (!(flags & BTF_NSOK) && rval->kind != SK_AGGSYM &&  rval->kind != SK_TYVARSYM ) {
         // found a namespace but was looking for a class
         if (badAccess && (badAccess->kind == SK_AGGSYM)) {
             // could have found a type, but it was inaccessible
             if (! (flags & BTF_NOERRORS))
-                errorStrFile(name, symContext->getInputFile(), ERR_BadAccess, compiler()->ErrSym(badAccess));
+                errorStrFile(name, symToSearch->getInputFile(), ERR_BadAccess, compiler()->ErrSym(badAccess));
         } else {
             if (! (flags & BTF_NOERRORS))
-                errorStrStrStrFile(name, symContext->getInputFile(), ERR_BadSKknown, compiler()->ErrSym(rval), compiler()->ErrSK(rval->kind), compiler()->ErrSK(SK_AGGSYM));
+                errorStrStrStrFile(name, symToSearch->getInputFile(), ERR_BadSKknown, compiler()->ErrSym(rval), compiler()->ErrSK(rval->kind), compiler()->ErrSK(SK_AGGSYM));
         }
         rval = NULL;
     }
 
     if (rval) {
         CheckSymbol(name, rval, symContext, flags);
+
+		if (name->kind == NK_GENERICNAME) {
+    		return bindInstAggType(name, name->asGENERICNAME()->pParams, rval->asAGGSYM(), symContext, flags, classBeingResolved);
+    	}
     }
 
     return rval;
+}
+
+
+// Bind a list of type parameters to a unique symbol.  Used for both lists of parameters for types and methods.
+bool CLSDREC::bindTypeList(BASENODE *pBase, BASENODE *pTypeList, PARENTSYM* symContext, int flags, PTYPESYM **pArgs, unsigned short *pCount, AGGSYM *classBeingResolved)
+{
+    // common case: fewer than 8 parameters
+    unsigned short cArgs = 0;
+   		
+    NODELOOP(pTypeList, TYPE, arg)
+        cArgs++;
+	ENDLOOP;
+    PTYPESYM * ppArgs = (TYPESYM **) _alloca(cArgs * sizeof(PTYPESYM));
+    cArgs = 0;
+    NODELOOP(pTypeList, TYPE, arg)
+        // bind the type, and wrap it if the variable is byref
+        PTYPESYM pArg = bindType(arg, symContext, flags, classBeingResolved);
+        if (!pArg) {
+           return false;
+        }
+        if (pArg == compiler()->symmgr.GetPredefType(PT_REFANY, false) ||
+            pArg->kind == SK_PTRSYM) {
+            if (! (flags & BTF_NOERRORS))
+                errorFileSymbol(pBase, symContext->getInputFile(), ERR_BadTypeParameter, pArg); 
+            return false;
+        }
+        ppArgs[cArgs++] = pArg;
+	ENDLOOP;
+    // get the formal (and unique) param array for the given types...
+    *pArgs = compiler()->symmgr.AllocParams(cArgs, ppArgs);
+    *pCount = cArgs;
+    return true;
+
+}
+
+// Bind a type with its type parameters
+TYPESYM * CLSDREC::bindInstAggType(BASENODE *pBase, BASENODE *pParams, AGGSYM *aggTyp, PARENTSYM* symContext, int flags, AGGSYM *classBeingResolved)
+{
+    if (!aggTyp) {
+        return NULL;
+    }
+    // common case: fewer than 8 parameters
+    unsigned short cArgs;
+    PTYPESYM * ppArgs;
+	if (!bindTypeList(pBase, pParams, symContext, flags, &ppArgs, &cArgs, classBeingResolved))
+        return NULL;
+
+    unsigned int cFormals = aggTyp->cTypeFormals;
+    
+   
+    INSTAGGSYM *res = compiler()->symmgr.GetInstAgg(aggTyp,cArgs,ppArgs);
+	res->parseTree = pBase;
+
+    if (cFormals != cArgs) {
+        if (! (flags & BTF_NOERRORS))
+            errorFileSymbol(pBase, symContext->getInputFile(), (cFormals == 0 ? ERR_TypeParams : cFormals < cArgs ? ERR_TooManyTypeParams : ERR_TooFewTypeParams), aggTyp);  
+        return res;
+    }
+    
+    // GENERICS: check instantiation satisfies bounds.  We now do this when declaring the
+	// resulting type.
+	//
+	// OLD: could collect them all in  a list to do at the end.
+    //compiler()->symmgr.AddToGlobalSymList(res, &(this->end_of_constraints));
+	//
+	// Or we could try doing them immediately
+	//
+	// Or we could use "NODECLARE" which should correspond precisely to the times
+	// we wish to delay the checking of constraints....
+    //if (! (flags & BTF_NODECLARE))
+    //    checkBounds(pBase, ppArgs, cArgs, aggTyp->ppTypeFormals, aggTyp->cTypeFormals, symContext);
+    return res;
+}
+
+bool CLSDREC::checkBounds(BASENODE *pBase, PTYPESYM *ppActuals, unsigned short cActuals, TYVARSYM **ppFormals, unsigned short cFormals, SYM *offender) 
+{
+    bool res = true;
+	ASSERT(cFormals == cActuals);  // This error is reported earlier
+	for (unsigned short i = 0; i<cActuals; i++) {
+		ASSERT (ppFormals[i]->bound); // nb. empty bounds should be set to "Object"
+		TYPESYM *expanded = compiler()->symmgr.SubstType(ppFormals[i]->bound, cActuals, ppActuals);
+		if (!(compiler()->funcBRec.canConvert(ppActuals[i], expanded, pBase))) {
+			errorSymbolSymbolSymbol(offender, expanded, ppActuals[i], ERR_GenericConstraintNotSatisfied);
+			res = false;
+		}
+	}
+	return res;
 }
 
 // Bind a type given a parstree node, and a textual and symbolic context...
@@ -7729,9 +8331,26 @@ TYPESYM * CLSDREC::bindType(TYPENODE * type, PARENTSYM* symContext, int flags, A
         int rank = type->iDims;
         ASSERT(rank > 0);
         return compiler()->symmgr.GetArray(elemType, rank);
-                        }
-    case TK_NAMED:
-        return bindTypeName(type->pName, symContext, flags, classBeingResolved)->asAGGSYM();
+    }
+    case TK_NAMED: {
+	    // GENERICS: an identifier can be either a TYVARSYM or a AGGSYM
+	    TYPESYM *res = bindTypeName(type->pName, symContext, flags, classBeingResolved)->asTYPESYM();
+        if (!res) {
+            return NULL;
+        }
+        if (res->kind == SK_TYVARSYM && (flags & BTF_NOTYVARS) && res->parent->isAggParent()) {
+            if (! (flags & BTF_NOERRORS))
+                errorFileSymbol(type, symContext->getInputFile(), ERR_TyvarNotInScope, res);
+            return NULL;
+        }
+        else if (res->kind == SK_AGGSYM && res->asAGGSYM()->cTypeFormals) {
+            if (! (flags & BTF_NOERRORS))
+                errorFileSymbol(type, symContext->getInputFile(), ERR_TooFewTypeParams, res); 
+            return NULL;
+        }
+        return res;
+    }
+
     case TK_POINTER: {
         TYPESYM * innerType = bindType(type->pElementType, symContext, flags, classBeingResolved);
         if (!innerType) return NULL;
@@ -7788,8 +8407,12 @@ void CLSDREC::reportDeprecatedType(BASENODE * tree, PSYM refContext, TYPESYM * t
 void CLSDREC::reportDeprecatedMethProp(BASENODE *tree, METHPROPSYM *methprop)
 {
     reportDeprecatedType(methprop->parseTree, methprop, methprop->retType);
+    if (methprop->isStatic && !methprop->isOperator && compiler()->symmgr.UsesClassTypeFormals(methprop->retType))
+		errorSymbol(methprop, ERR_GenericStaticMethod);
     for (int i = 0; i < methprop->cParams; i += 1) {
         reportDeprecatedType(methprop->parseTree, methprop, methprop->params[i]);
+        if (methprop->isStatic &&  !methprop->isOperator && compiler()->symmgr.UsesClassTypeFormals(methprop->params[i])) 
+	   	    errorSymbol(methprop, ERR_GenericStaticMethod);
     }
 }
 
@@ -7798,7 +8421,7 @@ bool CLSDREC::isAtLeastAsVisibleAs(SYM * sym1, SYM * sym2)
 {
     SYM * s1parent, * s2parent;
 
-    ASSERT(sym2->kind != SK_ARRAYSYM && sym2->kind != SK_PTRSYM && sym2->kind != SK_PARAMMODSYM);
+    ASSERT(sym2 && sym2->parent && sym2->kind != SK_ARRAYSYM && sym2->kind != SK_PTRSYM && sym2->kind != SK_PARAMMODSYM && sym2->kind != SK_INSTAGGSYM);
 
     // If sym1 is a pointer, array, or byref type, convert to underlying type. 
     for (;;) {
@@ -7810,6 +8433,20 @@ bool CLSDREC::isAtLeastAsVisibleAs(SYM * sym1, SYM * sym2)
             sym1 = sym1->asPARAMMODSYM()->paramType();
         else if (sym1->kind == SK_VOIDSYM)
             return true; // void is completely visible.
+        else if (sym1->kind == SK_TYVARSYM)
+            return true; // in the current model tyvar's are completely visible.
+                         // This may not be what we desire in the long run - it is
+                         // possible to imagine that a tyvar is private, in these sense
+                         // that the generic class must promise not to reveal anything
+                         // more about it than the user of the generic class already knows.
+        else if (sym1->kind == SK_INSTAGGSYM) {
+            // GENERICS: check visibility of argument types (e.g. [String] in List<String>), as
+			// well as the root type which we check via the loop.
+            for (unsigned int i = 0; i< sym1->asINSTAGGSYM()->cArgs; i++) { 
+                if (!isAtLeastAsVisibleAs(sym1->asINSTAGGSYM()->ppArgs[i],sym2)) return false;
+            }
+			sym1 = sym1->asINSTAGGSYM()->underlyingAggregate();
+		}
         else
             break;
     }
@@ -7852,13 +8489,13 @@ bool CLSDREC::isAtLeastAsVisibleAs(SYM * sym1, SYM * sym2)
                         // if s2 is private and within s1's parent or within a subclass of s1's parent,
                         // then this is at least as restrictive as s1's protected. 
                         for (s2parent = s2->parent; s2parent->kind != SK_NSSYM; s2parent = s2parent->parent)
-                            if (compiler()->symmgr.IsBaseType(s2parent->asAGGSYM(), s1parent->asAGGSYM()))
+                            if (compiler()->symmgr.IsBaseAggregate(s2parent->asAGGSYM(), s1parent->asAGGSYM()))
                                 asRestrictive = true;
                     }
                     else if (acc2 == ACC_PROTECTED) {
                         // if s2 is protected, and it's parent is a subclass (or the same as) s1's parent
                         // then this is at least as restrictive as s1's protected
-                        if (compiler()->symmgr.IsBaseType(s2->parent->asAGGSYM(), s1parent->asAGGSYM()))
+                        if (compiler()->symmgr.IsBaseAggregate(s2->parent->asAGGSYM(), s1parent->asAGGSYM()))
                             asRestrictive = true;
                     }
                     break;
@@ -7874,7 +8511,7 @@ bool CLSDREC::isAtLeastAsVisibleAs(SYM * sym1, SYM * sym2)
                             asRestrictive = true;
                         else {
                             for (s2parent = s2->parent; s2parent->kind != SK_NSSYM; s2parent = s2parent->parent)
-                                if (compiler()->symmgr.IsBaseType(s2parent->asAGGSYM(), s1parent->asAGGSYM()))
+                                if (compiler()->symmgr.IsBaseAggregate(s2parent->asAGGSYM(), s1parent->asAGGSYM()))
                                     asRestrictive = true;
                         }
                     }
@@ -7887,14 +8524,14 @@ bool CLSDREC::isAtLeastAsVisibleAs(SYM * sym1, SYM * sym2)
                     else if (acc2 == ACC_PROTECTED) {
                         // if s2 is protected, and it's parent is a subclass (or the same as) s1's parent
                         // then this is at least as restrictive as s1's internal protected
-                        if (compiler()->symmgr.IsBaseType(s2->parent->asAGGSYM(), s1parent->asAGGSYM()))
+                        if (compiler()->symmgr.IsBaseAggregate(s2->parent->asAGGSYM(), s1parent->asAGGSYM()))
                             asRestrictive = true;
                     }
                     else if (acc2 == ACC_INTERNALPROTECTED) {
                         // if s2 is internal protected, and it's parent is a subclass (or the same as) s1's parent
                         // and its in the same assembly and s1, then this is at least as restrictive as s1's protected
                         if (s2->getAssemblyIndex() == s1->getAssemblyIndex() &&
-                            compiler()->symmgr.IsBaseType(s2->parent->asAGGSYM(), s1parent->asAGGSYM()))
+                            compiler()->symmgr.IsBaseAggregate(s2->parent->asAGGSYM(), s1parent->asAGGSYM()))
                             asRestrictive = true;
                     }
                     break;

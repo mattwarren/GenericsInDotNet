@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -577,6 +582,71 @@ DWORD CParser::SkipBlock (DWORD dwFlags, long *piClose)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+// CParser::ScanMemberName
+//
+// Scans a member name. Does NOT handle:
+//      operators
+//      conversions
+//      constructors
+//      destructors
+//      nested types
+//
+// Return Value:
+//        GENERIC_METHOD_NAME,                // ::I<R>.M<T>
+//        INDEXER_NAME,                       // ::I<R>.this
+//        PROPERTY_OR_EVENT_OR_METHOD_NAME,   // ::I<R>.M
+//        SIMPLE_NAME,                        // M
+//        NOT_MEMBER_NAME,                    // anything else
+//
+// Leaves the current token after the member name.
+
+CParser::SCANMEMBERNAME  CParser::ScanMemberName()
+{
+    // simplest case of a single id
+    if (CurToken() == TID_IDENTIFIER && PeekToken() != TID_DOT && PeekToken() != TID_OPENANGLE)
+    {
+        NextToken();
+        return SIMPLE_NAME;
+    }
+    else if (CurToken() == TID_THIS)
+    {
+        NextToken();
+        return INDEXER_NAME;
+    }
+    else if (CurToken() == TID_IDENTIFIER || CurToken() == TID_DOT)
+    {
+        while (true)
+        {
+            if (CurToken() == TID_THIS)
+            {
+                NextToken();
+                return INDEXER_NAME;
+            }
+
+            SCANNAMEDTYPEPART typePart = ScanNamedTypePart();
+            if (typePart == NOT_NAME_TYPE_PART)
+            {
+                return NOT_MEMBER_NAME_WITH_DOT;
+            }
+            
+            if (CurToken() != TID_DOT)
+            {
+                if (typePart == SIMPLE_NAME_TYPE_PART)
+                    return PROPERTY_OR_EVENT_OR_METHOD_NAME;
+                else
+                    return GENERIC_METHOD_NAME;
+            }
+            
+            NextToken();
+        }
+    }
+    else
+    {
+        return NOT_MEMBER_NAME;
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////
 // CParser::ScanMemberDeclaration
 //
 // This function is used by SkipBlock to check to see if the current token is
@@ -741,52 +811,58 @@ DWORD CParser::ScanMemberDeclaration (DWORD dwSkipFlags)
     if (CurToken() == TID_THIS && PeekToken() == TID_OPENSQUARE)
         return SB_TYPEMEMBER;
 
-    if (CurToken() == TID_IDENTIFIER || CurToken() == TID_DOT)
+    BOOL fNotAProperty = false;
+    switch (ScanMemberName())
     {
-        // Skip possibly qualified name
+    case NOT_MEMBER_NAME:
+    case NOT_MEMBER_NAME_WITH_DOT:
+    default:
+        return SB_NOTAMEMBER;
+  
+    case GENERIC_METHOD_NAME:
+        fNotAProperty = true;
+        break;
+        
+    case PROPERTY_OR_EVENT_OR_METHOD_NAME:
+    case SIMPLE_NAME:
+        break;
+
+    case INDEXER_NAME:
+        if (CurToken() == TID_OPENSQUARE)
+            return SB_TYPEMEMBER;       // Explicit interface impl of indexer
+        else
+            return SB_NOTAMEMBER;
+    }
+
+    if (CurToken() == TID_OPENPAREN)
+    {
+        BOOL    fHadArgs = FALSE;
+
+        // See if this really is a method
+        if (!ScanParameterList (&fHadArgs))
+            return SB_NOTAMEMBER;
+
+        if (CurToken() == TID_OPENCURLY || CurToken() == TID_WHERE)
+            return SB_TYPEMEMBER;
+
+        return SB_NOTAMEMBER;
+    }
+
+    if (!fNotAProperty && CurToken() == TID_OPENCURLY)
+    {
+        // Check to see if this really looks like a property
+        NextToken();
+        while (m_rgTokenInfo[CurToken()].dwFlags & TFF_MODIFIER)
+            NextToken();
         if (CurToken() == TID_IDENTIFIER)
-            NextToken();
-        while (CurToken() == TID_DOT)
         {
-            if (NextToken() != TID_IDENTIFIER)
-            {
-                if (CurToken() == TID_THIS && PeekToken() == TID_OPENSQUARE)
-                    return SB_TYPEMEMBER;       // Explicit interface impl of indexer
-                return SB_NOTAMEMBER;
-            }
-            NextToken();
-        }
+            FULLTOKEN   tok;
 
-        if (CurToken() == TID_OPENPAREN)
-        {
-            BOOL    fHadArgs = FALSE;
-
-            // See if this really is a method
-            if (!ScanParameterList (&fHadArgs))
-                return SB_NOTAMEMBER;
-
-            if (CurToken() == TID_OPENCURLY)
+            RescanToken (Mark(), &tok);
+            if (tok.pName == m_pGetName || tok.pName == m_pSetName || tok.pName == m_pAddName || tok.pName == m_pRemoveName)
                 return SB_TYPEMEMBER;
-
-            return SB_NOTAMEMBER;
         }
-
-        if (CurToken() == TID_OPENCURLY)
-        {
-            // Check to see if this really looks like a property
-            NextToken();
-            while (m_rgTokenInfo[CurToken()].dwFlags & TFF_MODIFIER)
-                NextToken();
-            if (CurToken() == TID_IDENTIFIER)
-            {
-                FULLTOKEN   tok;
-
-                RescanToken (Mark(), &tok);
-                if (tok.pName == m_pGetName || tok.pName == m_pSetName || tok.pName == m_pAddName || tok.pName == m_pRemoveName)
-                    return SB_TYPEMEMBER;
-            }
-            return SB_NOTAMEMBER;
-        }
+        return SB_NOTAMEMBER;
     }
 
     return SB_NOTAMEMBER;
@@ -888,6 +964,28 @@ BOOL CParser::ScanCast ()
     return FALSE;
 }
 
+
+////////////////////////////////////////////////////////////////////////////////
+// CParser::ScanOptionalInstantiation
+
+BOOL CParser::ScanOptionalInstantiation() 
+{
+    if (CurToken() == TID_OPENANGLE) {
+        do
+        {
+            NextToken();
+            if (ScanType() == NOT_TYPE) 
+                return false;
+        } while (CurToken() == TID_COMMA);
+
+        if (CurToken() != TID_CLOSEANGLE)
+            return false;
+        NextToken();
+    }
+    return true;
+}
+
+
 ////////////////////////////////////////////////////////////////////////////////
 // CParser::ScanType
 //
@@ -899,15 +997,22 @@ CParser::SCANTYPE CParser::ScanType ()
     SCANTYPE result = TYPE_OR_EXPR;
     if (CurToken() == TID_IDENTIFIER)
     {
-        if (CurToken() == TID_IDENTIFIER)
-            NextToken();
+         if (ScanNamedTypePart() == NOT_NAME_TYPE_PART)
+            return NOT_TYPE;
+
+         //if (CurToken() == TID_IDENTIFIER)
+          //  NextToken();
 
         // Scan a name
         while (CurToken() == TID_DOT)
         {
-            if (NextToken() != TID_IDENTIFIER)
-                return NOT_TYPE;
+            //if (NextToken() != TID_IDENTIFIER)
+              //  return NOT_TYPE;
             NextToken();
+            SCANNAMEDTYPEPART partResult = ScanNamedTypePart();
+
+            if (partResult == NOT_NAME_TYPE_PART)
+                return NOT_TYPE;
         }
     }
     else if (m_rgTokenInfo[CurToken()].dwFlags & TFF_PREDEFINED)
@@ -952,6 +1057,25 @@ CParser::SCANTYPE CParser::ScanType ()
 
     // If we get here, it's a valid type!
     return result;
+}
+
+CParser::SCANNAMEDTYPEPART CParser::ScanNamedTypePart()
+{
+    if (CurToken() != TID_IDENTIFIER)
+    {
+        return NOT_NAME_TYPE_PART;
+    }
+    
+    if (NextToken() == TID_OPENANGLE) 
+    {
+        if (!ScanOptionalInstantiation()) 
+            return NOT_NAME_TYPE_PART;
+        return GENERIC_NAME_TYPE_PART;
+    }
+    else
+    {
+        return SIMPLE_NAME_TYPE_PART;
+    }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1571,8 +1695,31 @@ BASENODE *CParser::AllocOpNode (OPERATOR op, long iTokIdx, BASENODE *pParent)
 NAMENODE *CParser::AllocNameNode (NAME *pName, long iTokIdx)
 {
     NAMENODE    *pNameNode = (NAMENODE *)AllocNode (NK_NAME);
+    InitNameNode(pNameNode, pName, iTokIdx);
+    return pNameNode;
+}
+
+
+NAMENODE *CParser::InitNameNode (NAMENODE *pNameNode, NAME *pName, long iTokIdx)
+{
     pNameNode->tokidx = iTokIdx;
-    pNameNode->pName = pName;
+
+    FULLTOKEN tok;
+    RescanToken(iTokIdx, &tok);
+    if (pName == NULL)
+        pNameNode->pName = tok.pName;
+    else
+        pNameNode->pName = pName;
+    return pNameNode;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// CParser::AllocGenericNameNode
+
+GENERICNAMENODE *CParser::AllocGenericNameNode (NAME *pName, long iTokIdx)
+{
+    GENERICNAMENODE    *pNameNode = (GENERICNAMENODE *)AllocNode (NK_GENERICNAME);
+    InitNameNode(pNameNode, pName, iTokIdx);
     return pNameNode;
 }
 
@@ -1695,15 +1842,15 @@ BASENODE *CParser::ParseUsingClause (BASENODE *pParent)
         // This is a using-alias directive.
         pUsing->pAlias = ParseIdentifier (pUsing);
         Eat (TID_EQUAL);
+        pUsing->pName = ParseGenericQualifiedNameList(pUsing, false);
     }
     else
     {
         // This is a using-namespace directive.
         pUsing->pAlias = NULL;
+        pUsing->pName = ParseDottedName (pUsing);
     }
 
-    // Parse the name and eat the semicolon
-    pUsing->pName = ParseName (pUsing);
     Eat (TID_SEMICOLON);
     return pUsing;
 }
@@ -1749,7 +1896,7 @@ BASENODE *CParser::ParseNamespace (BASENODE *pParent)
 
     // Grab the name
     NextToken();
-    pNS->pName = ParseName (pNS);
+    pNS->pName = ParseDottedName (pNS);
 
     // Now there should be an open curly
     pNS->iOpen = Mark();
@@ -1798,8 +1945,9 @@ BASENODE *CParser::ParseTypeDeclaration (BASENODE *pParent, BASENODE *pAttr)
     {
         case TID_CLASS:
         case TID_STRUCT:
+        case TID_INTERFACE:
             pAttr = SetDefaultAttributeLocation(pAttr, AL_TYPE, AL_TYPE);
-            pType = ParseClassOrStruct (pParent, tokidx, pAttr, iMods);
+            pType = ParseAggregate (pParent, tokidx, pAttr, iMods);
             break;
 
         case TID_DELEGATE:
@@ -1810,11 +1958,6 @@ BASENODE *CParser::ParseTypeDeclaration (BASENODE *pParent, BASENODE *pAttr)
         case TID_ENUM:
             pAttr = SetDefaultAttributeLocation(pAttr, AL_TYPE, AL_TYPE);
             pType = ParseEnum (pParent, tokidx, pAttr, iMods);
-            break;
-
-        case TID_INTERFACE:
-            pAttr = SetDefaultAttributeLocation(pAttr, AL_TYPE, AL_TYPE);
-            pType = ParseInterface (pParent, tokidx, pAttr, iMods);
             break;
 
         default:
@@ -1829,14 +1972,31 @@ BASENODE *CParser::ParseTypeDeclaration (BASENODE *pParent, BASENODE *pAttr)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// CParser::ParseClassOrStruct
+// CParser::ParseAggregate
 
-BASENODE *CParser::ParseClassOrStruct (BASENODE *pParent, long tokidx, BASENODE *pAttr, unsigned iMods)
+BASENODE *CParser::ParseAggregate (BASENODE *pParent, long tokidx, BASENODE *pAttr, unsigned iMods)
 {
-    ASSERT (CurToken() == TID_CLASS || CurToken() == TID_STRUCT);
+    ASSERT (CurToken() == TID_CLASS || CurToken() == TID_STRUCT || CurToken() == TID_INTERFACE);
 
-    CLASSNODE   *pClass = (CLASSNODE *)AllocNode (CurToken() == TID_CLASS ? NK_CLASS : NK_STRUCT);
+    NODEKIND kind;
+    switch (CurToken())
+    {
+    default:
+        ASSERT(!"Bad token kind");
+        // fall through
+        
+    case TID_CLASS:
+        kind = NK_CLASS;
+        break;
+    case TID_INTERFACE:
+        kind = NK_INTERFACE;
+        break;
+    case TID_STRUCT:
+        kind = NK_STRUCT;
+        break;
+    }
 
+    CLASSNODE   *pClass = (CLASSNODE *)AllocNode (kind);
     pClass->pParent = pParent;
     pClass->tokidx = tokidx;
     pClass->flags = iMods;
@@ -1846,17 +2006,10 @@ BASENODE *CParser::ParseClassOrStruct (BASENODE *pParent, long tokidx, BASENODE 
         pAttr->pParent = pClass;
     NextToken();
 
-    // Grab the name of the class/struct
     pClass->pName = ParseIdentifier (pClass);
-
-    // Check for bases
-    if (CurToken() == TID_COLON)
-    {
-        NextToken();
-        pClass->pBases = ParseTypeNameList (pClass);
-    }
-    else
-        pClass->pBases = NULL;
+    pClass->pTypeParams = ParseTypeFormalList (pClass);
+    pClass->pBases = ParseBaseTypesClause (pClass);
+    pClass->pConstraints = ParseConstraintClause (pClass, pClass->pTypeParams != NULL);
 
     // Parse class body
     pClass->iOpen = Mark();
@@ -1933,9 +2086,11 @@ BASENODE *CParser::ParseDelegate (BASENODE *pParent, long tokidx, BASENODE *pAtt
     NextToken();
     pDelegate->pType = ParseReturnType (pDelegate);
     pDelegate->pName = ParseIdentifier (pDelegate);
-
-
+    pDelegate->pTypeParams = ParseTypeFormalList (pDelegate);
     ParseParameterOrVarargsList(pDelegate, &pDelegate->pParms);
+
+    // parse constraints
+    pDelegate->pConstraints = ParseConstraintClause (pDelegate, pDelegate->pTypeParams != NULL);
 
     pDelegate->iSemi = Mark();
     Eat (TID_SEMICOLON);
@@ -1958,6 +2113,8 @@ BASENODE *CParser::ParseEnum (BASENODE *pParent, long tokidx, BASENODE *pAttr, u
     pEnum->flags = iMods;
     pEnum->pAttr = pAttr;
     pEnum->pKey = NULL;
+    pEnum->pTypeParams = NULL;
+    pEnum->pConstraints = NULL;
     if (pAttr != NULL)
         pAttr->pParent = pEnum;
 
@@ -2039,77 +2196,6 @@ BASENODE *CParser::ParseEnum (BASENODE *pParent, long tokidx, BASENODE *pAttr, u
 
     AddToNodeTable (pEnum);
     return pEnum;
-}
-
-////////////////////////////////////////////////////////////////////////////////
-// CParser::ParseInterface
-
-BASENODE *CParser::ParseInterface (BASENODE *pParent, long tokidx, BASENODE *pAttr, unsigned iMods)
-{
-    ASSERT (CurToken() == TID_INTERFACE);
-
-    CLASSNODE   *pInterface = (CLASSNODE *)AllocNode (NK_INTERFACE);
-
-    pInterface->pParent = pParent;
-    pInterface->tokidx = tokidx;
-    pInterface->flags = iMods;
-    pInterface->pAttr = pAttr;
-    pInterface->pKey = NULL;
-    if (pAttr != NULL)
-        pAttr->pParent = pInterface;
-
-    NextToken();
-    pInterface->pName = ParseIdentifier (pInterface);
-
-    // Check for bases
-    if (CurToken() == TID_COLON)
-    {
-        NextToken();
-        pInterface->pBases = ParseTypeNameList (pInterface);
-    }
-    else
-        pInterface->pBases = NULL;
-
-    // Parse class body
-    pInterface->iOpen = Mark();
-    Eat (TID_OPENCURLY);
-
-    BOOL        fEndFound = FALSE;
-    MEMBERNODE  **ppNext = &pInterface->pMembers;
-
-    while (!fEndFound)
-    {
-        TOKENID iTok = CurToken();
-
-        if (m_rgTokenInfo[iTok].dwFlags & TFF_MEMBER)
-        {
-            // This token can start a member -- go parse it
-            *ppNext = ParseMember (pInterface);
-            ppNext = &(*ppNext)->pNext;
-        }
-        else if (iTok == TID_CLOSECURLY || iTok == TID_ENDFILE)
-        {
-            // This marks the end of members of this class
-            fEndFound = TRUE;
-        }
-        else
-        {
-            // Error -- try to sync up with intended reality
-            ErrorInvalidMemberDecl(Mark());
-            fEndFound = !SkipToMember ();
-        }
-    }
-
-    *ppNext = NULL;
-
-    pInterface->iClose = Mark();
-    Eat (TID_CLOSECURLY);
-
-    if (CurToken() == TID_SEMICOLON)
-        NextToken();
-
-    AddToNodeTable (pInterface);
-    return pInterface;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -2203,66 +2289,64 @@ MEMBERNODE *CParser::ParseMember (CLASSNODE *pParent)
     if ((CurToken() == TID_OPERATOR || CurToken() == TID_IMPLICIT || CurToken() == TID_EXPLICIT) && !isEvent)
         return ParseOperator (pParent, tokidx, pAttr, iMods, pType);
 
-    // Check here for indexers
-    if (CurToken() == TID_THIS && !isEvent)
-        return ParseProperty (NK_INDEXER, pParent, tokidx, pAttr, iMods, pType, false);
+    iMark = Mark();
+    SCANMEMBERNAME memberNameType = ScanMemberName();
+    TOKENID iTok = CurToken();
+    Rewind(iMark);
 
-    // Okay -- Next is an identifier or '.' for fully
-    // qualified explicit interface implementations
-    if (CurToken() == TID_IDENTIFIER || CurToken() == TID_DOT)
+    switch (memberNameType)
     {
-        TOKENID iTok;
-
-        // find next token after a possibly qualified name
-        long peekidx = (CurToken() == TID_IDENTIFIER) ? 1 : 0;
-        while (((iTok = PeekToken(peekidx)) == TID_DOT) && (PeekToken(peekidx+1) == TID_IDENTIFIER))
-            peekidx += 2;
-
-        // only methods can have a ( after a name
-        if (iTok == TID_OPENPAREN && !isEvent)
-            return ParseMethod (pParent, tokidx, pAttr, iMods, pType);
-
-        // At this point, we have a property if iTok is TID_OPENCURLY
-        if (iTok == TID_OPENCURLY)
-            return ParseProperty (NK_PROPERTY, pParent, tokidx, pAttr, iMods, pType, isEvent);
-
-        // At this point an indexer has a .this [
-        if (iTok == TID_DOT && (PeekToken(peekidx+1) == TID_THIS) && (PeekToken(peekidx+2) == TID_OPENSQUARE) && !isEvent)
+    case INDEXER_NAME:
+        if (!isEvent)
             return ParseProperty (NK_INDEXER, pParent, tokidx, pAttr, iMods, pType, false);
+        break;
+        
+    case GENERIC_METHOD_NAME:
+        if (!isEvent)
+            return ParseMethod (pParent, tokidx, pAttr, iMods, pType);
+        break;
 
+    case NOT_MEMBER_NAME_WITH_DOT:
         // Check for the situation where an incomplete explicit member is being entered.
         // In this case, the code may look something like "void ISomeInterface." followed
         // by either the end of the type of some other member (valid or not).  For statement
         // completion purposes, we need the name to be a potentially dotted name, so we
         // can't default into a field declaration (since it's name field is a NAMENODE).
-        if (iTok == TID_DOT)
-        {
-            // Okay, whichever of these we call will fail -- however, they can handle
-            // dotted names.
-            if (isEvent)
-                return ParseProperty (NK_PROPERTY, pParent, tokidx, pAttr, iMods, pType, isEvent);
-
+        
+        // Okay, whichever of these we call will fail -- however, they can handle
+        // dotted names.
+        if (isEvent)
+            return ParseProperty (NK_PROPERTY, pParent, tokidx, pAttr, iMods, pType, isEvent);
+        else
             return ParseMethod (pParent, tokidx, pAttr, iMods, pType);
-        }
 
-        // Must be a field
-        return ParseField (pParent, tokidx, pAttr, iMods, pType, isEvent);
+    case PROPERTY_OR_EVENT_OR_METHOD_NAME:
+    case SIMPLE_NAME:
+        if (iTok == TID_OPENPAREN && !isEvent)
+            return ParseMethod (pParent, tokidx, pAttr, iMods, pType);
+            
+        if (iTok == TID_OPENCURLY)
+            return ParseProperty (NK_PROPERTY, pParent, tokidx, pAttr, iMods, pType, isEvent);
+        break;
+
+    case NOT_MEMBER_NAME:
+    default:        
+        // We don't know what it is yet, and it's incomplete.  Create a partial member
+        // node to contain the type we parsed and return that.
+        ErrorInvalidMemberDecl(Mark());
+        PARTIALMEMBERNODE   *pMbr = (PARTIALMEMBERNODE *)AllocNode (NK_PARTIALMEMBER);
+        pMbr->pParent = pParent;
+        pMbr->tokidx = tokidx;
+        pMbr->pNode = pType;
+        if (pType != NULL)
+            pType->pParent = pMbr;
+        pMbr->pAttr = pAttr;
+        if (pAttr != NULL)
+            pAttr->pParent = pMbr;
+        pMbr->iClose = Mark();
+        return pMbr;
     }
-
-    // We don't know what it is yet, and it's incomplete.  Create a partial member
-    // node to contain the type we parsed and return that.
-    ErrorInvalidMemberDecl(Mark());
-    PARTIALMEMBERNODE   *pMbr = (PARTIALMEMBERNODE *)AllocNode (NK_PARTIALMEMBER);
-    pMbr->pParent = pParent;
-    pMbr->tokidx = tokidx;
-    pMbr->pNode = pType;
-    if (pType != NULL)
-        pType->pParent = pMbr;
-    pMbr->pAttr = pAttr;
-    if (pAttr != NULL)
-        pAttr->pParent = pMbr;
-    pMbr->iClose = Mark();
-    return pMbr;
+    return ParseField (pParent, tokidx, pAttr, iMods, pType, isEvent);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -2280,6 +2364,7 @@ MEMBERNODE *CParser::ParseConstructor (CLASSNODE *pParent, long tokidx, BASENODE
         pAttr->pParent = pCtor;
     pCtor->pInteriorNode = NULL;
     pCtor->pName = NULL;
+    pCtor->pConstraints = NULL;
 
     FULLTOKEN   tok;
 
@@ -2358,6 +2443,7 @@ MEMBERNODE *CParser::ParseDestructor (CLASSNODE *pParent, long tokidx, BASENODE 
     if (pAttr != NULL)
         pAttr->pParent = pDtor;
     pDtor->pInteriorNode = NULL;
+    pDtor->pConstraints = NULL;
 
     // Current token is an identifier.  Rescan it, and check to see that the name
     // matches that of the class
@@ -2482,6 +2568,53 @@ void CParser::ParseParameterOrVarargsList(BASENODE * pParent, BASENODE ** ppPara
     Eat (TID_CLOSEPAREN);
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// CParser::ParseMethodName
+
+BASENODE *CParser::ParseMethodName (BASENODE *pParent)
+{
+    BASENODE *pName;
+
+    pName = ParseGenericQualifiedNamePart(pParent, false);
+
+    if (!(pName->flags & NF_NAME_MISSING))
+    {
+        if (CurToken() == TID_DOT)
+        {
+            do
+            {
+                long    iMark = Mark();
+                NextToken();
+                pName = AllocDotNode(iMark, pParent, pName, ParseGenericQualifiedNamePart(pParent, false));
+            }
+            while (CurToken() == TID_DOT);
+        }
+    }
+            
+    // validate that the instantiation of the last name node are valid type parameters
+    if (pName)
+    {
+        BASENODE *pLastNode = pName->LastNameOfDottedName();
+            
+        ASSERT(pLastNode->IsAnyName());
+        if (pLastNode->kind == NK_GENERICNAME)
+        {
+            CListIterator list;
+            list.Start(pLastNode->asGENERICNAME()->pParams);
+            TYPENODE *elem;
+            while (NULL != (elem = list.Next()->asTYPE()))
+            {
+                if (elem->other != TK_NAMED || elem->pName->kind != NK_NAME)
+                {
+                    ErrorAtToken(elem->tokidx, ERR_MethodTypeParamMustBeIdentifier);
+                }
+            }
+        }
+    }
+    
+    return pName;
+}
+
 
 ////////////////////////////////////////////////////////////////////////////////
 // CParser::ParseMethod
@@ -2503,10 +2636,13 @@ MEMBERNODE *CParser::ParseMethod (CLASSNODE *pParent, long tokidx, BASENODE *pAt
     pMethod->pInteriorNode = NULL;
 
     // Parse the name (it could be qualified)
-    pMethod->pName = ParseName (pMethod);
+    pMethod->pName = ParseMethodName (pMethod);
 
     // Get parameters
     ParseParameterOrVarargsList(pMethod, &pMethod->pParms);
+
+    // parse constraints
+    pMethod->pConstraints = ParseConstraintClause (pMethod, pMethod->pName->LastNameOfDottedName()->kind == NK_GENERICNAME);
 
     // Next should be the block.  Remember where it started for the interior parse.
     pMethod->iOpen = Mark();
@@ -2547,7 +2683,7 @@ MEMBERNODE *CParser::ParseProperty (NODEKIND nodekind, CLASSNODE *pParent, long 
     // parse name and parameter list
     if (nodekind == NK_PROPERTY)
     {
-        pProp->pName = ParseName (pProp);
+        pProp->pName = ParseGenericQualifiedNameList (pProp, true);
     }
     else
     {
@@ -2736,6 +2872,8 @@ MEMBERNODE *CParser::ParseOperator (CLASSNODE *pParent, long tokidx, BASENODE *p
     if (pAttr != NULL)
         pAttr->pParent = pOperator;
     pOperator->pInteriorNode = NULL;
+    pOperator->pConstraints = NULL;
+
 
     TOKENID iOpTok;
     long errorTokenIndex;
@@ -2867,8 +3005,10 @@ BadArgCount:
 
 ////////////////////////////////////////////////////////////////////////////////
 // CParser::ParseType
+//
+// Parses a type without pointer modifiers or array modifiers
 
-TYPENODE *CParser::ParseType (BASENODE *pParent)
+TYPENODE *CParser::ParseUnderlyingType(BASENODE *pParent, BOOL *pfHadError)
 {
     TYPENODE    *pType = (TYPENODE *)AllocNode (NK_TYPE);
 
@@ -2884,9 +3024,11 @@ TYPENODE *CParser::ParseType (BASENODE *pParent)
         if (pType->iType == PT_VOID) {
             if (pParent && pParent->kind == NK_PARAMETER && CurToken() != TID_STAR) {
                 ErrorAtToken(pType->tokidx, ERR_NoVoidParameter);
+                *pfHadError = TRUE;
                 return pType;
             } else if (CurToken() != TID_STAR) {
                 ErrorAtToken(pType->tokidx, ERR_NoVoidHere);
+                *pfHadError = TRUE;
                 return pType;
             }
             ASSERT(CurToken() == TID_STAR);
@@ -2894,9 +3036,7 @@ TYPENODE *CParser::ParseType (BASENODE *pParent)
     }
     else if (CurToken() == TID_IDENTIFIER)
     {
-        // This is a named type
-        pType->other = TK_NAMED;
-        pType->pName = ParseName (pType);
+        ParseNamedType(pType);
     }
     else
     {
@@ -2904,14 +3044,24 @@ TYPENODE *CParser::ParseType (BASENODE *pParent)
         Error (ERR_TypeExpected);
         pType->other = TK_NAMED;
         pType->pName = ParseMissingName (NULL, pType, Mark());
+        *pfHadError = TRUE;
         return pType;
     }
+    return pType;
+}
 
-    // Check for pointer types (only if pType is NOT an array type)
+////////////////////////////////////////////////////////////////////////////////
+// CParser::ParsePointerTypeMods
+//
+// Parses *'s which modify a type declaration
+
+TYPENODE *CParser::ParsePointerTypeMods (BASENODE *pParent, TYPENODE *pBaseType)
+{
+    // Check for pointer types (only if pBaseType is NOT an array type)
     while (CurToken() == TID_STAR)
     {
         // This is a pointer type.
-        if (pType->TypeKind() == TK_PREDEFINED && (pType->iType == PT_OBJECT || pType->iType == PT_STRING))
+        if (pBaseType->TypeKind() == TK_PREDEFINED && (pBaseType->iType == PT_OBJECT || pBaseType->iType == PT_STRING))
             Error (ERR_IllegalPointerType);
 
         TYPENODE    *pPtr = (TYPENODE *)AllocNode (NK_TYPE);
@@ -2919,10 +3069,25 @@ TYPENODE *CParser::ParseType (BASENODE *pParent)
         pPtr->tokidx = Mark();
         NextToken();
         pPtr->other = TK_POINTER;
-        pPtr->pElementType = pType;
-        pType->pParent = pPtr;
-        pType = pPtr;
+        pPtr->pElementType = pBaseType;
+        pBaseType->pParent = pPtr;
+        pBaseType = pPtr;
     }
+    return pBaseType;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// CParser::ParseType
+
+TYPENODE *CParser::ParseType (BASENODE *pParent)
+{
+    BOOL fHadError = false;
+    TYPENODE    *pType = ParseUnderlyingType(pParent, &fHadError);
+    if (fHadError)
+        return pType;
+
+    // Check for pointer types (only if pType is NOT an array type)
+    pType = ParsePointerTypeMods(pParent, pType);
 
     // Now, check for array dimension specifiers.  Arrays "read" from left to right, meaning
     // "int[][,][,,]" is a single-dim array of 2-dim arrays of 3-dim arrays.  This means the
@@ -2974,6 +3139,20 @@ TYPENODE *CParser::ParseType (BASENODE *pParent)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+// CParser::ParseNamedType
+
+TYPENODE *CParser::ParseNamedType (TYPENODE *pType)
+{
+    ASSERT(IsNameStart(CurToken()));
+    
+    // This is a named type (or an instantiation of a generic named type)
+    pType->pName = ParseGenericQualifiedNameList (pType, false);
+    pType->other = TK_NAMED;
+		
+	return pType;
+}
+
+////////////////////////////////////////////////////////////////////////////////
 // CParser::ParseClassType
 
 TYPENODE *CParser::ParseClassType (BASENODE *pParent)
@@ -2996,8 +3175,7 @@ TYPENODE *CParser::ParseClassType (BASENODE *pParent)
     }
     else if (CurToken() == TID_IDENTIFIER)
     {
-        pType->other = TK_NAMED;
-        pType->pName = ParseName (pType);
+        ParseNamedType(pType);
     }
     else
     {
@@ -3033,10 +3211,135 @@ TYPENODE *CParser::ParseReturnType (BASENODE *pParent)
     return ParseType (pParent);
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// CParser::ParseTypeNameList
+BASENODE *CParser::ParseGenericQualifiedNameList(BASENODE *pParent, BOOL fInExpr)
+{
+    BASENODE    *pList;
 
-BASENODE *CParser::ParseTypeNameList (BASENODE *pParent)
+    pList = ParseGenericQualifiedNamePart(pParent, fInExpr);
+    if (!(pList->flags & NF_NAME_MISSING))
+    {
+        if (CurToken() == TID_DOT)
+        {
+            do
+            {
+                long    iMark = Mark();
+                NextToken();
+                pList = AllocDotNode(iMark, pParent, pList, ParseGenericQualifiedNamePart(pParent, fInExpr));
+            }
+            while (CurToken() == TID_DOT);
+        }
+    }
+            
+    return pList;
+}
+
+NAMENODE *CParser::ParseGenericQualifiedNamePart(BASENODE *pParent, BOOL fInExpr)
+{
+    if (!CheckToken (TID_IDENTIFIER))
+        return ParseMissingName (NULL, pParent, Mark());
+
+    BOOL fGeneric;
+    if (PeekToken() == TID_OPENANGLE)
+    {
+        if (fInExpr)
+        {
+            long mark = Mark();
+            NextToken();
+            fGeneric = ScanOptionalInstantiation();
+            switch (CurToken())
+            {
+            case TID_DOT:
+            case TID_OPENPAREN:
+            case TID_CLOSEPAREN:
+                break;
+            default:
+                // anything but the above means not a generic instantiation expression
+                fGeneric = false;
+            }
+            Rewind(mark);
+        }
+        else
+        {
+            fGeneric = true;
+        }
+    }
+    else
+    {
+        fGeneric = false;
+    }
+
+    if (fGeneric)
+    {
+        GENERICNAMENODE *pGenericName = AllocGenericNameNode(NULL, Mark());
+        pGenericName->pParent = pParent;
+        NextToken();
+        pGenericName->pParams = ParseInstantiation(pGenericName);
+        
+        return pGenericName;
+    }
+    else
+    {
+        NAMENODE        *pName = AllocNameNode(NULL, Mark());
+        pName->pParent = pParent;
+        NextToken();
+        
+        return pName;
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// CParser::ParseTypeName
+//
+// Parses a type which can be used as a base class or a constraint bound.
+// arrays, buffers, pointers, void are not allowed.
+
+TYPENODE *CParser::ParseTypeName (BASENODE *pParent)
+{
+    TYPENODE *pType = ParseType(pParent);
+    if (pType->TypeKind() != TK_PREDEFINED && pType->TypeKind() != TK_NAMED)
+    {
+        ErrorAtToken (pType->tokidx, ERR_BadBaseType);
+        pType = NULL;
+    }
+
+    return pType;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// CParser::ParseBaseTypesClause
+//
+
+BASENODE *CParser::ParseBaseTypesClause (BASENODE *pParent)
+{
+    if (CurToken() == TID_COLON)
+    {
+        NextToken();
+
+        BASENODE    *pList;
+        CListMaker   list (this, &pList);
+
+        while (TRUE)
+        {
+            TYPENODE *pType = ParseTypeName(pParent);
+            if (pType)
+            {
+                list.Add (pType);
+            }
+            if (CurToken() != TID_COMMA)
+                break;
+            NextToken();
+        }
+
+        return pList;
+    }
+    else
+        return NULL;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// CParser::ParseTypeList
+
+BASENODE *CParser::ParseTypeList (BASENODE *pParent)
 {
     BASENODE    *pList;
     CListMaker   list (this, &pList);
@@ -3044,20 +3347,116 @@ BASENODE *CParser::ParseTypeNameList (BASENODE *pParent)
     while (TRUE)
     {
         TYPENODE *pType = ParseType(pParent);
-        if (pType->TypeKind() != TK_PREDEFINED && pType->TypeKind() != TK_NAMED)
-        {
-            ErrorAtToken (pType->tokidx, ERR_BadBaseType);
-        }
-        else
-        {
-            list.Add (pType);
-        }
+        list.Add (pType);
         if (CurToken() != TID_COMMA)
             break;
         NextToken();
     }
 
     return pList;
+}
+
+BASENODE *CParser::ParseOptionalInstantiation (BASENODE *pParent)
+{
+    if (CurToken() == TID_OPENANGLE)
+    {
+        return ParseInstantiation(pParent);
+    }
+
+    return NULL;
+}
+
+BASENODE *CParser::ParseInstantiation (BASENODE *pParent)
+{
+    Eat(TID_OPENANGLE);
+	BASENODE *res = ParseTypeList(pParent);
+	Eat(TID_CLOSEANGLE);
+    return res;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// CParser::ParseTypeFormalList
+
+BASENODE *CParser::ParseTypeFormalList (BASENODE *pParent)
+{
+    if (CurToken() == TID_OPENANGLE)
+    {
+        NextToken();
+
+        BASENODE    *pList;
+        CListMaker   list (this, &pList);
+
+        while (TRUE)
+        {
+            NAMENODE *pTypeFormal = ParseIdentifier(pParent);
+ 	        list.Add (pTypeFormal);
+            if (CurToken() != TID_COMMA)
+                break;
+            NextToken();
+        }
+	    Eat (TID_CLOSEANGLE);
+        return pList;
+    }
+    else
+        return NULL;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// CParser::ParseConstraint
+
+CONSTRAINTNODE  *CParser::ParseConstraint(BASENODE *pParent)
+{
+    CONSTRAINTNODE *pConstraint = (CONSTRAINTNODE*)AllocNode(NK_CONSTRAINT);
+    pConstraint->pParent = pParent;
+    pConstraint->tokidx = Mark();
+    
+    pConstraint->pName = ParseIdentifier(pConstraint);
+    Eat(TID_COLON);
+    if (CurToken() == TID_NEW)
+    {
+        Eat(TID_NEW);
+        Eat(TID_OPENPAREN);
+        Eat(TID_CLOSEPAREN);
+        pConstraint->pType = NULL;
+        
+        pConstraint->flags = NF_CONSTRAINTNEWABLE;
+    }
+    else
+    {
+        pConstraint->pType = ParseTypeName(pConstraint);
+    }
+    
+    return pConstraint;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// CParser::ParseConstraintClause
+
+BASENODE        *CParser::ParseConstraintClause(BASENODE *pParent, BOOL fAllowed)
+{
+    if (CurToken() != TID_WHERE)
+        return NULL;
+
+    if (!fAllowed)
+    {
+        Error(ERR_ConstraintOnlyAllowedOnGenericDecl);
+    }
+            
+    NextToken();
+
+    BASENODE    *pList;
+    CListMaker   list (this, &pList);
+
+    while (TRUE)
+    {
+        CONSTRAINTNODE *pConstraint = ParseConstraint(pParent);
+	    list.Add (pConstraint);
+        if (CurToken() != TID_COMMA)
+            break;
+        NextToken();
+    }
+
+    return fAllowed ? pList : NULL;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -3110,52 +3509,36 @@ NAMENODE *CParser::ParseIdentifierOrKeyword (BASENODE *pParent)
     }
 }
 
+
 ////////////////////////////////////////////////////////////////////////////////
-// CParser::ParseName
+// CParser::ParseDottedName
 //
 // This function will parse a possibly fully-qualified name.
 
-BASENODE *CParser::ParseName (BASENODE *pParent)
+BASENODE *CParser::ParseDottedName (BASENODE *pParent)
 {
-    NAMENODE    *pName = (NAMENODE *)AllocNode (NK_NAME);
-
-    pName->tokidx = Mark();
-    pName->pParent = pParent;
-
-    if (!CheckToken (TID_IDENTIFIER))
-        return ParseMissingName (pName, pParent, Mark());
-
-    FULLTOKEN   tok;
-
-    // Need the name, so rescan the token
-    RescanToken (Mark(), &tok);
-    pName->pName = tok.pName;
-    NextToken();
-
-    BASENODE    *pCur = pName;
+    NAMENODE    *pName = ParseIdentifier(pParent);
+    if (pName->flags & NF_NAME_MISSING)
+        return pName;
 
     // Continue adding names while TID_DOTs exist
+    BASENODE    *pCur = pName;
     while (CurToken() == TID_DOT)
     {
         long    iDotTokIdx = Mark();
-
-        if (NextToken() != TID_IDENTIFIER)
-        {
-            // This is not an identifier.  Give an error and create a missing name node.
-            CheckToken (TID_IDENTIFIER);    // This issues the error...
-            return AllocDotNode (iDotTokIdx, pParent, pCur, ParseMissingName (NULL, pParent, Mark()));
-        }
-
-        // Must rescan the identifier to get the name
-        RescanToken (Mark(), &tok);
-        pName = AllocNameNode (tok.pName, Mark());
-        pCur = AllocDotNode (iDotTokIdx, pParent, pCur, pName);
         NextToken();
+        pName = ParseIdentifier(pParent);
+        pCur = AllocDotNode (iDotTokIdx, pParent, pCur, pName);
+        
+        if (pName->flags & NF_NAME_MISSING)
+            return pCur;
     }
 
     ASSERT (pCur->pParent == pParent);
     return pCur;
 }
+
+
 
 ////////////////////////////////////////////////////////////////////////////////
 // CParser::ParseMissingName
@@ -3182,6 +3565,7 @@ NAMENODE *CParser::ParseMissingName (NAMENODE *pName, BASENODE *pParent, long iT
 // CParser::ParseIndexerName
 //
 // This function will parse the name of an indexer property ( a name followed by .this)
+// We only get here if we know that we've got a valid indexer name.
 
 BASENODE *CParser::ParseIndexerName (BASENODE *pParent)
 {
@@ -3191,49 +3575,20 @@ BASENODE *CParser::ParseIndexerName (BASENODE *pParent)
         NextToken();
         return NULL;
     }
+    BASENODE    *pList;
 
-    // an interface impl has name.this
-    NAMENODE    *pName = (NAMENODE *)AllocNode (NK_NAME);
-
-    pName->tokidx = Mark();
-    pName->pParent = pParent;
-
-    if (!CheckToken (TID_IDENTIFIER))
-        return ParseMissingName (pName, pParent, Mark());
-
-    FULLTOKEN   tok;
-
-    // Need the name, so rescan the token
-    RescanToken (Mark(), &tok);
-    pName->pName = tok.pName;
-    NextToken();
-
-    BASENODE    *pCur = pName;
-
-    // Continue adding names while TID_DOTs exist
-    while (CurToken() == TID_DOT && PeekToken() != TID_THIS)
-    {
-        long    iDotTokIdx = Mark();
-
-        if (NextToken() != TID_IDENTIFIER)
-        {
-            // This is not an identifier.  Give an error and create a missing name node.
-            CheckToken (TID_IDENTIFIER);    // This issues the error...
-            return AllocDotNode (iDotTokIdx, pParent, pCur, ParseMissingName (NULL, pParent, Mark()));
-        }
-
-        // Must rescan the identifier to get the name
-        RescanToken (Mark(), &tok);
-        pName = AllocNameNode (tok.pName, Mark());
-        pCur = AllocDotNode (iDotTokIdx, pParent, pCur, pName);
-        NextToken();
-    }
-
+    pList = ParseGenericQualifiedNamePart(pParent, false);
+    long    iMark = Mark();
     Eat(TID_DOT);
-    Eat(TID_THIS);
 
-    ASSERT (pCur->pParent == pParent);
-    return pCur;
+    while (CurToken() != TID_THIS)
+    {
+        pList = AllocDotNode(iMark, pParent, pList, ParseGenericQualifiedNamePart(pParent, false));
+        iMark = Mark();
+        Eat(TID_DOT);
+    }
+    Eat(TID_THIS);
+    return pList;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -3520,7 +3875,7 @@ BASENODE *CParser::ParseAttribute (BASENODE *pParent)
     pAttr->pParent = pParent;
     pAttr->tokidx = Mark();
 
-    pAttr->pName = ParseName (pAttr);
+    pAttr->pName = ParseGenericQualifiedNameList (pAttr, false);
 
     CListMaker   list (this, &pAttr->pArgs);
 
@@ -4256,7 +4611,7 @@ STATEMENTNODE *CParser::ParseUsingStatement (BASENODE *pParent)
     long    iMark = Mark();
     SCANTYPE st = ScanType();
 
-    if ((st == MUST_BE_TYPE && CurToken() != TID_DOT) || ((st != NOT_TYPE) && CurToken() == TID_IDENTIFIER))
+    if ((st == MUST_BE_TYPE && CurToken() != TID_DOT) || ((st != NOT_TYPE) && CurToken() == TID_IDENTIFIER  && PeekToken() == TID_EQUAL))
     {
         Rewind (iMark);
         pStmt->pInit = ParseDeclaration (pStmt);
@@ -4446,53 +4801,17 @@ BASENODE *CParser::ParseStackAllocExpression (BASENODE *pParent)
 
     Eat (TID_STACKALLOC);
 
-    pNew->pType = (TYPENODE *)AllocNode (NK_TYPE);
-    pNew->pType->tokidx = Mark();
-    pNew->pType->pParent = pNew;
+    BOOL fHadError = false;
+    pNew->pType = ParseUnderlyingType(pNew, &fHadError);
     pNew->pInit = NULL;
     pNew->pArgs = NULL;
     pNew->iOpen = pNew->iClose = -1;
 
-    if (m_rgTokenInfo[CurToken()].dwFlags & TFF_PREDEFINED)
-    {
-        // This is a predefined type
-        pNew->pType->other = TK_PREDEFINED;
-        pNew->pType->iType = m_rgTokenInfo[CurToken()].iPredefType;
-        NextToken();
-        if (pNew->pType->iType == PT_VOID)
-            CheckToken (TID_STAR);
-    }
-    else if (CurToken() == TID_IDENTIFIER)
-    {
-        // This is a named type
-        pNew->pType->other = TK_NAMED;
-        pNew->pType->pName = ParseName (pNew->pType);
-    }
-    else
-    {
-        // Should have been one or the other!
-        Error (ERR_TypeExpected);
-        pNew->pType->other = TK_NAMED;
-        pNew->pType->pName = ParseMissingName (NULL, pNew->pType, Mark());
+    if (fHadError)
         return pNew;
-    }
 
     // Check for pointer types
-    while (CurToken() == TID_STAR)
-    {
-        // This is a pointer type.
-        if (pNew->pType->TypeKind() == TK_PREDEFINED && (pNew->pType->iType == PT_OBJECT || pNew->pType->iType == PT_STRING))
-            Error (ERR_IllegalPointerType);
-
-        TYPENODE    *pPtr = (TYPENODE *)AllocNode (NK_TYPE);
-        pPtr->pParent = pNew;
-        pPtr->tokidx = Mark();
-        NextToken();
-        pPtr->other = TK_POINTER;
-        pPtr->pElementType = pNew->pType;
-        pNew->pType->pParent = pPtr;
-        pNew->pType = pPtr;
-    }
+    pNew->pType = ParsePointerTypeMods(pParent, pNew->pType);
 
     // Here, we MUST have a '[' in order to be valid.
     if (CurToken() != TID_OPENSQUARE)
@@ -4767,9 +5086,17 @@ BASENODE *CParser::ParseTerm (BASENODE *pParent)
 
     switch (iTok)
     {
-        case TID_DOT:
         case TID_IDENTIFIER:
-            pExpr = ParseName (pParent);
+            // Parse in 
+            //      - references to static members of instantiations ArrayList<String>.Sort
+            //      - calls to generic methods....e.g. ArrayList.Syncronized<String>(foo,bar)
+            //
+            // "<" takes precedence over its use as a binary operator in 
+            // this circumstance.   We look to see if we can
+            // successfully scan in something that looks like a type list
+            // immediately after this.  This rules
+            // out accidently commiting to parsing "a < b" as a type application.
+            pExpr = ParseGenericQualifiedNameList (pParent, true);
             break;
 
         case TID_ARGS:
@@ -4899,18 +5226,21 @@ BASENODE *CParser::ParsePostFixOperator (BASENODE *pParent, BASENODE *pExpr)
 
             case TID_ARROW:
             case TID_DOT:
-                if (NextToken() != TID_IDENTIFIER)
-                {
-                    CheckToken(TID_IDENTIFIER); // issue error.
-                    pExpr = AllocDotNode (iTokOp, pParent, pExpr, ParseMissingName (NULL, pParent, Mark()));
-                }
-                else
-                {
-                    pExpr = AllocDotNode (iTokOp, pParent, pExpr, ParseIdentifier (pParent));
-                }
+			{
+                NextToken();
+                // Parse in calls to generic methods....e.g. ArrayList.Syncronized<String>(foo,bar)
+                //
+                // "<" takes precedence over its use as a binary operator in 
+                // this circumstance.   We look to see if we can
+                // successfully scan in something that looks like a type list, and we can see a "(", ")" or "."
+                // immediately after this.  This rules
+                // out accidently commiting to parsing "a < b" as a type application.
+                pExpr = AllocDotNode (iTokOp, pParent, pExpr, ParseGenericQualifiedNamePart (pParent, true));
+
                 if (iTok == TID_ARROW)
                     pExpr->kind = NK_ARROW;
                 break;
+            }
 
             default:
                 return pExpr;
@@ -5020,35 +5350,14 @@ BASENODE *CParser::ParseNewExpression (BASENODE *pParent)
     pNew->iOpen = pNew->iClose = -1;
 
     NextToken();
-    pNew->pType = (TYPENODE *)AllocNode (NK_TYPE);
-    pNew->pType->tokidx = Mark();
-    pNew->pType->pParent = pNew;
+
+    BOOL fHadError = false;
+    pNew->pType = ParseUnderlyingType(pParent, &fHadError);
     pNew->pInit = NULL;
     pNew->pArgs = NULL;
 
-    if (m_rgTokenInfo[CurToken()].dwFlags & TFF_PREDEFINED)
-    {
-        // This is a predefined type
-        pNew->pType->other = TK_PREDEFINED;
-        pNew->pType->iType = m_rgTokenInfo[CurToken()].iPredefType;
-        NextToken();
-        if (pNew->pType->iType == PT_VOID)
-            CheckToken (TID_STAR);
-    }
-    else if (CurToken() == TID_IDENTIFIER)
-    {
-        // This is a named type
-        pNew->pType->other = TK_NAMED;
-        pNew->pType->pName = ParseName (pNew->pType);
-    }
-    else
-    {
-        // Should have been one or the other!
-        Error (ERR_TypeExpected);
-        pNew->pType->other = TK_NAMED;
-        pNew->pType->pName = ParseMissingName (NULL, pNew->pType, Mark());
+    if (fHadError)
         return pNew;
-    }
 
     // Okay, now check for object-creation, which is a class type followed by '('
     if (CurToken() == TID_OPENPAREN)
@@ -5067,21 +5376,7 @@ BASENODE *CParser::ParseNewExpression (BASENODE *pParent)
     }
 
     // Check for pointer types
-    while (CurToken() == TID_STAR)
-    {
-        // This is a pointer type.
-        if (pNew->pType->TypeKind() == TK_PREDEFINED && (pNew->pType->iType == PT_OBJECT || pNew->pType->iType == PT_STRING))
-            Error (ERR_IllegalPointerType);
-
-        TYPENODE    *pPtr = (TYPENODE *)AllocNode (NK_TYPE);
-        pPtr->pParent = pNew;
-        pPtr->tokidx = Mark();
-        NextToken();
-        pPtr->other = TK_POINTER;
-        pPtr->pElementType = pNew->pType;
-        pNew->pType->pParent = pPtr;
-        pNew->pType = pPtr;
-    }
+    pNew->pType = ParsePointerTypeMods(pParent, pNew->pType);
 
     // Here, we MUST have a '[' in order to be valid.
     if (CurToken() != TID_OPENSQUARE)
@@ -5123,7 +5418,6 @@ BASENODE *CParser::ParseNewExpression (BASENODE *pParent)
         fNeedInitializer = TRUE;
     }
 
-    // Continue parsing rank specifiers
     while (CurToken() == TID_OPENSQUARE)
     {
         TYPENODE    *pArray = (TYPENODE *)AllocNode (NK_TYPE);
@@ -5487,6 +5781,7 @@ METHODNODE *CParser::ParseMemberRef ()
     pMethod->pName = pFullName;
     pMethod->pParms = pParms;
     pMethod->pType = pType;
+    pMethod->pConstraints = NULL;
     return pMethod;
 }
 
@@ -5613,7 +5908,7 @@ REDO:
         case NK_ATTRDECL:
             return pNode->asATTRDECL()->iClose + offset;
 
-        case NK_BLOCK:
+         case NK_BLOCK:
             return pNode->asBLOCK()->iClose + offset;
 
         case NK_BREAK:
@@ -5759,6 +6054,12 @@ ANYMEMBER:
         case NK_NAME:
             *pfMissingName = (pNode->flags & NF_NAME_MISSING);
             return pNode->tokidx + offset;
+
+        case NK_GENERICNAME:
+            return GetLastToken(pNode->asGENERICNAME()->pParams, flags, pfMissingName) + 1 + offset;
+            
+        case NK_CONSTRAINT:
+            return GetLastToken(pNode->asCONSTRAINT()->pType, flags, pfMissingName) + offset;
 
         case NK_NAMESPACE:
             if (flags & EF_SINGLESTMT)
@@ -5952,6 +6253,8 @@ BASENODE *CParser::FindLeaf (const POSDATA pos, BASENODE *pNode, CSourceData *pD
             CLASSNODE   *pClass = (CLASSNODE *)pNode;
 
             if (!(pLeaf = FindLeaf (pos, pClass->pMembers, pData, ppTree)) &&
+                !(pLeaf = FindLeaf (pos, pClass->pTypeParams, pData, ppTree)) &&
+                !(pLeaf = FindLeaf (pos, pClass->pConstraints, pData, ppTree)) &&
                 !(pLeaf = FindLeaf (pos, pClass->pBases, pData, ppTree)) &&
                 !(pLeaf = FindLeaf (pos, pClass->pName, pData, ppTree)))
                 pLeaf = FindLeaf (pos, pClass->pAttr, pData, ppTree);
@@ -5961,7 +6264,9 @@ BASENODE *CParser::FindLeaf (const POSDATA pos, BASENODE *pNode, CSourceData *pD
         case NK_DELEGATE:
             if (!(pLeaf = FindLeaf (pos, pNode->asDELEGATE()->pParms, pData, ppTree)) &&
                 !(pLeaf = FindLeaf (pos, pNode->asDELEGATE()->pName, pData, ppTree)) &&
-                !(pLeaf = FindLeaf (pos, pNode->asDELEGATE()->pType, pData, ppTree)))
+                !(pLeaf = FindLeaf (pos, pNode->asDELEGATE()->pType, pData, ppTree)) &&
+                !(pLeaf = FindLeaf (pos, pNode->asDELEGATE()->pTypeParams, pData, ppTree)) &&
+                !(pLeaf = FindLeaf (pos, pNode->asDELEGATE()->pConstraints, pData, ppTree)))
                 pLeaf = FindLeaf (pos, pNode->asDELEGATE()->pAttr, pData, ppTree);
             break;
 
@@ -6023,7 +6328,8 @@ BASENODE *CParser::FindLeaf (const POSDATA pos, BASENODE *pNode, CSourceData *pD
             else if (pMethod->kind == NK_METHOD)
             {
                 // Methods have names, which come before the parameters.
-                if (!(pLeaf = FindLeaf (pos, pMethod->pParms, pData, ppTree)))
+                if (!(pLeaf = FindLeaf (pos, pMethod->pParms, pData, ppTree)) && 
+                    !(pLeaf = FindLeaf (pos, pMethod->pConstraints, pData, ppTree)))
                     pLeaf = FindLeaf (pos, pMethod->pName, pData, ppTree);
             }
             else
@@ -6080,6 +6386,15 @@ BASENODE *CParser::FindLeaf (const POSDATA pos, BASENODE *pNode, CSourceData *pD
         case NK_PARTIALMEMBER:
             if (!(pLeaf = FindLeaf (pos, pNode->asPARTIALMEMBER()->pNode, pData, ppTree)))
                 pLeaf = FindLeaf (pos, pNode->asPARTIALMEMBER()->pAttr, pData, ppTree);
+            break;
+
+        case NK_GENERICNAME:
+            pLeaf = FindLeaf(pos, pNode->asGENERICNAME()->pParams, pData, ppTree);
+            break;
+
+        case NK_CONSTRAINT:
+            if (!(pLeaf = FindLeaf(pos, pNode->asCONSTRAINT()->pName, pData, ppTree)))
+                pLeaf = FindLeaf(pos, pNode->asCONSTRAINT()->pType, pData, ppTree);
             break;
 
         case NK_TYPE:

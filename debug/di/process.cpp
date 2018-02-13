@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -2901,18 +2906,11 @@ void CordbProcess::DispatchRCEvent(void)
     	        
             }
 
-            CordbClass *pClass = module->LookupClass(
-                                       event->LoadClass.classMetadataToken);
+            CordbClass *pClass;
+            hr = module->LookupOrCreateClass(event->LoadClass.classMetadataToken,&pClass);
 
-            if (pClass == NULL)
-            {
-                HRESULT hr = module->CreateClass(
-                                     event->LoadClass.classMetadataToken,
-                                     &pClass);
-
-                if (!SUCCEEDED(hr))
-                    pClass = NULL;
-            }
+            if (!SUCCEEDED(hr))
+                pClass = NULL;
 
             if (pClass->m_loadEventSent)
             {
@@ -2992,8 +2990,7 @@ void CordbProcess::DispatchRCEvent(void)
             }
             _ASSERTE(module != NULL);
 
-            CordbClass *pClass = module->LookupClass(
-                                       event->UnloadClass.classMetadataToken);
+            CordbClass *pClass = module->LookupClass(event->UnloadClass.classMetadataToken);
             
             if (pClass != NULL && !pClass->m_hasBeenUnloaded)
             {
@@ -7347,6 +7344,7 @@ CordbAppDomain::CordbAppDomain(CordbProcess* pProcess,
     m_assemblies(9),
     m_modules(17),
     m_breakpoints(17),
+    m_sharedtypes(3),
     m_synchronizedAD(false),
     m_fMarkedForDeletion(FALSE)
 {
@@ -7389,6 +7387,7 @@ CordbAppDomain::CordbAppDomain(CordbProcess* pProcess,
         
         // Cleaned up in Neuter
         CordbHashTable      m_assemblies;
+        CordbHashTable      m_sharedtypes;        
         CordbHashTable      m_modules;
         CordbHashTable      m_breakpoints; // Disconnect()ed in ~CordbAppDomain
 
@@ -7430,6 +7429,7 @@ void CordbAppDomain::Neuter()
 
         NeuterAndClearHashtable(&m_assemblies);
         NeuterAndClearHashtable(&m_modules);
+        NeuterAndClearHashtable(&m_sharedtypes);
         NeuterAndClearHashtable(&m_breakpoints);
 
         CordbBase::Neuter();
@@ -8019,6 +8019,65 @@ CordbModule* CordbAppDomain::LookupModule(REMOTE_PTR debuggerModuleToken)
 
     return pModule;
 }
+
+HRESULT CordbAppDomain::GetArrayOrPointerType(CorElementType elementType,
+                                              ULONG32 nRank,
+                                              ICorDebugType *pTypeArg, 
+                                              ICorDebugType **ppRes)
+{
+    
+    VALIDATE_POINTER_TO_OBJECT(ppRes, ICorDebugType **);
+
+    CordbType *pRes = NULL;
+
+    if (elementType != ELEMENT_TYPE_PTR && 
+        elementType != ELEMENT_TYPE_BYREF &&
+        elementType != ELEMENT_TYPE_SZARRAY &&
+        elementType != ELEMENT_TYPE_ARRAY)
+        return E_INVALIDARG;
+
+    HRESULT hr = CordbType::MkUnaryType(this, elementType, (ULONG) nRank, (CordbType *) pTypeArg, &pRes);
+
+    if (FAILED(hr))
+        return hr;
+    _ASSERTE(pRes != NULL);
+
+    pRes->AddRef();
+    *ppRes = (ICorDebugType *) pRes;
+    return hr;
+
+}
+
+
+HRESULT CordbAppDomain::GetFunctionPointerType(ULONG32 nTypeArgs,
+                                               ICorDebugType *ppTypeArgs[], 
+                                               ICorDebugType **ppRes)
+{
+
+    VALIDATE_POINTER_TO_OBJECT(ppRes, ICorDebugType **);
+
+    CordbType **ppInst = (CordbType **) _alloca(sizeof(CordbType *) * nTypeArgs);
+    for (unsigned int i = 0; i<nTypeArgs;i++)
+        ppInst[i] = (CordbType *) ppTypeArgs[i];
+
+    Instantiation inst(nTypeArgs, ppInst);
+
+    CordbType *pRes = NULL;
+
+    HRESULT hr = CordbType::MkNaryType(this, ELEMENT_TYPE_FNPTR, inst, &pRes);
+
+    if (FAILED(hr))
+        return hr;
+    _ASSERTE(pRes != NULL);
+
+    pRes->AddRef();
+
+    *ppRes = (ICorDebugType *) pRes;
+
+    return hr;
+
+}
+
 
 
 /* ------------------------------------------------------------------------- *

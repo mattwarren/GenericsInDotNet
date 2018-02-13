@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -28,8 +33,8 @@ namespace System.Reflection {
     using System.Runtime.Remoting;
     using System.Runtime.InteropServices;
     using System.Runtime.Serialization;
-	using System.Reflection.Emit;
-	using System.Runtime.CompilerServices;
+    using System.Reflection.Emit;
+    using System.Runtime.CompilerServices;
     using CultureInfo = System.Globalization.CultureInfo;
     using DebuggerStepThroughAttribute = System.Diagnostics.DebuggerStepThroughAttribute;
     using System.Threading;
@@ -129,6 +134,27 @@ namespace System.Reflection {
         }
         [MethodImplAttribute(MethodImplOptions.InternalCall)]
         private extern Type InternalGetReturnType();
+
+        /**
+         * Is this method an instantiated generic method?
+         */
+        [MethodImplAttribute(MethodImplOptions.InternalCall)]
+        protected extern override bool HasGenericArgumentsImpl();
+
+        /**
+         * Is this method an uninstantiated generic method?
+         */
+        [MethodImplAttribute(MethodImplOptions.InternalCall)]
+        protected extern override bool HasGenericParametersImpl();
+
+        [MethodImplAttribute(MethodImplOptions.InternalCall)]
+        extern public override MethodInfo BindGenericParameters(Type[] typeArgs);        
+
+        [MethodImplAttribute(MethodImplOptions.InternalCall)]
+        extern public override Type[] GetGenericArguments();
+
+        [MethodImplAttribute(MethodImplOptions.InternalCall)]
+        extern public override MethodInfo GetGenericMethodDefinition();
 
         // This method will return an object that represents the 
         //  custom attributes for the return type.

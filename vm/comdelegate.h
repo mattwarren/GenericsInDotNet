@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -161,7 +166,18 @@ public:
     static Stub* SetupShuffleThunk(DelegateEEClass *pDelCls);
 
     // Method to do static validation of delegate .ctor
+    //@GENERICSVER: deprecated (not suitable for generics)
     static BOOL ValidateCtor(MethodDesc *pFtn, EEClass *pDlgt, EEClass *pInst);
+    //@GENERICSVER: new (suitable for generics)
+    // Method to do static validation of delegate .ctor
+    static BOOL ValidateCtor(TypeHandle objHnd,
+        TypeHandle ftnParentHnd,
+        MethodDesc *pFtn,
+        TypeHandle dlgtHndModule,
+        Module *module,
+        unsigned methodMemberRef,
+        unsigned delegateConstructorMemberRef);
+
 private:
 	static BOOL ValidateBeginInvoke(DelegateEEClass* pClass);		// make certain the BeginInvoke method is consistant with the Invoke Method
 	static BOOL ValidateEndInvoke(DelegateEEClass* pClass);		// make certain the EndInvoke method is consistant with the Invoke Method

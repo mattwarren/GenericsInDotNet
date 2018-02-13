@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -91,7 +96,7 @@ FCIMPL7(Object*, CStackBuilderSink::PrivateProcessMessage, Object* pSBSinkUNSAFE
         }
     }
 
-    MetaSig mSig(pMD->GetSig(), pMD->GetModule());
+    MetaSig mSig(pMD);
     
     // get the target depending on whether the method is virtual or non-virtual
     // like a constructor, private or final method
@@ -139,7 +144,7 @@ struct ArgInfo
 {
     PBYTE             dataLocation;
     INT32             dataSize;
-    EEClass          *dataClass;
+    TypeHandle        dataTypeHandle;
     BYTE              dataType;
     BYTE              byref;
 };
@@ -252,9 +257,9 @@ void CallDescrWithObjectArray(OBJECTREF& pServer,
     // if there is a return buffer, allocate it
     if (sig->HasRetBuffArg()) 
     {
-        EEClass *pEECValue = sig->GetRetEEClass();
-        _ASSERTE(pEECValue->IsValueClass());
-        MethodTable * mt = pEECValue->GetMethodTable();
+        TypeHandle ty = sig->GetRetTypeHandle();
+        _ASSERTE(ty.IsValueType());
+        MethodTable * mt = ty.GetMethodTable();
         *pVarRet = AllocateObject(mt);
 
         *(argit.GetRetBuffArgAddr()) = (*pVarRet)->UnBox();
@@ -286,15 +291,15 @@ void CallDescrWithObjectArray(OBJECTREF& pServer,
 
         if (typ == ELEMENT_TYPE_BYREF)
         {
-            EEClass *pClass = NULL;
-            CorElementType brType = sig->GetByRefType(&pClass);
+            TypeHandle ty = TypeHandle();
+            CorElementType brType = sig->GetByRefType(&ty);
             if (CorIsPrimitiveType(brType))
             {
                 pArgInfo->dataSize = gElementTypeInfo[brType].m_cbSize;
             }
-            else if (pClass->IsValueClass())
+            else if (ty.IsValueType())
             {
-                pArgInfo->dataSize = pClass->GetAlignedNumInstanceFieldBytes();
+                pArgInfo->dataSize = ty.GetClass()->GetAlignedNumInstanceFieldBytes();
                 numByRef ++;
             }
             else
@@ -306,12 +311,12 @@ void CallDescrWithObjectArray(OBJECTREF& pServer,
             ByRefInfo *brInfo = (ByRefInfo *) _alloca(offsetof(ByRefInfo,data) + pArgInfo->dataSize);
             brInfo->argIndex = arg;
             brInfo->typ = brType;
-            brInfo->pClass = pClass;
+            brInfo->typeHandle = ty;
             brInfo->pNext = pByRefs;
             pByRefs = brInfo;
             pArgInfo->dataLocation = (BYTE*)brInfo->data;
             *((void**)(pFrameBase + ofs)) = (void*)pArgInfo->dataLocation;
-            pArgInfo->dataClass = pClass;
+            pArgInfo->dataTypeHandle = ty;
             pArgInfo->dataType = brType;
             pArgInfo->byref = TRUE;
         }
@@ -319,7 +324,7 @@ void CallDescrWithObjectArray(OBJECTREF& pServer,
         {
             pArgInfo->dataLocation = pFrameBase + ofs;
             pArgInfo->dataSize = StackElemSize(structSize);
-            pArgInfo->dataClass = sig->GetTypeHandle().GetClass(); // this may cause GC!
+            pArgInfo->dataTypeHandle = sig->GetTypeHandle(); // this may cause GC!
             pArgInfo->dataType = typ;
             pArgInfo->byref = FALSE;
         }  
@@ -346,7 +351,7 @@ void CallDescrWithObjectArray(OBJECTREF& pServer,
 
     PBYTE             dataLocation;
     INT32             dataSize;
-    EEClass          *dataClass;
+    TypeHandle        dataTypeHandle;
     BYTE              dataType;
 
     OBJECTREF* pArguments = pArgArray->m_Array;
@@ -355,7 +360,7 @@ void CallDescrWithObjectArray(OBJECTREF& pServer,
     {
         dataSize = pArgInfo->dataSize;
         dataLocation = pArgInfo->dataLocation;
-        dataClass = pArgInfo->dataClass;
+        dataTypeHandle = pArgInfo->dataTypeHandle;
         dataType = pArgInfo->dataType;
 
         switch (dataSize) 
@@ -462,7 +467,7 @@ void CallDescrWithObjectArray(OBJECTREF& pServer,
         }
 #endif
 
-        GetObjectFromStack(pVarRet, pRetVal, sig->GetReturnType(), sig->GetRetEEClass());
+        GetObjectFromStack(pVarRet, pRetVal, sig->GetReturnType(), sig->GetRetTypeHandle());
     }
 
     // extract the out args from the byrefs
@@ -477,7 +482,7 @@ void CallDescrWithObjectArray(OBJECTREF& pServer,
             // to GetObjectFromStack .  If GC happens, nobody is protecting the passed in pointer.
 
             OBJECTREF pTmp = NULL;
-            GetObjectFromStack(&pTmp, pByRefs->data, pByRefs->typ, pByRefs->pClass);
+            GetObjectFromStack(&pTmp, pByRefs->data, pByRefs->typ, pByRefs->typeHandle);
             (*ppVarOutParams)->SetAt(pByRefs->argIndex, pTmp);
             pByRefs = pByRefs->pNext;
         }

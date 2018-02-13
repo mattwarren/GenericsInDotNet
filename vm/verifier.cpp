@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -7464,8 +7469,8 @@ error_bad_token:
                     case mdtTypeRef:
                     case mdtTypeDef:
                     {
-		      if (s_pRuntimeTypeHandle == NULL) 
-		        s_pRuntimeTypeHandle = g_Mscorlib.GetClass(CLASS__TYPE_HANDLE);
+                        if (s_pRuntimeTypeHandle == NULL)
+                            s_pRuntimeTypeHandle = g_Mscorlib.GetClass(CLASS__TYPE_HANDLE);
                         _ASSERTE(s_pRuntimeTypeHandle != NULL);
                         th = TypeHandle(s_pRuntimeTypeHandle);
 
@@ -9553,8 +9558,8 @@ HRESULT Verifier::VerifyMethodCall(DWORD dwPCAtStartOfInstruction,
         
         // Verify that the actual sig of the method is compatible with the
         // declared one.
-        if (!MetaSig::CompareMethodSigs(pSignature, cSignature, m_pModule, 
-            pSigItem, cSigItem, pMethodDesc->GetModule()))
+        if (!MetaSig::CompareMethodSigs(pSignature, cSignature, m_pModule, NULL,
+            pSigItem, cSigItem, pMethodDesc->GetModule(), NULL))
         {
             m_sError.dwFlags = VER_ERR_OPCODE_OFFSET;
             SET_ERR_OPCODE_OFFSET();

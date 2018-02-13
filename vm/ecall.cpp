@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -173,7 +178,6 @@ ECFunc  gMessageFuncs[] =
     {FCFuncElement("InternalGetArg",         NULL, (PVOID)  CMessage::GetArg)},
     {FCFuncElement("InternalGetArgs",        NULL, (PVOID)  CMessage::GetArgs)},
     {FCFuncElement("InternalGetMethodBase",  NULL, (PVOID)  CMessage::GetMethodBase)},
-    {FCFuncElement("InternalGetMethodName",  NULL, (PVOID)  CMessage::GetMethodName)},
     {FCFuncElement("PropagateOutParameters", NULL, (PVOID)  CMessage::PropagateOutParameters)},
     {FCFuncElement("GetReturnValue",         NULL, (PVOID)  CMessage::GetReturnValue)},
     {FCFuncElement("Init",                   NULL, (PVOID)  CMessage::Init)},
@@ -533,6 +537,7 @@ ECFunc gCOMClassFuncs[] =
 
     {FCFuncElement("InternalGetGUID",          NULL, (LPVOID) COMClass::GetGUID)},
     {FCFuncElement("IsArrayImpl",              NULL, (LPVOID) COMClass::IsArray)},
+    {FCFuncElement("BindGenericParameters",    NULL, (LPVOID) COMClass::Instantiate)},
     {FCFuncElement("InvalidateCachedNestedType",NULL, (LPVOID) COMClass::InvalidateCachedNestedType)}, /**/
     {FCFuncElement("GetInterfaces",            NULL, (LPVOID) COMClass::GetInterfaces)},
     {FCFuncElement("GetInterface",             NULL, (LPVOID) COMClass::GetInterface)},
@@ -548,6 +553,10 @@ ECFunc gCOMClassFuncs[] =
     {FCFuncElement("GetMemberProperties",      NULL, (LPVOID) COMClass::GetMemberProperties)},
     {FCFuncElement("SupportsInterface",        NULL, (LPVOID) COMClass::SupportsInterface)},
     {FCFuncElement("InternalGetArrayRank",     NULL, (LPVOID) COMClass::InternalGetArrayRank)},
+    {FCFuncElement("GetGenericArguments",      NULL, (LPVOID) COMClass::GetInstantiation)},
+    {FCFuncElement("GetGenericTypeDefinition", NULL, (LPVOID) COMClass::GetGenericType)},
+    {FCFuncElement("HasGenericParametersImpl", NULL, (LPVOID) COMClass::IsGenericTypeDefinition)},
+    {FCFuncElement("HasGenericArgumentsImpl",  NULL, (LPVOID) COMClass::IsInstantiated)},
     {NULL, NULL, NULL}
 };
 
@@ -573,6 +582,11 @@ ECFunc gCOMMethodFuncs[] =
     {FCFuncElement("GetParentDefinition",        NULL, (LPVOID) COMMember::GetParentDefinition)},
     {FCFuncElement("InternalGetCurrentMethod", NULL, (LPVOID) COMMember::InternalGetCurrentMethod)},
     {FCFuncElement("IsOverloadedInternal",     NULL, (LPVOID) COMMember::IsOverloaded)},
+    {FCFuncElement("HasGenericParametersImpl", NULL, (LPVOID) COMMember::IsGeneric)},
+    {FCFuncElement("HasGenericArgumentsImpl",  NULL, (LPVOID) COMMember::IsInstantiated)},
+    {FCFuncElement("BindGenericParameters",    NULL, (LPVOID) COMMember::Instantiate)},
+    {FCFuncElement("GetGenericMethodDefinition", NULL, (LPVOID) COMMember::GetGenericMethod)},
+    {FCFuncElement("GetGenericArguments", NULL, (LPVOID) COMMember::GetInstantiation)},
     {NULL, NULL, NULL}
 };
 
@@ -1841,8 +1855,9 @@ static USHORT FindECIndexForMethod(MethodDesc *pMD, ECFunc *impls)
                 ULONG       pBinarySigLen;
                 if (FAILED(cur->m_wszMethodSig->GetBinaryForm(&pBinarySig, &pBinarySigLen)))
                     continue;
-                if (!MetaSig::CompareMethodSigs(pMethodSig, cbMethodSigLen, pModule,
-                                                pBinarySig, pBinarySigLen, cur->m_wszMethodSig->GetModule()))
+		//@GENERICS: none of these methods belong to generic classes so there is no instantiation info to pass in
+                if (!MetaSig::CompareMethodSigs(pMethodSig, cbMethodSigLen, pModule, NULL,
+                                                pBinarySig, pBinarySigLen, cur->m_wszMethodSig->GetModule(), NULL))
                     continue;
             }
             // We have found a match!
@@ -2160,7 +2175,20 @@ void FCallAssert(void*& cache, void* target)
         MethodDesc* pMD = MapTargetBackToMethod(target);
         if (pMD != 0) 
         {
-            _ASSERTE(FindImplForMethod(pMD) && "Use FCFuncElement not ECFuncElement");
+#ifdef _DEBUG
+            ECFunc* spot = gFCallMethods[FCallHash(target)];
+            for(;;) {
+                if (spot == 0) {             
+                    // found end of list
+                    break;
+                }
+                if (spot->m_pImplementation == target)           
+                    // already in list
+                    break;
+                spot = spot->m_pNext;
+            }
+            _ASSERTE(spot && "Use FCFuncElement not ECFuncElement");
+#endif
             return;
         }
 

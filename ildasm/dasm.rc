@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -55,6 +60,7 @@ BEGIN
     IDS_USAGE_19            "  /UTF8               Use UTF-8 encoding for output (default - ANSI).\n"
     IDS_USAGE_20            "  /UNICODE            Use UNICODE encoding for output.\n"
     IDS_USAGE_21            "  /NOIL               Suppress IL assembler code output.\n"
+    IDS_USAGE_21A           "  /FORWARD            Use forward class declaration.\n"
     IDS_USAGE_22            "  /HEADER             Include file header information in the output.\n"
     IDS_USAGE_23            "  /ITEM=<class>[::<method>[(<sig>)]  Disassemble the specified item only\n\n"
 END

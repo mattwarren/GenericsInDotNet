@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -18,10 +23,20 @@
 #ifndef _TYPE_HASH_H
 #define _TYPE_HASH_H
 
-//============================================================================
-// This is the hash table used by class loaders to look up type handles
-// associated with constructed types (arrays and pointer types). 
-//============================================================================
+//========================================================================================
+// This hash table is used by class loaders to look up constructed types:
+// arrays, pointers and instantiations of user-defined generic types.
+//
+// @GENERICS:
+// We use the same hash table to do lookups based on instantiation-compatibility
+// This means that
+//     (a) The hash function must respect compatibility i.e. compatible instantiations
+//         must hash to the same value
+//     (b) We'll get more collisions and hence potentially slower lookup when doing
+//         doing lookups based on exact instantiation. In future we might consider
+//         replacing by two hash tables, one for exact lookups and one for
+//         instantiation-compatible lookups. The downside is the additional space required.
+//========================================================================================
 
 class ClassLoader;
 class NameHandle;
@@ -32,14 +47,13 @@ typedef void* HashDatum;
 
 
 // One of these is present for each element in the table
-
 typedef struct EETypeHashEntry
 {
     struct EETypeHashEntry *pNext;
     DWORD               dwHashValue;
     HashDatum           Data;
     
-    // For details of the reps used here, see NameHandle in clsload.hpp
+    // For details of the representations used here, see NameHandle in clsload.hpp
     INT_PTR m_Key1;
     INT_PTR m_Key2;
 } EETypeHashEntry_t;
@@ -67,13 +81,21 @@ public:
     ~EETypeHashTable();
     void *             operator new(size_t size, LoaderHeap *pHeap, DWORD dwNumBuckets);
     void               operator delete(void *p);
+
+    // Insert a value in the hash table, keyed on exact type
     EETypeHashEntry_t * InsertValue(NameHandle* pName, HashDatum Data);
+
+    // Look up a value in the hash table, keyed on exact type
     EETypeHashEntry_t *GetValue(NameHandle* pName, HashDatum *pData);
+   
     EETypeHashEntry_t *AllocNewEntry();
 
 private:
     EETypeHashEntry_t * FindItem(NameHandle* pName);
     void            GrowHashTable();
+
+    // Calculate hash value; instantiated types whose instantiations are compatible MUST hash
+    // to the same value.
     static DWORD Hash(NameHandle* pName);
 };
 

@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -124,6 +129,8 @@ static const ULONG g_TblSizeInfo[2][TBL_COUNT] =
        0,              // ExportedType                                                    
        0,              // ManifestResource                                                    
        0,              // NestedClass
+       0,              // GenericPar
+       0,              // MethodSpec
     },
     // Large table sizes.  From MSCORLIB.
     {
@@ -169,6 +176,8 @@ static const ULONG g_TblSizeInfo[2][TBL_COUNT] =
        0,              // ExportedType                                                    
        0,              // ManifestResource                                                    
        0,              // NestedClass
+       0,              // GenericPar
+       0,              // MethodSpec
     }
 };
 
@@ -224,6 +233,8 @@ TblIndex g_TblIndex[TBL_COUNT] =
     {(ULONG) -1,        (ULONG) -1,     mdtExportedType},    // ExportedType                                                    
     {(ULONG) -1,        (ULONG) -1,     mdtManifestResource},// ManifestResource                                                    
     {(ULONG) -1,        (ULONG) -1,     (ULONG) -1},            // NestedClass
+    {(ULONG) -1,        (ULONG) -1,     (ULONG) -1},           // GenericPar
+    {(ULONG) -1,        (ULONG) -1,     mdtMethodSpec},  // MethodSpec
 };
 
 ULONG CMiniMdRW::m_TruncatedEncTables[] =
@@ -2168,6 +2179,8 @@ HRESULT CMiniMdRW::PreSaveFull()
         // MethodImpl sorted here.
         // Sort the constant table by parent.
         // Sort the nested class table by NestedClass.
+        // Sort the generic par table by Owner
+        // MethodSpec order is preserved
 
         // Always sort Constant table
         SORTER(Constant,Parent);
@@ -2204,6 +2217,11 @@ HRESULT CMiniMdRW::PreSaveFull()
         // Always Sort the MethodImpl table by the Class.
         SORTER(MethodImpl, Class);
         sortMethodImpl.Sort();
+
+        // Always Sort the GenericPar table by the Owner.
+	// Don't disturb the sequence ordering within Owner
+        STABLESORTER(GenericPar, Owner);
+        sortGenericPar.Sort();
 
         // Some tokens are not moved in ENC mode; only "full" mode.
         if ((m_OptionValue.m_UpdateMode & MDUpdateMask)  == MDUpdateFull)
@@ -5077,8 +5095,8 @@ RID CMiniMdRW::vSearchTable(		    // RID of matching row, or 0.
 
     int         lo,mid,hi;              // binary search indices.
 
-    // Binary search requires sorted table.
-    _ASSERTE(IsSorted(ixTbl));
+	// Binary search requires sorted table.
+    //    _ASSERTE(IsSorted(ixTbl));
 
     // Start with entire table.
     lo = 1;

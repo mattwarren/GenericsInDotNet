@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -448,12 +453,13 @@ StackWalkAction DebuggerThread::TraceAndSendStackCallback(FrameInfo *pInfo, VOID
 #endif
             
         DebuggerIPCE_FuncData* currentFuncData = &rsfd->currentSTRData->v.funcData;
+        DebuggerIPCE_JITFuncData* currentJITFuncData = &rsfd->currentSTRData->v.jitFuncData;
         _ASSERTE(fd != NULL);
 
-        GetVAInfo(&(currentFuncData->fVarArgs),
-                  &(currentFuncData->rpSig),
-                  &(currentFuncData->cbSig),
-                  &(currentFuncData->rpFirstArg),
+        GetVAInfo(&(rsfd->currentSTRData->v.fVarArgs),
+                  &(rsfd->currentSTRData->v.rpSig),
+                  &(rsfd->currentSTRData->v.cbSig),
+                  &(rsfd->currentSTRData->v.rpFirstArg),
                   fd,
                   rd,
                   pInfo->relOffset);
@@ -489,7 +495,11 @@ StackWalkAction DebuggerThread::TraceAndSendStackCallback(FrameInfo *pInfo, VOID
 
         currentFuncData->classMetadataToken = fd->GetClass()->GetCl();
 
-        // Pass back the local var signature token.
+		// GENERICS: methodDesc gets set for instantiations of generic methods and
+		// instance methods inside generic classes.
+		currentJITFuncData->methodDesc = (fd->HasClassOrMethodInstantiation()) ? fd : NULL;
+
+		// Pass back the local var signature token.
         COR_ILMETHOD *CorILM = g_pEEInterface->MethodDescGetILHeader(fd);
 
         if (CorILM == NULL )
@@ -499,9 +509,8 @@ StackWalkAction DebuggerThread::TraceAndSendStackCallback(FrameInfo *pInfo, VOID
             currentFuncData->ilSize = 0;
             rsfd->currentSTRData->v.ILIP = NULL;
 
-            currentFuncData->nativeStartAddressPtr = NULL;
-            currentFuncData->nativeSize = 0;
-            currentFuncData->nativenVersion = DebuggerJitInfo::DJI_VERSION_FIRST_VALID;
+            currentJITFuncData->nativeStartAddressPtr = NULL;
+            currentJITFuncData->nativeSize = 0;
         }
         else
         {
@@ -532,13 +541,13 @@ StackWalkAction DebuggerThread::TraceAndSendStackCallback(FrameInfo *pInfo, VOID
                 // been tracking. (Handling of the GetCode message
                 // knows how to find the start address of the code, or
                 // how to respond if is been pitched.)
-                currentFuncData->nativeSize = g_pEEInterface->GetFunctionSize(fd);
+                currentJITFuncData->nativeSize = g_pEEInterface->GetFunctionSize(fd);
 
-                currentFuncData->nativeStartAddressPtr = NULL;
-                currentFuncData->nativenVersion = DebuggerJitInfo::DJI_VERSION_FIRST_VALID;
-                currentFuncData->CodeVersionToken = NULL;
-                currentFuncData->ilToNativeMapAddr = NULL;
-                currentFuncData->ilToNativeMapSize = 0;
+                currentJITFuncData->nativeStartAddressPtr = NULL;
+                currentJITFuncData->nativeCodeVersionToken = NULL;
+    	        currentFuncData->CodeVersionToken = NULL;  // GENERICS: TODO: can we do better here??
+                currentJITFuncData->ilToNativeMapAddr = NULL;
+                currentJITFuncData->ilToNativeMapSize = 0;
                 currentFuncData->nVersionMostRecentEnC = currentFuncData->ilnVersion;
             }
             else
@@ -558,14 +567,14 @@ StackWalkAction DebuggerThread::TraceAndSendStackCallback(FrameInfo *pInfo, VOID
                 // that the RIght Side can copy it out if needed.
                 _ASSERTE(jitInfo->m_sequenceMapSorted);
                 
-                currentFuncData->ilToNativeMapAddr = jitInfo->m_sequenceMap;
-                currentFuncData->ilToNativeMapSize = jitInfo->m_sequenceMapCount;
+    	        currentFuncData->CodeVersionToken = (void *)jitInfo->m_methodInfo;
+                currentJITFuncData->ilToNativeMapAddr = jitInfo->m_sequenceMap;
+                currentJITFuncData->ilToNativeMapSize = jitInfo->m_sequenceMapCount;
                 
                 if (!jitInfo->m_codePitched)
                 {   // It's there & life is groovy
                     currentFuncData->nativeStartAddressPtr = &(jitInfo->m_addrOfCode);
                     currentFuncData->nativeSize = g_pEEInterface->GetFunctionSize(fd);
-                    currentFuncData->nativenVersion = jitInfo->m_nVersion;
                     currentFuncData->CodeVersionToken = (void *)jitInfo;
                 }
                 else
@@ -580,7 +589,7 @@ StackWalkAction DebuggerThread::TraceAndSendStackCallback(FrameInfo *pInfo, VOID
             }
         }
 
-        currentFuncData->nativeOffset = (SIZE_T)pInfo->relOffset;
+        currentJITFuncData->nativeOffset = (SIZE_T)pInfo->relOffset;
 
         //
         // Bump our pointers to the next space for the next frame.

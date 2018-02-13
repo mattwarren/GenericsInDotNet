@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 //
@@ -102,7 +107,8 @@ TOK(L"ushort"           , TID_USHORT        , TFF_MEMBER | TFF_PREDEFINED       
 TOK(L"using"            , TID_USING         , 0                                             , 0                         , EParseUsingStatement                      , OP_NONE           , OP_NONE           , OP_NONE               , KEYWORD           )
 TOK(L"virtual"          , TID_VIRTUAL       , TFF_MEMBER | TFF_MODIFIER                     , 0                         , 0                                         , OP_NONE           , OP_NONE           , OP_NONE               , KEYWORD           )
 TOK(L"void"             , TID_VOID          , TFF_MEMBER | TFF_PREDEFINED                   , PT_VOID                   , 0                                         , OP_NONE           , OP_NONE           , OP_NONE               , KEYWORD           )
-TOK(L"volatile"         , TID_VOLATILE      , 0                                             , 0                         , 0                                         , OP_NONE           , OP_NONE           , OP_NONE               , KEYWORD           )
+TOK(L"volatile"         , TID_VOLATILE      , TFF_MEMBER | TFF_MODIFIER                     , 0                         , 0                                         , OP_NONE           , OP_NONE           , OP_NONE               , KEYWORD           )
+TOK(L"where"            , TID_WHERE         , 0                                             , 0                         , 0                                         , OP_NONE           , OP_NONE           , OP_NONE               , KEYWORD           )
 TOK(L"while"            , TID_WHILE         , 0                                             , 0                         , EParseWhileStatement                      , OP_NONE           , OP_NONE           , OP_NONE               , KEYWORD           )
 
 // NOTE:  KEEP TID_IDENTIFIER AS THE FIRST NON-KEYWORD TOKEN!

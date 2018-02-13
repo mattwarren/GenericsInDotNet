@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -1291,6 +1296,12 @@ BOOL RegMeta::_IsValidToken( // true if tk is valid token
             if (m_pStgdb->m_MiniMd.m_USBlobs.IsValidCookie(rid))
                 bRet = true;
             break;
+        case mdtGenericPar:
+  	    bRet = (rid <= m_pStgdb->m_MiniMd.getCountGenericPars());
+            break;
+        case mdtMethodSpec:
+  	    bRet = (rid <= m_pStgdb->m_MiniMd.getCountMethodSpecs());
+            break;
         default:
             _ASSERTE(!"Unknown token kind!");
         }
@@ -1730,6 +1741,76 @@ ErrExit:
     return hr;
 } // STDMETHODIMP RegMeta::EnumInterfaceImpls()
 
+
+STDMETHODIMP RegMeta::EnumGenericPars(HCORENUM *phEnum, mdToken tkOwner,
+        mdGenericPar rTokens[], ULONG cMaxTokens, ULONG *pcTokens)
+{
+    HENUMInternal       **ppmdEnum = reinterpret_cast<HENUMInternal **> (phEnum);
+    HRESULT             hr = S_OK;
+    ULONG               ridStart;
+    ULONG               ridEnd;
+    HENUMInternal       *pEnum;
+    GenericParRec      *pRec;
+    ULONG               index;
+
+    LOG((LOGMD, "RegMeta::EnumGenericPars(0x%08x, 0x%08x, 0x%08x, 0x%08x, 0x%08x)\n", 
+            phEnum, tkOwner, rTokens, cMaxTokens, pcTokens));
+    START_MD_PERF();
+    
+    _ASSERTE(TypeFromToken(tkOwner) == mdtTypeDef || TypeFromToken(tkOwner) == mdtMethodDef);
+
+
+    if ( *ppmdEnum == 0 )
+    {
+        // instantiating a new ENUM
+        CMiniMdRW       *pMiniMd = &(m_pStgdb->m_MiniMd);
+
+        if ( pMiniMd->IsSorted( TBL_GenericPar ) )
+        {
+            if (TypeFromToken(tkOwner) == mdtTypeDef)
+              ridStart = pMiniMd->getGenericParsForTypeDef(RidFromToken(tkOwner), &ridEnd);
+            else
+              ridStart = pMiniMd->getGenericParsForMethodDef(RidFromToken(tkOwner), &ridEnd);
+
+            IfFailGo( HENUMInternal::CreateSimpleEnum(mdtGenericPar, ridStart, ridEnd, &pEnum) );
+        }
+        else
+        {
+            // table is not sorted so we have to create dynamic array 
+            // create the dynamic enumerator
+            //
+            ridStart = 1;
+            ridEnd = pMiniMd->getCountGenericPars() + 1;
+
+            IfFailGo( HENUMInternal::CreateDynamicArrayEnum(mdtGenericPar, &pEnum) );             
+            
+            for (index = ridStart; index < ridEnd; index ++ )
+            {
+                pRec = pMiniMd->getGenericPar(index);
+                if ( tkOwner == pMiniMd->getOwnerOfGenericPar(pRec) )
+                {
+                    IfFailGo( HENUMInternal::AddElementToEnum(pEnum, TokenFromRid(index, mdtGenericPar) ) );
+                }
+            }
+        }
+
+        // set the output parameter
+        *ppmdEnum = pEnum;          
+    }
+    else
+    {
+        pEnum = *ppmdEnum;
+    }
+    
+    // fill the output token buffer
+    hr = HENUMInternal::EnumWithCount(pEnum, cMaxTokens, rTokens, pcTokens);
+
+ErrExit:
+    HENUMInternal::DestroyEnumIfEmpty(ppmdEnum);
+    STOP_MD_PERF(EnumGenericPars);
+    return hr;
+}
+
 //*****************************************************************************
 // Enumerate Sym.TypeRef
 //*****************************************************************************
@@ -2040,39 +2121,46 @@ STDMETHODIMP RegMeta::GetTypeRefProps(
 
     START_MD_PERF();
     LOCKREAD();
-    _ASSERTE(TypeFromToken(tr) == mdtTypeRef);
+    //    _ASSERTE(TypeFromToken(tr) == mdtTypeRef);
 
     HRESULT     hr = S_OK;
-    CMiniMdRW   *pMiniMd = &(m_pStgdb->m_MiniMd);
-    TypeRefRec  *pTypeRefRec = pMiniMd->getTypeRef(RidFromToken(tr));
-    int         bTruncation=0;          // Was there name truncation?
-
-    if (ptkResolutionScope)
-        *ptkResolutionScope = pMiniMd->getResolutionScopeOfTypeRef(pTypeRefRec);
-
-    if (szTypeRef || pchTypeRef)
+    if (TypeFromToken(tr) != mdtTypeRef)
     {
-        LPCSTR  szNamespace;
-        LPCSTR  szName;
-
-        szNamespace = pMiniMd->getNamespaceOfTypeRef(pTypeRefRec);
-        MAKE_WIDEPTR_FROMUTF8(wzNamespace, szNamespace);
-
-        szName = pMiniMd->getNameOfTypeRef(pTypeRefRec);
-        MAKE_WIDEPTR_FROMUTF8(wzName, szName);
-
-        if (szTypeRef)
-            bTruncation = ! (ns::MakePath(szTypeRef, cchTypeRef, wzNamespace, wzName));
-        if (pchTypeRef)
-        {
-            if (bTruncation || !szTypeRef)
-                *pchTypeRef = ns::GetFullLength(wzNamespace, wzName);
-            else
-                *pchTypeRef = (ULONG)(wcslen(szTypeRef) + 1);
-        }
+      hr = S_FALSE;
     }
-    if (bTruncation && hr == S_OK)
-        hr = CLDB_S_TRUNCATION;
+    else
+    {
+        CMiniMdRW   *pMiniMd = &(m_pStgdb->m_MiniMd);
+        TypeRefRec  *pTypeRefRec = pMiniMd->getTypeRef(RidFromToken(tr));
+        int         bTruncation=0;          // Was there name truncation?
+
+        if (ptkResolutionScope)
+            *ptkResolutionScope = pMiniMd->getResolutionScopeOfTypeRef(pTypeRefRec);
+
+        if (szTypeRef || pchTypeRef)
+        {
+            LPCSTR  szNamespace;
+            LPCSTR  szName;
+
+            szNamespace = pMiniMd->getNamespaceOfTypeRef(pTypeRefRec);
+            MAKE_WIDEPTR_FROMUTF8(wzNamespace, szNamespace);
+
+            szName = pMiniMd->getNameOfTypeRef(pTypeRefRec);
+            MAKE_WIDEPTR_FROMUTF8(wzName, szName);
+
+            if (szTypeRef)
+                bTruncation = ! (ns::MakePath(szTypeRef, cchTypeRef, wzNamespace, wzName));
+            if (pchTypeRef)
+            {
+                if (bTruncation || !szTypeRef)
+                    *pchTypeRef = ns::GetFullLength(wzNamespace, wzName);
+                else
+                    *pchTypeRef = (ULONG)(wcslen(szTypeRef) + 1);
+            }
+        }
+        if (bTruncation && hr == S_OK)
+            hr = CLDB_S_TRUNCATION;
+    }
     STOP_MD_PERF(GetTypeRefProps);
     return hr;
 } // STDMETHODIMP RegMeta::GetTypeRefProps()
@@ -3017,7 +3105,7 @@ HRESULT RegMeta::_SetTypeDefProps(      // S_OK or error.
     TypeDefRec  *pRecord;               // New TypeDef record.
 
     _ASSERTE(TypeFromToken(td) == mdtTypeDef);
-    _ASSERTE(TypeFromToken(tkExtends) == mdtTypeDef || TypeFromToken(tkExtends) == mdtTypeRef ||
+    _ASSERTE(TypeFromToken(tkExtends) == mdtTypeDef || TypeFromToken(tkExtends) == mdtTypeRef || TypeFromToken(tkExtends) == mdtTypeSpec ||
                 IsNilToken(tkExtends) || tkExtends == ULONG_MAX);
 
     // Get the record.
@@ -3057,7 +3145,7 @@ ErrExit:
 // pre-existing records for the owning class.
 //******************************************************************************
 HRESULT RegMeta::_SetImplements(        // S_OK or error.
-    mdToken     rTk[],                  // Array of TypeRef or TypeDef tokens for implemented interfaces.
+    mdToken     rTk[],                  // Array of TypeRef or TypeDef or TypeSpec tokens for implemented interfaces.
     mdTypeDef   td,                     // Implementing TypeDef.
     BOOL        bClear)                 // Specifies whether to clear the existing records.
 {
@@ -3101,7 +3189,8 @@ HRESULT RegMeta::_SetImplements(        // S_OK or error.
     // Loop for each implemented interface.
     while (!IsNilToken(pTk[i]))
     {
-        _ASSERTE(TypeFromToken(pTk[i]) == mdtTypeRef || TypeFromToken(pTk[i]) == mdtTypeDef);
+        _ASSERTE(TypeFromToken(pTk[i]) == mdtTypeRef || TypeFromToken(pTk[i]) == mdtTypeDef
+               || TypeFromToken(pTk[i]) == mdtTypeSpec);
 
         // Create the interface implementation record.
         IfNullGo(pInterfaceImpl = m_pStgdb->m_MiniMd.AddInterfaceImplRecord(&iInterfaceImpl));
@@ -3121,12 +3210,75 @@ ErrExit:
 } // HRESULT RegMeta::_SetImplements()
 
 //******************************************************************************
+// Creates and sets a row in the GenericPar table.  Optionally clear
+// pre-existing records for the owning class.
+//******************************************************************************
+HRESULT RegMeta::_SetGenericPars(        // S_OK or error.
+    ULONG       ulNum,                  // Number of type parameters
+    mdToken     rtkConstraints[],       // Bounds on type parameters
+    LPCWSTR     wzNames[],              // Array of names for parameters.
+    mdToken     tk,                     // Generic TypeDef/MethodDef.
+    BOOL        bClear)                 // Specifies whether to clear the existing records.
+{
+    HRESULT     hr = S_OK;
+    ULONG       i = 0;
+    ULONG       j;
+    GenericParRec *pGenericPar;
+    RID         iGenericPar;
+    RID         ridStart;
+    RID         ridEnd;
+    CQuickBytes cqbTk;
+
+    _ASSERTE(TypeFromToken(tk) == mdtTypeDef || TypeFromToken(tk) == mdtMethodDef);
+    _ASSERTE(wzNames != NULL);
+
+    // Clear all exising GenericPar records by setting the parent to Nil.
+    if (bClear)
+    {
+        IfFailGo(m_pStgdb->m_MiniMd.GetGenericParsForToken(tk, &ridStart, &ridEnd));
+        for (j = ridStart; j < ridEnd; j++)
+        {
+            pGenericPar = m_pStgdb->m_MiniMd.getGenericPar(
+                                        m_pStgdb->m_MiniMd.GetGenericParRid(j));
+            _ASSERTE (tk == m_pStgdb->m_MiniMd.getOwnerOfGenericPar(pGenericPar));
+            IfFailGo(m_pStgdb->m_MiniMd.PutToken(TBL_GenericPar, GenericParRec::COL_Owner,
+                                                 pGenericPar, mdTypeDefNil));
+        }
+    }
+
+    // Loop for each type parameter.
+    for (i = 0; i < ulNum; i++)
+    {
+        // Create the formal type parameter record.
+        IfNullGo(pGenericPar = m_pStgdb->m_MiniMd.AddGenericParRecord(&iGenericPar));
+
+        // Set data.
+	pGenericPar->m_Number = (USHORT) i;
+
+        IfFailGo(m_pStgdb->m_MiniMd.PutToken(TBL_GenericPar, GenericParRec::COL_Owner,
+                                            pGenericPar, tk));
+        if (rtkConstraints && rtkConstraints[i])
+        {
+          IfFailGo(m_pStgdb->m_MiniMd.PutToken(TBL_GenericPar, GenericParRec::COL_Constraint,
+                                            pGenericPar, rtkConstraints[i]));
+        }
+        IfFailGo(m_pStgdb->m_MiniMd.PutStringW(TBL_GenericPar, GenericParRec::COL_Name, 
+                                            pGenericPar, wzNames[i]));
+
+        IfFailGo(UpdateENCLog(TokenFromRid(mdtGenericPar, iGenericPar)));
+    }
+ErrExit:
+    return hr;
+} // HRESULT RegMeta::_SetGenericPars()
+
+
+//******************************************************************************
 // This routine eliminates duplicates from the given list of InterfaceImpl tokens
 // to be defined.  It checks for duplicates against the database only if the
 // TypeDef for which these tokens are being defined is not a new one.
 //******************************************************************************
 HRESULT RegMeta::_InterfaceImplDupProc( // S_OK or error.
-    mdToken     rTk[],                  // Array of TypeRef or TypeDef tokens for implemented interfaces.
+    mdToken     rTk[],                  // Array of TypeRef or TypeDef or TypeSpec tokens for implemented interfaces.
     mdTypeDef   td,                     // Implementing TypeDef.
     CQuickBytes *pcqbTk)                // Quick Byte object for placing the array of unique tokens.
 {
@@ -3137,7 +3289,8 @@ HRESULT RegMeta::_InterfaceImplDupProc( // S_OK or error.
 
     while (!IsNilToken(rTk[i]))
     {
-        _ASSERTE(TypeFromToken(rTk[i]) == mdtTypeRef || TypeFromToken(rTk[i]) == mdtTypeDef);
+        _ASSERTE(TypeFromToken(rTk[i]) == mdtTypeRef || TypeFromToken(rTk[i]) == mdtTypeDef
+              || TypeFromToken(rTk[i]) == mdtTypeSpec);
         bDupFound = false;
 
         // Eliminate duplicates from the input list of tokens by looking within the list.
@@ -3188,7 +3341,7 @@ HRESULT RegMeta::_DefineEvent(          // Return hresult.
 
     _ASSERTE(TypeFromToken(td) == mdtTypeDef && td != mdTypeDefNil);
     _ASSERTE(IsNilToken(tkEventType) || TypeFromToken(tkEventType) == mdtTypeDef ||
-                TypeFromToken(tkEventType) == mdtTypeRef);
+                TypeFromToken(tkEventType) == mdtTypeRef || TypeFromToken(tkEventType) == mdtTypeSpec);
     _ASSERTE(szEvent && pmdEvent);
 
     if (CheckDups(MDDupEvent))
@@ -3717,8 +3870,8 @@ HRESULT RegMeta::_DefineTypeDef(        // S_OK or error.
     _ASSERTE(IsTdAutoLayout(dwTypeDefFlags) || IsTdSequentialLayout(dwTypeDefFlags) || IsTdExplicitLayout(dwTypeDefFlags));
 
     _ASSERTE(ptd);
-    _ASSERTE(TypeFromToken(tkExtends) == mdtTypeRef || TypeFromToken(tkExtends) == mdtTypeDef ||
-                IsNilToken(tkExtends));
+    _ASSERTE(TypeFromToken(tkExtends) == mdtTypeRef || TypeFromToken(tkExtends) == mdtTypeDef || TypeFromToken(tkExtends) == mdtTypeSpec
+              || IsNilToken(tkExtends));
     _ASSERTE(szTypeDef && *szTypeDef);
     _ASSERTE(IsNilToken(tdEncloser) || IsTdNested(dwTypeDefFlags));
 

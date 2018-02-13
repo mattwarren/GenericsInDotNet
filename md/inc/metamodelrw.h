@@ -8,6 +8,11 @@
 //    By using this software in any fashion, you are agreeing to be bound by the
 //    terms of this license.
 //   
+//    This file contains modifications of the base SSCLI software to support generic
+//    type definitions and generic methods,  THese modifications are for research
+//    purposes.  They do not commit Microsoft to the future support of these or
+//    any similar changes to the SSCLI or the .NET product.  -- 31st October, 2002.
+//   
 //    You must not remove this notice, or any other, from this software.
 //   
 // 
@@ -315,6 +320,8 @@ public:
     AddTblRecord(ManifestResource)
 
     AddTblRecord(NestedClass)
+	AddTblRecord(GenericPar)
+        AddTblRecord(MethodSpec)
 
     // Specialized AddXxxToYyy() functions.
     HRESULT AddMethodToTypeDef(RID td, RID md);
@@ -354,10 +361,15 @@ public:
     FORCEINLINE ULONG GetInterfaceImplRid(ULONG index) 
     { return GetRidFromVirtualSort(TBL_InterfaceImpl, index); }
 
-    // Index returned by GetDeclSecurityForToken. It could be index to VirtualSort table
-    // or directly to DeclSecurity
-    FORCEINLINE ULONG GetDeclSecurityRid(ULONG index) 
-    { return GetRidFromVirtualSort(TBL_DeclSecurity, index); }
+	// Index returned by GetGenericParForToken. It could be index to VirtualSort table
+	// or directly to GenericPar
+	FORCEINLINE ULONG GetGenericParRid(ULONG index) 
+	{ return GetRidFromVirtualSort(TBL_GenericPar, index); }
+
+	// Index returned by GetDeclSecurityForToken. It could be index to VirtualSort table
+	// or directly to DeclSecurity
+	FORCEINLINE ULONG GetDeclSecurityRid(ULONG index) 
+	{ return GetRidFromVirtualSort(TBL_DeclSecurity, index); }
 
     // Index returned by GetCustomAttributeForToken. It could be index to VirtualSort table
     // or directly to CustomAttribute
@@ -722,14 +734,21 @@ public:
         return LookUpTableByCol( RidFromToken(td), m_pVS[TBL_InterfaceImpl], pRidStart, pRidEnd);
     }
 
-    HRESULT GetDeclSecurityForToken(mdToken tk, RID *pRidStart, RID *pRidEnd = 0)
-    {
-        return LookUpTableByCol( 
-            encodeToken(RidFromToken(tk), TypeFromToken(tk), mdtHasDeclSecurity, lengthof(mdtHasDeclSecurity)), 
-            m_pVS[TBL_DeclSecurity], 
-            pRidStart, 
-            pRidEnd);
-    }
+	HRESULT	GetGenericParsForToken(mdToken tk, RID *pRidStart, RID *pRidEnd = 0)
+	{
+		return LookUpTableByCol( 
+                        encodeToken(RidFromToken(tk), TypeFromToken(tk), mdtTypeOrMethodDef, lengthof(mdtTypeOrMethodDef)), 
+                        m_pVS[TBL_GenericPar], pRidStart, pRidEnd);
+	}
+
+	HRESULT	GetDeclSecurityForToken(mdToken tk, RID *pRidStart, RID *pRidEnd = 0)
+	{
+		return LookUpTableByCol( 
+			encodeToken(RidFromToken(tk), TypeFromToken(tk), mdtHasDeclSecurity, lengthof(mdtHasDeclSecurity)), 
+			m_pVS[TBL_DeclSecurity], 
+			pRidStart, 
+			pRidEnd);
+	}
 
     HRESULT GetCustomAttributeForToken(mdToken tk, RID *pRidStart, RID *pRidEnd = 0)
     {
